@@ -30,6 +30,7 @@ class Event(str, Enum):
 
 TRANSITIONS: dict[tuple[State, Event], State] = {
     (State.INIT, Event.MESSAGE_RECEIVED): State.ROUTED,
+    (State.INIT, Event.RESET): State.INIT,
     (State.ROUTED, Event.SENSITIVE_DETECTED): State.SUSPENDED,
     (State.ROUTED, Event.NEEDS_HUMAN): State.SUSPENDED,
     (State.SUSPENDED, Event.HUMAN_APPROVED): State.EXECUTING,
