@@ -1,0 +1,11 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+  gateway:
+    build: .
+    ports: ["8080:8080"]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - ENV=dev
+    depends_on: [redis]
