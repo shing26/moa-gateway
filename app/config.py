@@ -1,15 +1,13 @@
-from pydantic_settings import BaseSettings
+from __future__ import annotations
 
-class Settings(BaseSettings):
-    env: str = "dev"
-    redis_url: str = "redis://localhost:6379/0"
-    router_llm_timeout_ms: int = 2000
-    micro_llm_timeout_ms: int = 1000
-    hitl_enabled: bool = False
 
-    class Config:
-        env_prefix = ""
-        case_sensitive = False
+class Settings:
+    def __init__(self) -> None:
+        self.env = "dev"
+        self.redis_url = "redis://localhost:6379/0"
+        self.router_llm_timeout_ms = 2000
+        self.micro_llm_timeout_ms = 1000
+        self.hitl_enabled = False
 
 
 settings = Settings()

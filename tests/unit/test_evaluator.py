@@ -1,3 +1,5 @@
+import pytest
+
 from app.evaluator.evaluator import RuleEvaluator, EvalResult
 
 

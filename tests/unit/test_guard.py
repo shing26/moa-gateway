@@ -1,3 +1,5 @@
+import pytest
+
 from app.guard.permission_guard import FailClosedPermissionGuard, GuardDecision
 
 
