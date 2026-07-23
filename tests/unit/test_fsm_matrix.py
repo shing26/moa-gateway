@@ -1,0 +1,25 @@
+import pytest
+
+from app.fsm.state_machine import (
+    Event,
+    InvalidStateTransitionException,
+    State,
+    next_state,
+)
+
+
+def test_adr_matrix():
+    assert next_state(State.INIT, Event.MESSAGE_RECEIVED) == State.ROUTED
+    assert next_state(State.ROUTED, Event.SENSITIVE_DETECTED) == State.SUSPENDED
+    assert next_state(State.SUSPENDED, Event.HUMAN_APPROVED) == State.EXECUTING
+    assert next_state(State.EXECUTING, Event.TASK_SUCCESS) == State.OUTPUT_READY
+    assert next_state(State.EXECUTING, Event.TASK_FAILED) == State.RETRY
+    assert next_state(State.RETRY, Event.TASK_SUCCESS) == State.OUTPUT_READY
+    assert next_state(State.RETRY, Event.TASK_FAILED) == State.SUSPENDED
+
+
+def test_adr_rejects_illegal_moves():
+    with pytest.raises(InvalidStateTransitionException):
+        next_state(State.INIT, Event.HUMAN_APPROVED)
+    with pytest.raises(InvalidStateTransitionException):
+        next_state(State.ROUTED, Event.TASK_SUCCESS)
