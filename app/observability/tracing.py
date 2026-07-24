@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -17,7 +16,7 @@ logger = logging.getLogger("moa.otel")
 @dataclass
 class TraceConfig:
     service_name: str = "moa-gateway"
-    otlp_endpoint: str = ""  # empty = disable OTLP, use console
+    otlp_endpoint: str = ""
     console_fallback: bool = True
 
 
@@ -39,16 +38,3 @@ def setup_tracing(config: TraceConfig | None = None) -> TracerProvider:
         logger.info("otel tracing disabled (no endpoint configured)")
     trace.set_tracer_provider(provider)
     return provider
-
-
-@contextlib.asynccontextmanager
-async def span(name: str, tracer: Any = None) -> Any:
-    if tracer is None:
-        tracer = trace.get_current_span()
-    span = tracer.start_as_current_span(name) if hasattr(tracer, "start_as_current_span") else tracer.start_span(name)
-    token = trace.use_span(span, end_on_exit=False)
-    try:
-        yield span
-    finally:
-        span.end()
-        trace.reset_span(token)

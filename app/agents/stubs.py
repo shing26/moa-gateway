@@ -29,60 +29,64 @@ def _build_envelope_context(envelope: AgentEnvelope, role_tag: str) -> str:
     return "\n\n".join(parts)
 
 
-class CoderAgent:
-    """Sub-agent focused on code generation and programming tasks."""
+async def _execute_with_prompt(
+    llm: LLMClient,
+    envelope: AgentEnvelope,
+    role_tag: str,
+    extra_instructions: str,
+    agent_name: str,
+) -> str:
+    override = (envelope.agent_local_slot or {}).get("system_prompt", "")
+    if override:
+        system = override
+    else:
+        system = _build_envelope_context(envelope, role_tag)
+        system += extra_instructions
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": envelope.user_raw_input},
+    ]
+    logger.info("%s execute trace=%s session=%s", agent_name, envelope.trace_id, envelope.session_id)
+    return await llm.chat(messages)
 
+
+class CoderAgent:
     def __init__(self, llm: LLMClient | None = None) -> None:
         self.llm = llm or _default_llm()
 
     async def execute(self, envelope: AgentEnvelope) -> str:
-        override = (envelope.agent_local_slot or {}).get("system_prompt", "")
-        if override:
-            system = override
-        else:
-            system = _build_envelope_context(envelope, "编程与代码")
-        system += (
-            "\n\n你是一个专业的编码助手。当你输出代码时，请确保:"
-            "\n- 代码正确、可运行、包含必要注释"
-            "\n- 优先使用 Python 3.12+ 特性"
-            "\n- 如果输出 JSON，确保是合法 JSON"
-            "\n- 不要包含 TODO/FIXME 标记"
+        return await _execute_with_prompt(
+            self.llm, envelope,
+            role_tag="编程与代码",
+            extra_instructions=(
+                "\n\n你是一个专业的编码助手。当你输出代码时，请确保:"
+                "\n- 代码正确、可运行、包含必要注释"
+                "\n- 优先使用 Python 3.12+ 特性"
+                "\n- 如果输出 JSON，确保是合法 JSON"
+                "\n- 不要包含 TODO/FIXME 标记"
+            ),
+            agent_name="coder_agent",
         )
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": envelope.user_raw_input},
-        ]
-        logger.info("coder_agent execute trace=%s session=%s", envelope.trace_id, envelope.session_id)
-        return await self.llm.chat(messages)
 
 
 class GeneralAgent:
-    """Sub-agent for general-purpose Q&A, reasoning, and summarization."""
-
     def __init__(self, llm: LLMClient | None = None) -> None:
         self.llm = llm or _default_llm()
 
     async def execute(self, envelope: AgentEnvelope) -> str:
-        override = (envelope.agent_local_slot or {}).get("system_prompt", "")
-        if override:
-            system = override
-        else:
-            system = _build_envelope_context(envelope, "通用问答与推理")
-        system += (
-            "\n\n你是一个通用助手。请遵循:"
-            "\n- 回答准确、简洁、有条理"
-            "\n- 如果涉及代码分析，请附上关键代码片段"
-            "\n- 如果输出 JSON，确保是合法 JSON"
-            "\n- 不要包含 TODO/FIXME 标记"
+        return await _execute_with_prompt(
+            self.llm, envelope,
+            role_tag="通用问答与推理",
+            extra_instructions=(
+                "\n\n你是一个通用助手。请遵循:"
+                "\n- 回答准确、简洁、有条理"
+                "\n- 如果涉及代码分析，请附上关键代码片段"
+                "\n- 如果输出 JSON，确保是合法 JSON"
+                "\n- 不要包含 TODO/FIXME 标记"
+            ),
+            agent_name="general_agent",
         )
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": envelope.user_raw_input},
-        ]
-        logger.info("general_agent execute trace=%s session=%s", envelope.trace_id, envelope.session_id)
-        return await self.llm.chat(messages)
 
 
-# Register default instances so AGENT_REGISTRY works without manual wiring.
 register_agent("coder", CoderAgent())
 register_agent("general", GeneralAgent())
