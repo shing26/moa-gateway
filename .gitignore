@@ -6,8 +6,8 @@ dist
 build
 .pytest_cache
 .env
-*
+/*
+!/*/
+!.gitignore
 !.env.template
-*.db
-*.sqlite
 cloudflared.exe

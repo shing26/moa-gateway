@@ -25,3 +25,12 @@
 - AsyncWal already persists logs to local WAL (memory + disk)
 - EsWriter can be configured later when ES is available
 - Log cleanup: set LOG_RETENTION_DAYS env var (default 90)
+
+
+## Resolution
+
+**Deferred**: ES integration is optional for v1.0 MVP
+- AsyncWal already persists logs to local WAL (memory + disk queue)
+- EsWriter available for ES when configured
+- Log retention: set LOG_RETENTION_DAYS env var
+- Ticket can be revisited when audit volume requires ES

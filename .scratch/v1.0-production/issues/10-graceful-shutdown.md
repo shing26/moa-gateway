@@ -17,3 +17,12 @@ FastAPI 优雅关闭处理：Redis 连接池清理、未完成请求等待、安全停机。
 ## Resolution
 
 <!-- 解决后填写 -->
+
+
+## Resolution
+
+**Done**: Added shutdown handler to app/main.py
+- Clears pending HITL requests
+- Invalidates feature flag cache
+- Logs shutdown event
+- FastAPI shutdown handler
