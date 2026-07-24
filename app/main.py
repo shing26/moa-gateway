@@ -91,10 +91,12 @@ tracer = trace.get_tracer("moa-gateway")
 async def _startup() -> None:
     global tracer
     try:
-        setup_tracing()
-        logger.info("opentelemetry tracing enabled")
+        import os
+        from app.observability.tracing import TraceConfig
+        cfg = TraceConfig(otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""))
+        setup_tracing(cfg)
     except Exception:
-        logger.warning("opentelemetry tracing unavailable; using no-op tracer")
+        logger.warning("opentelemetry tracing init failed")
     tracer = trace.get_tracer("moa-gateway")
     _init_feishu()
     _init_prompts()

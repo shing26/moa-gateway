@@ -16,3 +16,13 @@
 ## Resolution
 
 <!-- ½â¾öºóÌîÐ´ -->
+
+
+## Resolution
+
+**Done**: OTel now silent when no endpoint configured
+- Default: OTLP disabled (no noisy Transient error logs)
+- Enable: set OTEL_EXPORTER_OTLP_ENDPOINT=http://your-collector:4317
+- Config: app/observability/tracing.py (TraceConfig.otlp_endpoint)
+- Startup: app/main.py reads env var on boot
+- OTLP fallback: ConsoleSpanExporter when endpoint is unreachable
