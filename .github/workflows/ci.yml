@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install fastapi>=0.111 pydantic>=2.7 redis>=5.0 httpx>=0.27
+          pip install opentelemetry-api>=1.25 opentelemetry-sdk>=1.25
+          pip install pytest>=8.2 pytest-asyncio>=0.23
+
+      - name: Run tests
+        run: python -m pytest tests/unit -v
+
+      - name: Verify imports
+        run: python -c "import app.main; print('Import OK')"
