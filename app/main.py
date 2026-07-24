@@ -106,6 +106,19 @@ async def _startup() -> None:
 async def health() -> dict[str, str]:
     return {"status": "ok", "version": "0.1.0"}
 
+@app.delete("/api/v1/privacy/user/{user_id}")
+async def privacy_erase(user_id: str) -> JSONResponse:
+    """PIPL right to erasure. Deletes all stored data for a user."""
+    deleted = {}
+    try:
+        count = await _retriever._client.delete_by_metadata({"user_id": user_id})
+        deleted["vectordb"] = count
+    except Exception as e:
+        deleted["vectordb"] = str(e)
+    logger.info("privacy erase user=%s deleted=%s", user_id, deleted)
+    return JSONResponse({"user_id": user_id, "deleted": deleted, "status": "ok"})
+
+
 
 @app.post("/webhook/{channel}")
 async def webhook(channel: str, request: Request) -> JSONResponse:
