@@ -8,4 +8,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - ENV=dev
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-nvapi-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://integrate.api.nvidia.com/v1}
+      - LLM_MODEL=${LLM_MODEL:-meta/llama-3.1-70b-instruct}
     depends_on: [redis]

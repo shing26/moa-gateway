@@ -26,7 +26,7 @@ class LLMClient:
     def __init__(self, config: LLMConfig | None = None) -> None:
         self.config = config or LLMConfig()
         headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.config.api_key:
+        if self.config.api_key and self.config.api_key.strip():
             headers["Authorization"] = f"Bearer {self.config.api_key}"
         headers.update(self.config.extra_headers)
         self._client = httpx.AsyncClient(

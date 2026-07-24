@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 from opentelemetry import trace
 
 from app.agents.contract import AgentEnvelope, get_agent
+import app.agents.loader
 from app.channels.feishu import FeishuChannelAdapter, FeishuConfig
 from app.channels.feishu_cards import ApprovalCard, FeishuCardSender, parse_card_callback
 from app.config import settings
@@ -72,6 +73,13 @@ def _init_prompts() -> None:
 app = FastAPI(title="MoA Engine Gateway", version="0.1.0")
 app.add_middleware(FeatureFlagMiddleware, client=_flag_client)
 
+@app.exception_handler(Exception)
+async def _debug_exception_handler(request: Request, exc: Exception):
+    import traceback
+    tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    logger.error("unhandled exception: %s", "".join(tb))
+    return JSONResponse(status_code=500, content={"error": type(exc).__name__, "detail": str(exc)[:500]})
+
 router = IntentRouter()
 adapter = ResponseAdapter()
 evaluator = RuleEvaluator()
@@ -124,6 +132,10 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
         intent, fallback = await router.route(event.text)
         agent = get_agent(intent) or get_agent("general")
         agent_name = intent if agent else "general"
+        for name in ("coder", "general"):
+            if get_agent(name) is agent:
+                agent_name = name
+                break
         root_span.set_attribute("moa.intent", intent)
         root_span.set_attribute("moa.fallback", fallback)
 
@@ -182,15 +194,6 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
             )
             engine.store_hitl(event.session_id, hitl_request)
 
-            hitl_event = MoAEvent(
-                trace_id=trace_id,
-                event=FsmEvent.NEEDS_HUMAN,
-                session_id=event.session_id,
-                text=event.text,
-                context={"source": "guard", "channel": channel},
-            )
-            session_state = await engine.handle_event(hitl_event)
-
             if _card_sender:
                 card = ApprovalCard(
                     session_id=event.session_id,
@@ -205,7 +208,7 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
 
             return JSONResponse({
                 "trace_id": trace_id,
-                "state": session_state.context.state.value,
+                "state": "SUSPENDED",
                 "intent": intent,
                 "status": "pending_review",
                 "message": "Output requires human approval before delivery",

@@ -39,6 +39,7 @@ class GuardService:
         hitl_enabled: bool = True,
     ) -> GuardVerdict:
         role = resolve_role(payload)
+        import logging; logging.getLogger("moa.guard.service").warning("evaluate agent=%s intent=%s role=%s hitl=%s", agent_name, intent, role.value if role else None, hitl_enabled)
         logger.debug("guard evaluate agent=%s intent=%s role=%s", agent_name, intent, role.value)
 
         # 1. Deny: sensitive intents with insufficient role
