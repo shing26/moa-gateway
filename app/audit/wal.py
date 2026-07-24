@@ -12,9 +12,6 @@ from app.audit.models import AuditEntry
 
 logger = logging.getLogger("moa.audit.wal")
 
-# 1 GB in bytes
-_MAX_WAL_BYTES = 1 * 1024 * 1024 * 1024
-
 
 @dataclass
 class AsyncWal:
@@ -27,13 +24,17 @@ class AsyncWal:
 
     _buffer: deque[AuditEntry] = field(default_factory=lambda: deque(maxlen=100_000))
     _disk_path: str = ""
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _lock: threading.RLock = field(default_factory=threading.RLock)
+    _max_bytes: int = 1 * 1024 * 1024 * 1024  # 1 GB
 
     def set_disk_path(self, path: str) -> None:
         self._disk_path = path
 
     async def append(self, entry: AuditEntry) -> None:
         with self._lock:
+            if self.estimated_bytes >= self._max_bytes:
+                logger.warning("wal byte limit reached, dropping oldest entry")
+                self._buffer.popleft()
             self._buffer.append(entry)
             if self._disk_path:
                 self._write_disk(entry)

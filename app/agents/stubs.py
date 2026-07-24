@@ -36,7 +36,11 @@ class CoderAgent:
         self.llm = llm or _default_llm()
 
     async def execute(self, envelope: AgentEnvelope) -> str:
-        system = _build_envelope_context(envelope, "编程与代码")
+        override = (envelope.agent_local_slot or {}).get("system_prompt", "")
+        if override:
+            system = override
+        else:
+            system = _build_envelope_context(envelope, "编程与代码")
         system += (
             "\n\n你是一个专业的编码助手。当你输出代码时，请确保:"
             "\n- 代码正确、可运行、包含必要注释"
@@ -59,7 +63,11 @@ class GeneralAgent:
         self.llm = llm or _default_llm()
 
     async def execute(self, envelope: AgentEnvelope) -> str:
-        system = _build_envelope_context(envelope, "通用问答与推理")
+        override = (envelope.agent_local_slot or {}).get("system_prompt", "")
+        if override:
+            system = override
+        else:
+            system = _build_envelope_context(envelope, "通用问答与推理")
         system += (
             "\n\n你是一个通用助手。请遵循:"
             "\n- 回答准确、简洁、有条理"

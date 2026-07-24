@@ -48,7 +48,7 @@ class EsWriter:
 
     async def _send_batch(self, entries: list[AuditEntry]) -> bool:
         if not self.config.hosts:
-            return self._fallback_wal(entries)
+            return await self._fallback_wal(entries)
 
         try:
             body = self._build_bulk_body(entries)
@@ -60,19 +60,17 @@ class EsWriter:
             data = resp.json()
             if data.get("errors"):
                 logger.error("es bulk returned errors: %s", data)
-                return self._fallback_wal(entries)
+                return await self._fallback_wal(entries)
             logger.info("es bulk wrote %d entries", len(entries))
             return True
         except Exception as exc:
             logger.warning("es write failed, falling back to wal: %s", exc)
-            return self._fallback_wal(entries)
+            return await self._fallback_wal(entries)
 
-    def _fallback_wal(self, entries: list[AuditEntry]) -> bool:
-        import asyncio
+    async def _fallback_wal(self, entries: list[AuditEntry]) -> bool:
         try:
-            loop = asyncio.get_event_loop()
             for entry in entries:
-                loop.run_until_complete(self.wal.append(entry))
+                await self.wal.append(entry)
             return True
         except Exception:
             return False

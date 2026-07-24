@@ -8,8 +8,14 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
+
+try:
+    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+    _HAS_OTLP = True
+except ImportError:
+    OTLPSpanExporter = None  # type: ignore
+    _HAS_OTLP = False
 
 logger = logging.getLogger("moa.otel")
 
@@ -24,7 +30,12 @@ class TraceConfig:
 def setup_tracing(config: TraceConfig | None = None) -> TracerProvider:
     cfg = config or TraceConfig()
     provider = TracerProvider(resource=Resource.create({"service.name": cfg.service_name}))
-    exporter = OTLPSpanExporter(endpoint=cfg.otlp_endpoint, insecure=True)
+    if not _HAS_OTLP:
+        logger.warning("opentelemetry-exporter-otlp-proto-grpc not installed; using console exporter")
+        from opentelemetry.sdk.trace.export import ConsoleSpanExporter
+        exporter: Any = ConsoleSpanExporter()
+    else:
+        exporter = OTLPSpanExporter(endpoint=cfg.otlp_endpoint, insecure=True)  # type: ignore
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     trace.set_tracer_provider(provider)
     logger.info("otel tracing initialized: %s -> %s", cfg.service_name, cfg.otlp_endpoint)

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import os
@@ -14,20 +14,29 @@ from app.channels.feishu_cards import ApprovalCard, FeishuCardSender, parse_card
 from app.config import settings
 from app.engine import Engine, HitlRequest
 from app.evaluator.evaluator import RuleEvaluator
+from app.feature_flags import DEFAULT_FLAGS, FeatureFlagClient
 from app.fsm.state_machine import Event as FsmEvent
 from app.guard.guard_service import GuardianAction, GuardService, guard_service
 from app.guard.permission_guard import FailClosedPermissionGuard
+from app.middleware.flags import FeatureFlagMiddleware
 from app.models.events import MoAEvent, PlatformEvent, new_trace_id
 from app.observability.tracing import setup_tracing
 from app.outbound.adapter import ResponseAdapter, OutboundResponse
+from app.prompt_registry import PromptEntry, PromptRegistry
+from app.prompt_registry.canary import CanaryConfig, select_canary_version
 from app.router.intent_router import IntentRouter
+from app.vectordb import VectorDBClient
+from app.vectordb.retriever import ContextRetriever
 
 logger = logging.getLogger("moa.gateway")
 tracer: trace.Tracer
 
-# ---- HITL infrastructure ----
+# ---- Shared infrastructure ----
 _feishu_config: FeishuConfig | None = None
 _card_sender: FeishuCardSender | None = None
+_flag_client = FeatureFlagClient()
+_prompt_registry = PromptRegistry()
+_retriever = ContextRetriever(VectorDBClient())
 
 
 def _init_feishu() -> None:
@@ -42,6 +51,34 @@ def _init_feishu() -> None:
         logger.warning("FEISHU_APP_ID / FEISHU_APP_SECRET not set; HITL cards disabled")
 
 
+def _init_prompts() -> None:
+    _prompt_registry.register(PromptEntry(
+        agent_name="coder", version="default",
+        system_prompt="You are a professional coding assistant.",
+        metadata={"author": "system"},
+    ))
+    _prompt_registry.register(PromptEntry(
+        agent_name="general", version="default",
+        system_prompt="You are a general-purpose assistant.",
+        metadata={"author": "system"},
+    ))
+    _prompt_registry.set_active("coder", "default")
+    _prompt_registry.set_active("general", "default")
+    _flag_client.seed(DEFAULT_FLAGS)
+    logger.info("prompt registry initialized with defaults")
+
+
+
+app = FastAPI(title="MoA Engine Gateway", version="0.1.0")
+app.add_middleware(FeatureFlagMiddleware, client=_flag_client)
+
+router = IntentRouter()
+adapter = ResponseAdapter()
+evaluator = RuleEvaluator()
+permission_guard = FailClosedPermissionGuard()
+engine = Engine(router=router, adapter=adapter)
+tracer = trace.get_tracer("moa-gateway")
+
 @app.on_event("startup")
 async def _startup() -> None:
     global tracer
@@ -52,16 +89,9 @@ async def _startup() -> None:
         logger.warning("opentelemetry tracing unavailable; using no-op tracer")
     tracer = trace.get_tracer("moa-gateway")
     _init_feishu()
+    _init_prompts()
 
 
-app = FastAPI(title="MoA Engine Gateway", version="0.1.0")
-
-router = IntentRouter()
-adapter = ResponseAdapter()
-evaluator = RuleEvaluator()
-permission_guard = FailClosedPermissionGuard()
-engine = Engine(router=router, adapter=adapter)
-tracer = trace.get_tracer("moa-gateway")
 
 
 @app.get("/health")
@@ -90,19 +120,39 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
             session_state = await engine.handle_event(event)
             fsm_span.set_attribute("moa.state", session_state.context.state.value)
 
-        # Route intent and execute the appropriate agent.
+        # Route intent and select agent.
         intent, fallback = await router.route(event.text)
         agent = get_agent(intent) or get_agent("general")
         agent_name = intent if agent else "general"
         root_span.set_attribute("moa.intent", intent)
         root_span.set_attribute("moa.fallback", fallback)
 
+        # Retrieve relevant context from vector store.
+        retrieval = await _retriever.retrieve(event.text, session_id=event.session_id)
+
+        # Select prompt version via canary.
+        canary_enabled = await _flag_client.get("canary.enabled", False)
+        canary_pct = await _flag_client.get("canary.traffic_pct", 10)
+        canary_config = CanaryConfig(
+            enabled=bool(canary_enabled),
+            traffic_pct=int(canary_pct),
+        )
+        selected_prompt, selected_version = select_canary_version(
+            event.session_id, _prompt_registry, agent_name, canary_config,
+        )
+        root_span.set_attribute("moa.prompt_version", selected_version)
+
         envelope = AgentEnvelope(
             trace_id=trace_id,
             session_id=event.session_id,
             user_raw_input=event.text,
-            global_summary="",
-            agent_local_slot={"intent": intent, "resource": intent},
+            global_summary=retrieval.context,
+            agent_local_slot={
+                "intent": intent,
+                "resource": intent,
+                "prompt_version": selected_version,
+                "system_prompt": selected_prompt.system_prompt if selected_prompt else "",
+            },
         )
 
         with tracer.start_as_current_span("moa.agent.execute") as agent_span:
@@ -120,7 +170,6 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
         root_span.set_attribute("moa.guard.action", verdict.action.value)
         root_span.set_attribute("moa.guard.reason", verdict.reason)
 
-        # Handle REVIEW: trigger HITL approval flow.
         if verdict.action == GuardianAction.REVIEW:
             hitl_request = HitlRequest(
                 session_id=event.session_id,
@@ -133,7 +182,6 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
             )
             engine.store_hitl(event.session_id, hitl_request)
 
-            # Transition to SUSPENDED.
             hitl_event = MoAEvent(
                 trace_id=trace_id,
                 event=FsmEvent.NEEDS_HUMAN,
@@ -143,7 +191,6 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
             )
             session_state = await engine.handle_event(hitl_event)
 
-            # Send approval card if Feishu card sender is configured.
             if _card_sender:
                 card = ApprovalCard(
                     session_id=event.session_id,
@@ -156,30 +203,25 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
                 )
                 await _card_sender.send_card(card)
 
-            return JSONResponse(
-                {
-                    "trace_id": trace_id,
-                    "state": session_state.context.state.value,
-                    "intent": intent,
-                    "status": "pending_review",
-                    "message": "Output requires human approval before delivery",
-                }
-            )
+            return JSONResponse({
+                "trace_id": trace_id,
+                "state": session_state.context.state.value,
+                "intent": intent,
+                "status": "pending_review",
+                "message": "Output requires human approval before delivery",
+            })
 
-        # Handle DENY: block the output.
         if verdict.action == GuardianAction.DENY:
             root_span.set_attribute("moa.guard.blocked", True)
-            return JSONResponse(
-                {
-                    "trace_id": trace_id,
-                    "state": session_state.context.state.value,
-                    "intent": intent,
-                    "status": "blocked",
-                    "message": verdict.reason,
-                }
-            )
+            return JSONResponse({
+                "trace_id": trace_id,
+                "state": session_state.context.state.value,
+                "intent": intent,
+                "status": "blocked",
+                "message": verdict.reason,
+            })
 
-        # ALLOW: proceed with normal flow.
+        # ALLOW: proceed.
         with tracer.start_as_current_span("moa.guard.legacy_check") as legacy_span:
             legacy = await permission_guard.check(agent_name, {})
             legacy_span.set_attribute("moa.guard.legacy_allowed", legacy.allowed)
@@ -187,20 +229,17 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
         with tracer.start_as_current_span("moa.adapter.adapt") as adapt_span:
             response = adapter.adapt(raw_output, channel=channel, target=platform_event.session_id)
 
-        return JSONResponse(
-            {
-                "trace_id": trace_id,
-                "state": session_state.context.state.value,
-                "intent": intent,
-                "text": response.text,
-                "need_human_review": eval_result.need_human_review or verdict.action != GuardianAction.ALLOW,
-            }
-        )
+        return JSONResponse({
+            "trace_id": trace_id,
+            "state": session_state.context.state.value,
+            "intent": intent,
+            "text": response.text,
+            "need_human_review": eval_result.need_human_review or verdict.action != GuardianAction.ALLOW,
+        })
 
 
 @app.post("/webhook/callback")
 async def webhook_callback(request: Request) -> JSONResponse:
-    """Callback endpoint for Feishu card action interactions (approve/reject)."""
     body = await request.json()
     parsed = parse_card_callback(body)
     if parsed is None:
