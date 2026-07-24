@@ -1,4 +1,4 @@
-import pytest
+﻿import pytest
 
 from app.fsm.state_machine import (
     Event,
@@ -23,3 +23,13 @@ def test_adr_rejects_illegal_moves():
         next_state(State.INIT, Event.HUMAN_APPROVED)
     with pytest.raises(InvalidStateTransitionException):
         next_state(State.ROUTED, Event.TASK_SUCCESS)
+
+
+def test_needs_human_transition():
+    assert next_state(State.ROUTED, Event.NEEDS_HUMAN) == State.SUSPENDED
+    assert next_state(State.SUSPENDED, Event.HUMAN_APPROVED) == State.EXECUTING
+    assert next_state(State.SUSPENDED, Event.HUMAN_REJECTED) == State.REJECTED
+
+
+def test_reset_from_init():
+    assert next_state(State.INIT, Event.RESET) == State.INIT

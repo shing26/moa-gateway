@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -8,20 +9,41 @@ from fastapi.responses import JSONResponse
 from opentelemetry import trace
 
 from app.agents.contract import AgentEnvelope, get_agent
+from app.channels.feishu import FeishuChannelAdapter, FeishuConfig
+from app.channels.feishu_cards import ApprovalCard, FeishuCardSender, parse_card_callback
 from app.config import settings
-from app.engine import Engine
+from app.engine import Engine, HitlRequest
 from app.evaluator.evaluator import RuleEvaluator
+from app.fsm.state_machine import Event as FsmEvent
+from app.guard.guard_service import GuardianAction, GuardService, guard_service
 from app.guard.permission_guard import FailClosedPermissionGuard
 from app.models.events import MoAEvent, PlatformEvent, new_trace_id
 from app.observability.tracing import setup_tracing
 from app.outbound.adapter import ResponseAdapter, OutboundResponse
 from app.router.intent_router import IntentRouter
 
+logger = logging.getLogger("moa.gateway")
 tracer: trace.Tracer
+
+# ---- HITL infrastructure ----
+_feishu_config: FeishuConfig | None = None
+_card_sender: FeishuCardSender | None = None
+
+
+def _init_feishu() -> None:
+    global _feishu_config, _card_sender
+    app_id = os.environ.get("FEISHU_APP_ID", "")
+    app_secret = os.environ.get("FEISHU_APP_SECRET", "")
+    if app_id and app_secret:
+        _feishu_config = FeishuConfig(app_id=app_id, app_secret=app_secret)
+        _card_sender = FeishuCardSender(_feishu_config)
+        logger.info("feishu card sender initialized")
+    else:
+        logger.warning("FEISHU_APP_ID / FEISHU_APP_SECRET not set; HITL cards disabled")
 
 
 @app.on_event("startup")
-async def _init_tracing() -> None:
+async def _startup() -> None:
     global tracer
     try:
         setup_tracing()
@@ -29,14 +51,15 @@ async def _init_tracing() -> None:
     except Exception:
         logger.warning("opentelemetry tracing unavailable; using no-op tracer")
     tracer = trace.get_tracer("moa-gateway")
+    _init_feishu()
 
-logger = logging.getLogger("moa.gateway")
+
 app = FastAPI(title="MoA Engine Gateway", version="0.1.0")
 
 router = IntentRouter()
 adapter = ResponseAdapter()
 evaluator = RuleEvaluator()
-guard = FailClosedPermissionGuard()
+permission_guard = FailClosedPermissionGuard()
 engine = Engine(router=router, adapter=adapter)
 tracer = trace.get_tracer("moa-gateway")
 
@@ -79,7 +102,7 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
             session_id=event.session_id,
             user_raw_input=event.text,
             global_summary="",
-            agent_local_slot={},
+            agent_local_slot={"intent": intent, "resource": intent},
         )
 
         with tracer.start_as_current_span("moa.agent.execute") as agent_span:
@@ -91,9 +114,75 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
             eval_span.set_attribute("moa.eval.score", eval_result.score)
             eval_span.set_attribute("moa.eval.need_review", eval_result.need_human_review)
 
-        with tracer.start_as_current_span("moa.guard.check") as guard_span:
-            decision = await guard.check(agent_name, {})
-            guard_span.set_attribute("moa.guard.allowed", decision.allowed)
+        # Guard evaluation (three-level: ALLOW / REVIEW / DENY).
+        payload = {"intent": intent, "resource": intent, "role": os.environ.get("MOA_DEFAULT_ROLE", "operator")}
+        verdict = guard_service.evaluate(agent_name, intent, payload, hitl_enabled=settings.hitl_enabled)
+        root_span.set_attribute("moa.guard.action", verdict.action.value)
+        root_span.set_attribute("moa.guard.reason", verdict.reason)
+
+        # Handle REVIEW: trigger HITL approval flow.
+        if verdict.action == GuardianAction.REVIEW:
+            hitl_request = HitlRequest(
+                session_id=event.session_id,
+                trace_id=trace_id,
+                agent_output=raw_output,
+                intent=intent,
+                agent_name=agent_name,
+                channel=channel,
+                target=platform_event.session_id,
+            )
+            engine.store_hitl(event.session_id, hitl_request)
+
+            # Transition to SUSPENDED.
+            hitl_event = MoAEvent(
+                trace_id=trace_id,
+                event=FsmEvent.NEEDS_HUMAN,
+                session_id=event.session_id,
+                text=event.text,
+                context={"source": "guard", "channel": channel},
+            )
+            session_state = await engine.handle_event(hitl_event)
+
+            # Send approval card if Feishu card sender is configured.
+            if _card_sender:
+                card = ApprovalCard(
+                    session_id=event.session_id,
+                    trace_id=trace_id,
+                    agent_name=agent_name,
+                    intent=intent,
+                    agent_output=raw_output,
+                    channel=channel,
+                    target=platform_event.session_id,
+                )
+                await _card_sender.send_card(card)
+
+            return JSONResponse(
+                {
+                    "trace_id": trace_id,
+                    "state": session_state.context.state.value,
+                    "intent": intent,
+                    "status": "pending_review",
+                    "message": "Output requires human approval before delivery",
+                }
+            )
+
+        # Handle DENY: block the output.
+        if verdict.action == GuardianAction.DENY:
+            root_span.set_attribute("moa.guard.blocked", True)
+            return JSONResponse(
+                {
+                    "trace_id": trace_id,
+                    "state": session_state.context.state.value,
+                    "intent": intent,
+                    "status": "blocked",
+                    "message": verdict.reason,
+                }
+            )
+
+        # ALLOW: proceed with normal flow.
+        with tracer.start_as_current_span("moa.guard.legacy_check") as legacy_span:
+            legacy = await permission_guard.check(agent_name, {})
+            legacy_span.set_attribute("moa.guard.legacy_allowed", legacy.allowed)
 
         with tracer.start_as_current_span("moa.adapter.adapt") as adapt_span:
             response = adapter.adapt(raw_output, channel=channel, target=platform_event.session_id)
@@ -104,9 +193,60 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
                 "state": session_state.context.state.value,
                 "intent": intent,
                 "text": response.text,
-                "need_human_review": eval_result.need_human_review or not decision.allowed,
+                "need_human_review": eval_result.need_human_review or verdict.action != GuardianAction.ALLOW,
             }
         )
+
+
+@app.post("/webhook/callback")
+async def webhook_callback(request: Request) -> JSONResponse:
+    """Callback endpoint for Feishu card action interactions (approve/reject)."""
+    body = await request.json()
+    parsed = parse_card_callback(body)
+    if parsed is None:
+        logger.warning("unparseable card callback: %s", body)
+        return JSONResponse({"error": "invalid_callback_payload"}, status_code=400)
+
+    session_id, trace_id, action = parsed
+    logger.info("card callback session=%s action=%s", session_id, action)
+
+    hitl = engine.get_hitl(session_id)
+    if hitl is None:
+        logger.warning("hitl request not found for session=%s", session_id)
+        return JSONResponse({"error": "hitl_request_not_found"}, status_code=404)
+
+    if action == "approve":
+        fsm_event = FsmEvent.HUMAN_APPROVED
+    elif action == "reject":
+        fsm_event = FsmEvent.HUMAN_REJECTED
+    else:
+        return JSONResponse({"error": f"unknown_action:{action}"}, status_code=400)
+
+    moa_event = MoAEvent(
+        trace_id=trace_id,
+        event=fsm_event,
+        session_id=session_id,
+        text="",
+        context={"source": "feishu_card_callback", "action": action},
+    )
+    session_state = await engine.handle_event(moa_event)
+
+    if action == "approve":
+        engine.remove_hitl(session_id)
+        response = adapter.adapt(hitl.agent_output, channel=hitl.channel, target=hitl.target)
+        return JSONResponse({
+            "trace_id": trace_id,
+            "state": session_state.context.state.value,
+            "text": response.text,
+            "status": "approved",
+        })
+    else:
+        engine.remove_hitl(session_id)
+        return JSONResponse({
+            "trace_id": trace_id,
+            "state": session_state.context.state.value,
+            "status": "rejected",
+        })
 
 
 def _decode_platform(channel: str, body: dict[str, Any]) -> PlatformEvent:
@@ -120,10 +260,9 @@ def _decode_platform(channel: str, body: dict[str, Any]) -> PlatformEvent:
 
 
 def _map_event(platform_event: PlatformEvent):
-    from app.fsm.state_machine import Event
     text = (platform_event.payload.get("text") or "").lower()
-    if any(k in text for k in ("cancel", "\u53d6\u6d88", "reset", "\u91cd\u7f6e")):
-        return Event.RESET
-    if any(k in text for k in ("debug", "\u9519\u8bef", "\u62a5\u9519")):
-        return Event.SENSITIVE_DETECTED
-    return Event.MESSAGE_RECEIVED
+    if any(k in text for k in ("cancel", chr(21462)+chr(28040), "reset", chr(37325)+chr(32622))):
+        return FsmEvent.RESET
+    if any(k in text for k in ("debug", chr(38169)+chr(35823), chr(25253)+chr(38169))):
+        return FsmEvent.SENSITIVE_DETECTED
+    return FsmEvent.MESSAGE_RECEIVED

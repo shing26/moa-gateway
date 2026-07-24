@@ -21,10 +21,27 @@ class SessionState:
             self.state_stack = []
 
 
+@dataclass
+class HitlRequest:
+    """Payload stored while waiting for HITL approval."""
+    session_id: str
+    trace_id: str
+    agent_output: str
+    intent: str
+    agent_name: str
+    channel: str
+    target: str
+
+
 class Engine:
-    def __init__(self, router: Any = None, adapter: ResponseAdapter | None = None) -> None:
+    def __init__(
+        self,
+        router: Any = None,
+        adapter: ResponseAdapter | None = None,
+    ) -> None:
         self.router = router
         self.adapter = adapter or ResponseAdapter()
+        self._pending_hitl: dict[str, HitlRequest] = {}
 
     async def handle_event(self, event: MoAEvent) -> SessionState:
         ctx = StateContext(state=State.INIT, session_id=event.session_id, trace_id=event.trace_id, metadata=event.context)
@@ -41,7 +58,15 @@ class Engine:
         ctx.state = current
         if event.event == Event.SENSITIVE_DETECTED:
             state_stack = list(state_stack) + [current.value]
+        elif event.event == Event.NEEDS_HUMAN:
+            state_stack = list(state_stack) + [current.value]
+            ctx.metadata["hitl_pending"] = True
         elif event.event == Event.HUMAN_APPROVED:
+            ctx.metadata["hitl_pending"] = False
+            if state_stack:
+                state_stack = state_stack[:-1]
+        elif event.event == Event.HUMAN_REJECTED:
+            ctx.metadata["hitl_pending"] = False
             if state_stack:
                 state_stack = state_stack[:-1]
 
@@ -50,3 +75,14 @@ class Engine:
 
     async def respond(self, session_state: SessionState, text: str, *, channel: str, target: str) -> OutboundResponse:
         return self.adapter.adapt(text, channel=channel, target=target)
+
+    def store_hitl(self, session_id: str, request: HitlRequest) -> None:
+        self._pending_hitl[session_id] = request
+        logger.info("hitl stored session=%s intent=%s", session_id, request.intent)
+
+    def get_hitl(self, session_id: str) -> HitlRequest | None:
+        return self._pending_hitl.get(session_id)
+
+    def remove_hitl(self, session_id: str) -> None:
+        self._pending_hitl.pop(session_id, None)
+        logger.info("hitl resolved session=%s", session_id)
