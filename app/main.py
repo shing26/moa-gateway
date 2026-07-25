@@ -56,17 +56,17 @@ def _init_feishu() -> None:
 
 def _init_prompts() -> None:
     _prompt_registry.register(PromptEntry(
-        agent_name="coder", version="default",
+        agent_name="coder", version="stable",
         system_prompt="You are a professional coding assistant.",
         metadata={"author": "system"},
     ))
     _prompt_registry.register(PromptEntry(
-        agent_name="general", version="default",
+        agent_name="general", version="stable",
         system_prompt="You are a general-purpose assistant.",
         metadata={"author": "system"},
     ))
-    _prompt_registry.set_active("coder", "default")
-    _prompt_registry.set_active("general", "default")
+    _prompt_registry.set_active("coder", "stable")
+    _prompt_registry.set_active("general", "stable")
     _flag_client.seed(DEFAULT_FLAGS)
     logger.info("prompt registry initialized with defaults")
 
