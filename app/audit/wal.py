@@ -4,8 +4,11 @@ import json
 import logging
 import os
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from app.audit.models import AuditEntry
@@ -14,21 +17,44 @@ logger = logging.getLogger("moa.audit.wal")
 
 
 @dataclass
+class LogConfig:
+    directory: str = "logs"
+    retention_days: int = 90
+    file_prefix: str = "audit"
+
+
+@dataclass
 class AsyncWal:
-    """Local async write-ahead log with optional disk persistence.
-
-    - In-memory deque buffer (estimated max 1 GB raw text).
-    - Optional JSONL file on disk for crash recovery.
-    - Provides :meth:eplay for backfill when downstream recovers.
-    """
-
     _buffer: deque[AuditEntry] = field(default_factory=lambda: deque(maxlen=100_000))
-    _disk_path: str = ""
     _lock: threading.RLock = field(default_factory=threading.RLock)
-    _max_bytes: int = 1 * 1024 * 1024 * 1024  # 1 GB
+    _max_bytes: int = 1 * 1024 * 1024 * 1024
+    _config: LogConfig = field(default_factory=LogConfig)
 
-    def set_disk_path(self, path: str) -> None:
-        self._disk_path = path
+    def _log_path(self, dt: date | None = None) -> str:
+        if dt is None:
+            dt = date.today()
+        d = Path(self._config.directory)
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d / f"{self._config.file_prefix}-{dt.isoformat()}.jsonl")
+
+    def _cleanup_old_logs(self) -> None:
+        cutoff = date.today() - timedelta(days=self._config.retention_days)
+        d = Path(self._config.directory)
+        if not d.exists():
+            return
+        deleted = 0
+        for f in d.iterdir():
+            if f.name.startswith(self._config.file_prefix) and f.name.endswith(".jsonl"):
+                try:
+                    file_date_str = f.name[len(self._config.file_prefix) + 1:-6]
+                    file_date = date.fromisoformat(file_date_str)
+                    if file_date < cutoff:
+                        f.unlink()
+                        deleted += 1
+                except (ValueError, OSError):
+                    continue
+        if deleted:
+            logger.info("wal cleaned %d old log files", deleted)
 
     async def append(self, entry: AuditEntry) -> None:
         with self._lock:
@@ -36,8 +62,8 @@ class AsyncWal:
                 logger.warning("wal byte limit reached, dropping oldest entry")
                 self._buffer.popleft()
             self._buffer.append(entry)
-            if self._disk_path:
-                self._write_disk(entry)
+            path = self._log_path()
+            self._write_disk(entry, path)
         logger.debug("wal append trace=%s", entry.trace_id)
 
     async def replay(self, batch_size: int = 100) -> list[AuditEntry]:
@@ -63,7 +89,7 @@ class AsyncWal:
         with self._lock:
             return sum(len(e.agent_output) for e in self._buffer)
 
-    def _write_disk(self, entry: AuditEntry) -> None:
+    def _write_disk(self, entry: AuditEntry, path: str) -> None:
         try:
             line = json.dumps({
                 "trace_id": entry.trace_id,
@@ -72,14 +98,19 @@ class AsyncWal:
                 "intent": entry.intent,
                 "timestamp": entry.timestamp.isoformat(),
                 "agent_output_len": len(entry.agent_output),
+                "eval_score": entry.eval_score,
+                "eval_issues": list(entry.eval_issues),
+                "guard_action": entry.guard_action,
+                "guard_reason": entry.guard_reason,
             }, ensure_ascii=False)
-            with open(self._disk_path, "a", encoding="utf-8") as f:
+            with open(path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
         except OSError as exc:
             logger.error("wal disk write error: %s", exc)
+        self._cleanup_old_logs()
 
     def close(self) -> None:
         pass
 
 
-__all__ = ["AsyncWal", "AuditEntry"]
+__all__ = ["AsyncWal", "AuditEntry", "LogConfig"]
