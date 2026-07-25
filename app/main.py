@@ -99,6 +99,8 @@ async def _startup() -> None:
         setup_tracing(cfg)
     except Exception:
         logger.warning("opentelemetry tracing init failed")
+    _init_feishu()
+    _init_prompts()
     tracer = trace.get_tracer("moa-gateway")
 
 
@@ -107,8 +109,6 @@ async def _shutdown() -> None:
     logger.info("moa gateway shutting down")
     engine._pending_hitl.clear()
     _flag_client.invalidate()
-    _init_feishu()
-    _init_prompts()
 
 
 
