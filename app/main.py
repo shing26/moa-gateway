@@ -11,6 +11,7 @@ from opentelemetry import trace
 from app.agents.contract import AgentEnvelope, get_agent
 import app.agents.loader
 from app.channels.feishu import FeishuChannelAdapter, FeishuConfig
+from app.channels.feishu_auth import FeishuAuthConfig, FeishuTokenProvider
 from app.channels.feishu_cards import ApprovalCard, FeishuCardSender, parse_card_callback
 from app.config import settings
 from app.engine import Engine, HitlRequest
@@ -46,7 +47,8 @@ def _init_feishu() -> None:
     app_secret = os.environ.get("FEISHU_APP_SECRET", "")
     if app_id and app_secret:
         _feishu_config = FeishuConfig(app_id=app_id, app_secret=app_secret)
-        _card_sender = FeishuCardSender(_feishu_config)
+        auth_provider = FeishuTokenProvider(FeishuAuthConfig(app_id=app_id, app_secret=app_secret))
+        _card_sender = FeishuCardSender(auth_provider)
         logger.info("feishu card sender initialized")
     else:
         logger.warning("FEISHU_APP_ID / FEISHU_APP_SECRET not set; HITL cards disabled")

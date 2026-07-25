@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -7,15 +7,13 @@ from typing import Any
 
 import httpx
 
-from app.channels.feishu import FeishuConfig
+from app.channels.feishu_auth import FeishuTokenProvider
 
 logger = logging.getLogger("moa.channels.feishu_cards")
 
 
 @dataclass
 class ApprovalCard:
-    """A Feishu interactive card for HITL approval."""
-
     session_id: str
     trace_id: str
     agent_name: str
@@ -28,37 +26,29 @@ class ApprovalCard:
         return {
             "config": {"wide_screen_mode": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "MoA Engine — 人工审批请求"},
+                "title": {"tag": "plain_text", "content": "MoA Engine - 人工审批请求"},
                 "template": "orange",
             },
             "elements": [
-                {"tag": "markdown", "content": f"**Agent**: `{self.agent_name}`"},
-                {"tag": "markdown", "content": f"**Intent**: `{self.intent}`"},
-                {"tag": "markdown", "content": f"**Trace**: `{self.trace_id}`"},
+                {"tag": "markdown", "content": f"**Agent**: {self.agent_name}"},
+                {"tag": "markdown", "content": f"**Intent**: {self.intent}"},
+                {"tag": "markdown", "content": f"**Trace**: {self.trace_id}"},
                 {"tag": "hr"},
-                {"tag": "markdown", "content": f"**Agent Output**:\n```\n{self.agent_output[:2000]}\n```"},
+                {"tag": "markdown", "content": f"**Agent Output**:\n`\n{self.agent_output[:2000]}\n`"},
                 {"tag": "hr"},
                 {
                     "tag": "action",
                     "actions": [
                         {
                             "tag": "button",
-                            "text": {"tag": "plain_text", "content": "✅ 批准"},
-                            "value": {
-                                "action": "approve",
-                                "session_id": self.session_id,
-                                "trace_id": self.trace_id,
-                            },
+                            "text": {"tag": "plain_text", "content": "批准"},
+                            "value": {"action": "approve", "session_id": self.session_id, "trace_id": self.trace_id},
                             "type": "primary",
                         },
                         {
                             "tag": "button",
-                            "text": {"tag": "plain_text", "content": "❌ 拒绝"},
-                            "value": {
-                                "action": "reject",
-                                "session_id": self.session_id,
-                                "trace_id": self.trace_id,
-                            },
+                            "text": {"tag": "plain_text", "content": "拒绝"},
+                            "value": {"action": "reject", "session_id": self.session_id, "trace_id": self.trace_id},
                             "type": "danger",
                         },
                     ],
@@ -66,43 +56,23 @@ class ApprovalCard:
             ],
         }
 
-    def to_message_payload(self, tenant_access_token: str) -> dict[str, Any]:
+    def to_message_payload(self) -> dict[str, Any]:
         content = json.dumps(self.to_card_payload(), ensure_ascii=False)
-        return {
-            "receive_id": self.target,
-            "msg_type": "interactive",
-            "content": content,
-        }
+        return {"receive_id": self.target, "msg_type": "interactive", "content": content}
 
 
 class FeishuCardSender:
-    """Sends interactive approval cards via Feishu API."""
-
-    def __init__(self, config: FeishuConfig) -> None:
-        self.config = config
-        self._token: str | None = None
-
-    async def _ensure_token(self) -> str:
-        if self._token:
-            return self._token
-        url = f"{self.config.base_url}/auth/v3/tenant_access_token/internal"
-        payload = {"app_id": self.config.app_id, "app_secret": self.config.app_secret}
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("code") != 0:
-                raise RuntimeError(f"Feishu auth failed: {data}")
-            self._token = str(data["tenant_access_token"])
-            return self._token
+    def __init__(self, auth: FeishuTokenProvider, *, timeout: float = 10.0) -> None:
+        self._auth = auth
+        self.timeout = timeout
 
     async def send_card(self, card: ApprovalCard) -> bool:
         try:
-            token = await self._ensure_token()
-            payload = card.to_message_payload(token)
-            url = f"{self.config.base_url}/im/v1/messages"
+            token = await self._auth.get_token()
+            payload = card.to_message_payload()
+            url = f"{self._auth.config.base_url}/im/v1/messages"
             params = {"receive_id_type": "chat_id"}
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
                 resp = await client.post(
                     url,
                     json=payload,
@@ -120,21 +90,10 @@ class FeishuCardSender:
             logger.exception("feishu card send error: %s", exc)
             return False
 
-    def invalidate_token(self) -> None:
-        self._token = None
-
 
 def parse_card_callback(body: dict[str, Any]) -> tuple[str, str, str] | None:
-    """Extract (session_id, trace_id, action) from a Feishu card action callback.
-
-    Returns None if the callback doesn't contain card action data.
-    """
     try:
-        action_data = body.get("action", {})
-        value = action_data.get("value", {})
-        if not value:
-            # Some Feishu callback formats nest differently
-            value = body.get("value", {})
+        value = body.get("action", {}).get("value", {}) or body.get("value", {})
         session_id = value.get("session_id", "")
         trace_id = value.get("trace_id", "")
         action = value.get("action", "")

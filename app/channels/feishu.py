@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from app.channels.base import ChannelAdapter, ChannelMessage
+from app.channels.feishu_auth import FeishuTokenProvider
 
 logger = logging.getLogger("moa.channels.feishu")
 
@@ -19,15 +20,16 @@ class FeishuConfig:
 
 
 class FeishuChannelAdapter(ChannelAdapter):
-    def __init__(self, config: FeishuConfig, *, timeout: float = 10.0) -> None:
+    def __init__(self, config: FeishuConfig, *, auth: FeishuTokenProvider | None = None, timeout: float = 10.0) -> None:
         self.config = config
+        self._auth = auth or FeishuTokenProvider(config)
         self.timeout = timeout
 
     async def send(self, message: ChannelMessage) -> bool:
         if message.channel != "feishu":
             return False
         try:
-            token = await self._tenant_access_token()
+            token = await self._auth.get_token()
             url = f"{self.config.base_url}/im/v1/messages"
             params = {"receive_id_type": "chat_id"}
             payload = {
@@ -51,14 +53,3 @@ class FeishuChannelAdapter(ChannelAdapter):
         except Exception as exc:
             logger.exception("feishu send error: %s", exc)
             return False
-
-    async def _tenant_access_token(self) -> str:
-        url = f"{self.config.base_url}/auth/v3/tenant_access_token/internal"
-        payload = {"app_id": self.config.app_id, "app_secret": self.config.app_secret}
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.post(url, json=payload)
-            resp.raise_for_status()
-            data = resp.json()
-            if data.get("code") != 0:
-                raise RuntimeError(f"Feishu auth failed: {data}")
-            return str(data["tenant_access_token"])
