@@ -11,4 +11,20 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-nvapi-}
       - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://integrate.api.nvidia.com/v1}
       - LLM_MODEL=${LLM_MODEL:-meta/llama-3.1-70b-instruct}
-    depends_on: [redis]
+    depends_on:
+      - redis
+
+  omniroute:
+    image: diegosouzapw/omniroute:latest
+    profiles: ["base"]
+    ports:
+      - "20128:20128"
+      - "20129:20129"
+    environment:
+      - PORT=20128
+      - API_PORT=20129
+      - REDIS_URL=redis://redis:6379
+      - API_KEY_SECRET=${OMNIROUTE_API_KEY:-omniroute-dev-key}
+    depends_on:
+      - redis
+    restart: unless-stopped
