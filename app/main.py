@@ -19,6 +19,7 @@ from app.evaluator.evaluator import RuleEvaluator
 from app.feature_flags import DEFAULT_FLAGS, FeatureFlagClient
 from app.fsm.state_machine import Event as FsmEvent
 from app.guard.guard_service import GuardianAction, GuardService, guard_service
+from app.limit_providers.rate_limiter import rate_limiter
 from app.guard.permission_guard import FailClosedPermissionGuard
 from app.middleware.flags import FeatureFlagMiddleware
 from app.models.events import MoAEvent, PlatformEvent, new_trace_id
@@ -117,6 +118,30 @@ async def _shutdown() -> None:
 async def health() -> dict[str, str]:
     return {"status": "ok", "version": "0.1.0"}
 
+
+
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    checks = {}
+
+    redis_check = "unknown"
+    try:
+        from app.redis_state.store import RedisConfig, RedisStateStore
+        store = RedisStateStore(RedisConfig(url="redis://localhost:6379/0"))
+        client = await store.connect()
+        pong = await client.ping()
+        if pong:
+            redis_check = "fallback_memory" if store.is_fallback else "connected"
+        await store.close()
+    except Exception as e:
+        redis_check = "error: " + str(e)[:50]
+    checks["redis"] = redis_check
+
+    healthy_values = {"connected", "ok", "healthy", "fallback_memory"}
+    all_healthy = all(v in healthy_values for v in checks.values())
+    return {"status": "healthy" if all_healthy else "degraded", "checks": checks}
+
+
 @app.delete("/api/v1/privacy/user/{user_id}")
 async def privacy_erase(user_id: str) -> JSONResponse:
     """PIPL right to erasure. Deletes all stored data for a user."""
@@ -136,6 +161,10 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
     with tracer.start_as_current_span("moa.webhook.receive") as root_span:
         body = await request.json()
         platform_event = _decode_platform(channel, body)
+        rate_key = platform_event.session_id or platform_event.user_id or "anonymous"
+        allowed, remaining = await rate_limiter.check(rate_key)
+        if not allowed:
+            return JSONResponse({"error": "rate_limited", "message": "Too many requests. Try again later."}, status_code=429)
         trace_id = new_trace_id()
         root_span.set_attribute("moa.channel", channel)
         root_span.set_attribute("moa.trace_id", trace_id)
