@@ -21,6 +21,7 @@ from app.fsm.state_machine import Event as FsmEvent
 from app.guard.guard_service import GuardianAction, GuardService, guard_service
 from app.limit_providers.rate_limiter import rate_limiter
 from app.middleware.request_logger import log_request
+from app.routes.dashboard import router as dashboard_router
 from app.guard.permission_guard import FailClosedPermissionGuard
 from app.middleware.flags import FeatureFlagMiddleware
 from app.models.events import MoAEvent, PlatformEvent, new_trace_id
@@ -75,6 +76,7 @@ def _init_prompts() -> None:
 
 
 app = FastAPI(title="MoA Engine Gateway", version="0.1.0")
+app.include_router(dashboard_router)
 app.add_middleware(FeatureFlagMiddleware, client=_flag_client)
 
 @app.exception_handler(Exception)
