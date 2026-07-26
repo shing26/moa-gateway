@@ -124,7 +124,7 @@ async def health() -> dict[str, str]:
 
 
 @app.get("/healthz")
-async def healthz() -> dict[str, str]:
+async def healthz() -> dict[str, object]:
     checks = {}
 
     redis_check = "unknown"

@@ -11,7 +11,7 @@ from app.models.events import new_trace_id
 
 logger = logging.getLogger("moa.middleware.request_logger")
 
-_wal = AsyncWal(config=LogConfig(directory="logs", retention_days=90))
+_wal = AsyncWal(_config=LogConfig(directory="logs", retention_days=90))
 
 
 async def log_request(
