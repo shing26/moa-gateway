@@ -20,6 +20,7 @@ from app.feature_flags import DEFAULT_FLAGS, FeatureFlagClient
 from app.fsm.state_machine import Event as FsmEvent
 from app.guard.guard_service import GuardianAction, GuardService, guard_service
 from app.limit_providers.rate_limiter import rate_limiter
+from app.middleware.request_logger import log_request
 from app.guard.permission_guard import FailClosedPermissionGuard
 from app.middleware.flags import FeatureFlagMiddleware
 from app.models.events import MoAEvent, PlatformEvent, new_trace_id
@@ -164,6 +165,7 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
         rate_key = platform_event.session_id or platform_event.user_id or "anonymous"
         allowed, remaining = await rate_limiter.check(rate_key)
         if not allowed:
+            await log_request(request, 429, 0, rate_key, "", "", "denied")
             return JSONResponse({"error": "rate_limited", "message": "Too many requests. Try again later."}, status_code=429)
         trace_id = new_trace_id()
         root_span.set_attribute("moa.channel", channel)
