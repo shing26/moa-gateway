@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -22,7 +22,7 @@ class Permission:
         return self.action == action and self.resource == resource
 
 
-@dataclass(frozen=True)
+# @dataclass removed - breaks str(Enum) ==
 class GuardianAction(str, Enum):
     """Result of a guard evaluation."""
     ALLOW = "allow"
@@ -37,7 +37,7 @@ class GuardVerdict:
     role: Role | None = None
 
 
-# ── built-in permission sets ──────────────────────────────────────────
+# 鈹€鈹€ built-in permission sets 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 DEFAULT_ROLE_PERMISSIONS: dict[Role, set[Permission]] = {
     Role.VIEWER: {
@@ -78,3 +78,4 @@ def resolve_role(slot: dict[str, Any]) -> Role:
         return Role(raw.lower())
     except ValueError:
         return Role.VIEWER
+

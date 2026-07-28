@@ -14,7 +14,7 @@ logger = logging.getLogger("moa.channels.feishu_auth")
 class FeishuAuthConfig:
     app_id: str
     app_secret: str
-    base_url: str = "https://open.feishu.cn/open-api"
+    base_url: str = "https://open.feishu.cn/open-apis"
     token_ttl: float = 5400  # Feishu token 有效 2h，提前 10min 刷新
 
 

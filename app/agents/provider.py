@@ -14,7 +14,7 @@ class LLMConfig:
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o-mini"
-    timeout: float = 30.0
+    timeout: float = 120.0
     max_tokens: int = 4096
     temperature: float = 0.7
     extra_headers: dict[str, str] = field(default_factory=dict)
@@ -27,7 +27,7 @@ class LLMClient:
         self.config = config or LLMConfig()
         headers: dict[str, str] = {"Content-Type": "application/json"}
         if self.config.api_key and self.config.api_key.strip():
-            headers["Authorization"] = f"Bearer {self.config.api_key}"
+            headers["Authorization"] = f"Bearer {self.config.api_key.strip()}"
         headers.update(self.config.extra_headers)
         self._client = httpx.AsyncClient(
             base_url=self.config.base_url.rstrip("/"),
@@ -47,7 +47,7 @@ class LLMClient:
             "model": model or self.config.model,
             "messages": messages,
             "max_tokens": max_tokens or self.config.max_tokens,
-            "temperature": temperature if temperature is not None else self.config.temperature,
+            "temperature": temperature if temperature is not None else self.config.temperature,"stream": False,
         }
         logger.debug("llm request: model=%s messages=%d", payload["model"], len(messages))
         response = await self._client.post("/chat/completions", json=payload)

@@ -1,23 +1,18 @@
 ﻿from __future__ import annotations
-
-import logging
+import logging, json
 from dataclasses import dataclass
 from typing import Any
-
 import httpx
-
 from app.channels.base import ChannelAdapter, ChannelMessage
 from app.channels.feishu_auth import FeishuTokenProvider
 
 logger = logging.getLogger("moa.channels.feishu")
 
-
 @dataclass(frozen=True)
 class FeishuConfig:
     app_id: str
     app_secret: str
-    base_url: str = "https://open.feishu.cn/open-api"
-
+    base_url: str = "https://open.feishu.cn/open-apis"
 
 class FeishuChannelAdapter(ChannelAdapter):
     def __init__(self, config: FeishuConfig, *, auth: FeishuTokenProvider | None = None, timeout: float = 10.0) -> None:
@@ -35,19 +30,17 @@ class FeishuChannelAdapter(ChannelAdapter):
             payload = {
                 "receive_id": message.target,
                 "msg_type": "text",
-                "content": '{"text":"' + message.text.replace('"', '\\"') + '"}',
+                "content": json.dumps({"text": message.text}, ensure_ascii=False),
             }
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 resp = await client.post(
-                    url,
-                    json=payload,
-                    params=params,
+                    url, json=payload, params=params,
                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
                 )
                 resp.raise_for_status()
                 data = resp.json()
                 if data.get("code") != 0:
-                    logger.error("feishu send failed: %s", data)
+                    logger.error("feishu send failed: %s code=%s", data, data.get("code"))
                     return False
                 return True
         except Exception as exc:
