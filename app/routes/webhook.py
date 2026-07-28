@@ -14,7 +14,7 @@ from app.deps import (
     router, adapter, evaluator, engine,
     tracer, logger, init_feishu, init_prompts,
 )
-from app.engine import HitlRequest
+from app.engine import HitlRequest, SessionStore
 from app.fsm.state_machine import Event as FsmEvent
 from app.guard.guard_service import GuardianAction, guard_service
 from app.limit_providers.rate_limiter import rate_limiter
@@ -104,7 +104,7 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
                 session_id=event.session_id, trace_id=trace_id, agent_output=raw_output,
                 intent=intent, agent_name=agent_name, channel=channel, target=platform_event.session_id,
             )
-            engine.store_hitl(event.session_id, hitl_request)
+            engine.session_store.store_hitl(event.session_id, hitl_request)
             if _card_sender:
                 card = ApprovalCard(
                     session_id=event.session_id, trace_id=trace_id, agent_name=agent_name,
@@ -143,7 +143,7 @@ async def webhook_callback(request: Request) -> JSONResponse:
         return JSONResponse({"error": "invalid_callback_payload"}, status_code=400)
     session_id, trace_id, action = parsed
     logger.info("card callback session=%s action=%s", session_id, action)
-    hitl = engine.get_hitl(session_id)
+    hitl = engine.session_store.get_hitl(session_id)
     if hitl is None:
         logger.warning("hitl request not found for session=%s", session_id)
         return JSONResponse({"error": "hitl_request_not_found"}, status_code=404)
@@ -159,13 +159,13 @@ async def webhook_callback(request: Request) -> JSONResponse:
     )
     session_state = await engine.handle_event(moa_event)
     if action == "approve":
-        engine.remove_hitl(session_id)
+        engine.session_store.remove_hitl(session_id)
         response = adapter.adapt(hitl.agent_output, channel=hitl.channel, target=hitl.target)
         return JSONResponse({
             "trace_id": trace_id, "state": session_state.context.state.value, "text": response.text, "status": "approved",
         })
     else:
-        engine.remove_hitl(session_id)
+        engine.session_store.remove_hitl(session_id)
         return JSONResponse({
             "trace_id": trace_id, "state": session_state.context.state.value, "status": "rejected",
         })

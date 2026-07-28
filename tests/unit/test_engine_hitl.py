@@ -19,8 +19,8 @@ async def test_engine_stores_and_retrieves_hitl(engine: Engine):
         session_id="sess-1", trace_id="trace-1", agent_output="confidential data",
         intent="write_file", agent_name="coder", channel="feishu", target="chat_123",
     )
-    engine.store_hitl("sess-1", req)
-    retrieved = engine.get_hitl("sess-1")
+    engine.session_store.store_hitl("sess-1", req)
+    retrieved = engine.session_store.get_hitl("sess-1")
     assert retrieved is not None
     assert retrieved.agent_output == "confidential data"
 
@@ -31,14 +31,14 @@ async def test_engine_removes_hitl(engine: Engine):
         session_id="sess-2", trace_id="trace-2", agent_output="data",
         intent="assistant", agent_name="general", channel="feishu", target="chat_456",
     )
-    engine.store_hitl("sess-2", req)
-    engine.remove_hitl("sess-2")
-    assert engine.get_hitl("sess-2") is None
+    engine.session_store.store_hitl("sess-2", req)
+    engine.session_store.remove_hitl("sess-2")
+    assert engine.session_store.get_hitl("sess-2") is None
 
 
 @pytest.mark.asyncio
 async def test_engine_get_hitl_returns_none_for_unknown(engine: Engine):
-    assert engine.get_hitl("nonexistent") is None
+    assert engine.session_store.get_hitl("nonexistent") is None
 
 
 # ── FSM-level HITL state transitions ───────────────────────────────────

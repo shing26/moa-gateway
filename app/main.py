@@ -44,5 +44,5 @@ async def _startup() -> None:
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     logger.info("moa gateway shutting down")
-    engine._pending_hitl.clear()
+    engine.session_store.clear_all()
     _flag_client.invalidate()
