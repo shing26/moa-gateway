@@ -11,7 +11,7 @@ from app.channels.feishu_cards import ApprovalCard, parse_card_callback
 from app.config import settings
 from app.deps import (
     _card_sender, _flag_client, _prompt_registry, _retriever,
-    router, adapter, evaluator, permission_guard, engine,
+    router, adapter, evaluator, engine,
     tracer, logger, init_feishu, init_prompts,
 )
 from app.engine import HitlRequest
@@ -123,9 +123,6 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
                 "intent": intent, "status": "blocked", "message": verdict.reason,
             })
 
-        with tracer.start_as_current_span("moa.guard.legacy_check") as legacy_span:
-            legacy = await permission_guard.check(agent_name, {})
-            legacy_span.set_attribute("moa.guard.legacy_allowed", legacy.allowed)
 
         with tracer.start_as_current_span("moa.adapter.adapt") as adapt_span:
             response = adapter.adapt(raw_output, channel=channel, target=platform_event.session_id)

@@ -6,7 +6,7 @@ from app.engine import Engine
 from app.evaluator.evaluator import RuleEvaluator
 from app.feature_flags import DEFAULT_FLAGS, FeatureFlagClient
 from app.guard.guard_service import guard_service
-from app.guard.permission_guard import FailClosedPermissionGuard
+# from app.guard.permission_guard import FailClosedPermissionGuard
 from app.outbound.adapter import ResponseAdapter
 from app.prompt_registry import PromptEntry, PromptRegistry
 from app.router.intent_router import IntentRouter
@@ -30,7 +30,7 @@ _retriever = ContextRetriever(VectorDBClient())
 router = IntentRouter()
 adapter = ResponseAdapter()
 evaluator = RuleEvaluator()
-permission_guard = FailClosedPermissionGuard()
+# permission_guard = FailClosedPermissionGuard()  # removed: unused legacy guard
 engine = Engine(router=router, adapter=adapter)
 
 

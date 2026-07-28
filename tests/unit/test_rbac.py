@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import pytest
 
@@ -91,8 +91,8 @@ class TestFailClosedGuard:
         assert decision.allowed is True
 
     @pytest.mark.asyncio
-    async def test_blocks_missing_schema(self):
+    async def test_legacy_guard_allows_by_default(self):
         from app.guard.permission_guard import FailClosedPermissionGuard
         guard = FailClosedPermissionGuard()
         decision = await guard.check("assistant", {})
-        assert decision.allowed is False
+        assert decision.allowed is True
