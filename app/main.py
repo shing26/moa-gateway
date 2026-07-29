@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import logging, os
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -14,12 +14,14 @@ from app.routes.dashboard import router as dashboard_router
 from app.routes.feishu import router as feishu_router
 from app.routes.health import router as health_router
 from app.routes.webhook import webhook_router
+from app.routes.knowledge import router as knowledge_router
 
 app = FastAPI(title="MoA Engine Gateway", version="0.1.0")
 app.include_router(dashboard_router)
 app.include_router(feishu_router)
 app.include_router(health_router)
 app.include_router(webhook_router)
+app.include_router(knowledge_router)
 app.add_middleware(FeatureFlagMiddleware, client=_flag_client)
 
 @app.exception_handler(Exception)
