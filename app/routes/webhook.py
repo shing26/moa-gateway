@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import logging, os
 from typing import Any
 from fastapi import APIRouter, Request
@@ -10,6 +10,7 @@ import app.agents.loader
 from app.channels.feishu_cards import ApprovalCard, parse_card_callback
 from app.config import settings
 from app.deps import (
+    memory,
     _card_sender, _flag_client, _prompt_registry, _retriever,
     router, adapter, evaluator, engine,
     tracer, logger, init_feishu, init_prompts,
@@ -72,11 +73,13 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
         )
         root_span.set_attribute("moa.prompt_version", selected_version)
 
+        conversation_history = memory.get_history(event.session_id)
         envelope = AgentEnvelope(
             trace_id=trace_id,
             session_id=event.session_id,
             user_raw_input=event.text,
             global_summary=retrieval.context,
+            history=tuple(conversation_history),
             agent_local_slot={
                 "intent": intent,
                 "resource": intent,
@@ -127,6 +130,7 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
         with tracer.start_as_current_span("moa.adapter.adapt") as adapt_span:
             response = adapter.adapt(raw_output, channel=channel, target=platform_event.session_id)
 
+        memory.add(event.session_id, event.text, response.text)
         return JSONResponse({
             "trace_id": trace_id, "state": session_state.context.state.value,
             "intent": intent, "text": response.text,

@@ -11,6 +11,7 @@ class AgentEnvelope:
     user_raw_input: str
     global_summary: str
     agent_local_slot: dict[str, object]
+    history: tuple = ()
 
 
 class SubAgent(Protocol):

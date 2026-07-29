@@ -42,10 +42,12 @@ async def _execute_with_prompt(
     else:
         system = _build_envelope_context(envelope, role_tag)
         system += extra_instructions
+    history = list(envelope.history) if envelope.history else []
     messages = [
         {"role": "system", "content": system},
-        {"role": "user", "content": envelope.user_raw_input},
     ]
+    messages.extend(history)
+    messages.append({"role": "user", "content": envelope.user_raw_input})
     logger.info("%s execute trace=%s session=%s", agent_name, envelope.trace_id, envelope.session_id)
     return await llm.chat(messages)
 

@@ -1,4 +1,4 @@
-﻿from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 import json, logging, os
 from app.channels.feishu_event import parse_feishu_event

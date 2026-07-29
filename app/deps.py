@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import logging, os
 from opentelemetry import trace
 from app.config import settings
@@ -15,6 +15,7 @@ from app.vectordb.retriever import ContextRetriever
 from app.channels.feishu import FeishuChannelAdapter, FeishuConfig
 from app.channels.feishu_auth import FeishuAuthConfig, FeishuTokenProvider
 from app.channels.feishu_cards import FeishuCardSender
+from app.memory import ConversationMemory
 
 logger = logging.getLogger("moa.gateway")
 tracer: trace.Tracer = trace.get_tracer("moa-gateway")
@@ -28,6 +29,7 @@ _retriever = ContextRetriever(VectorDBClient())
 
 # Module-level singletons
 router = IntentRouter()
+memory = ConversationMemory()
 adapter = ResponseAdapter()
 evaluator = RuleEvaluator()
 # permission_guard = FailClosedPermissionGuard()  # removed: unused legacy guard
@@ -62,3 +64,9 @@ def init_prompts() -> None:
     _prompt_registry.set_active("general", "stable")
     _flag_client.seed(DEFAULT_FLAGS)
     logger.info("prompt registry initialized with defaults")
+_redis_store = None
+
+async def _close_redis():
+    global _redis_store
+    if _redis_store is not None:
+        await _redis_store.close()
