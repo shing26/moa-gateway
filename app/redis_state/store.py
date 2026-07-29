@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
@@ -73,6 +73,7 @@ class RedisStateStore:
                 self.config.url,
                 socket_timeout=self.config.socket_timeout,
                 decode_responses=self.config.decode_responses,
+                protocol=2,
             )
             await client.ping()
             logger.info("redis connected: %s", self.config.url)
