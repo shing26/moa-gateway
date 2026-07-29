@@ -16,6 +16,7 @@ from app.channels.feishu import FeishuChannelAdapter, FeishuConfig
 from app.channels.feishu_auth import FeishuAuthConfig, FeishuTokenProvider
 from app.channels.feishu_cards import FeishuCardSender
 from app.memory import ConversationMemory
+from app.command_mode import CommandMode, parse_command
 from app.knowledge import KnowledgeBase
 
 logger = logging.getLogger("moa.gateway")
@@ -32,6 +33,7 @@ _retriever = ContextRetriever(VectorDBClient())
 router = IntentRouter()
 memory = ConversationMemory()
 knowledge_base = KnowledgeBase(_retriever._client)
+command_mode = CommandMode()
 adapter = ResponseAdapter()
 evaluator = RuleEvaluator()
 # permission_guard = FailClosedPermissionGuard()  # removed: unused legacy guard

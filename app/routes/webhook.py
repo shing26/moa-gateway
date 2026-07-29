@@ -9,7 +9,9 @@ from app.agents.contract import AgentEnvelope, get_agent
 import app.agents.loader
 from app.channels.feishu_cards import ApprovalCard, parse_card_callback
 from app.config import settings
+from app.command_mode import MODES, parse_command
 from app.deps import (
+    command_mode,
     memory,
     _card_sender, _flag_client, _prompt_registry, _retriever,
     router, adapter, evaluator, engine,
@@ -53,7 +55,26 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
             session_state = await engine.handle_event(event)
             fsm_span.set_attribute("moa.state", session_state.context.state.value)
 
+        # Handle /commands
+        text = event.text.strip()
+        if text.startswith("/"):
+            parsed = parse_command(text)
+            if parsed:
+                cmd_key, label = parsed
+                if cmd_key in ("help", ""):
+                    help_text = "可用指令:\n/coding - 编程模式\n/translate - 翻译模式\n/search - 搜索模式\n/analyze - 分析模式\n/default - 默认模式"
+                    return JSONResponse({"text": help_text, "state": "ROUTED", "intent": "help"})
+                cmd_info = MODES.get(cmd_key, {})
+                command_mode.set(event.session_id, cmd_info.get("intent") or "")
+                mode_label = cmd_info.get("label", cmd_key)
+                return JSONResponse({"text": "已切换至 " + mode_label + " 模式", "state": "ROUTED", "intent": cmd_key})
+            return JSONResponse({"text": "未知指令，发送 /help 查看可用指令", "state": "ROUTED", "intent": "help"})
+
         intent, fallback = await router.route(event.text)
+        # Check for forced mode from /commands
+        forced = command_mode.get(event.session_id)
+        if forced:
+            intent = forced
         agent = get_agent(intent) or get_agent("general")
         agent_name = intent if agent else "general"
         for name in ("coder", "general"):
