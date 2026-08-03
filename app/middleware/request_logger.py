@@ -22,12 +22,16 @@ async def log_request(
     agent_name: str = "",
     intent: str = "",
     guard_action: str = "",
+    input_text: str = "",
+    output_text: str = "",
 ) -> None:
+    input_preview = input_text.strip()[:500]
+    output_preview = output_text.strip()[:2000]
     entry = AuditEntry(
         trace_id=new_trace_id(),
         session_id=session_id or "unknown",
         agent_name=agent_name,
-        agent_output="",
+        agent_output=output_preview,
         intent=intent or "unknown",
         eval_score=0.0,
         guard_action=guard_action,
@@ -36,6 +40,8 @@ async def log_request(
             "path": str(request.url) if hasattr(request, "url") else "",
             "status": status_code,
             "duration_ms": round(duration_ms, 1),
+            "input_preview": input_preview,
+            "output_preview": output_preview,
         },
     )
     await _wal.append(entry)

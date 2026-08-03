@@ -1,5 +1,5 @@
 from __future__ import annotations
-import logging, os
+import logging, os, time
 from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -31,6 +31,7 @@ webhook_router = APIRouter()
 
 @webhook_router.post("/webhook/{channel}")
 async def webhook(channel: str, request: Request) -> JSONResponse:
+    start = time.monotonic()
     with tracer.start_as_current_span("moa.webhook.receive") as root_span:
         body = await request.json()
         platform_event = _decode_platform(channel, body)
@@ -63,10 +64,19 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
                 cmd_key, label = parsed
                 if cmd_key in ("help", ""):
                     help_text = "可用指令:\n/coding - 编程模式\n/translate - 翻译模式\n/search - 搜索模式\n/analyze - 分析模式\n/default - 默认模式"
+                    await log_request(
+                        request, 200, (time.monotonic() - start) * 1000,
+                        event.session_id, "command", "help", "", event.text, help_text,
+                    )
                     return JSONResponse({"text": help_text, "state": "ROUTED", "intent": "help"})
                 cmd_info = MODES.get(cmd_key, {})
                 command_mode.set(event.session_id, cmd_info.get("intent") or "")
                 mode_label = cmd_info.get("label", cmd_key)
+                await log_request(
+                    request, 200, (time.monotonic() - start) * 1000,
+                    event.session_id, "command", cmd_key, "", event.text,
+                    "已切换至 " + mode_label + " 模式",
+                )
                 return JSONResponse({"text": "已切换至 " + mode_label + " 模式", "state": "ROUTED", "intent": cmd_key})
             return JSONResponse({"text": "未知指令，发送 /help 查看可用指令", "state": "ROUTED", "intent": "help"})
 
@@ -111,7 +121,15 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
 
         with tracer.start_as_current_span("moa.agent.execute") as agent_span:
             agent_span.set_attribute("moa.agent", agent_name)
-            raw_output = await agent.execute(envelope)
+            try:
+                raw_output = await agent.execute(envelope)
+            except Exception:
+                await log_request(
+                    request, 500, (time.monotonic() - start) * 1000,
+                    event.session_id, agent_name, intent, "error", event.text,
+                    "agent execution failed",
+                )
+                raise
 
         with tracer.start_as_current_span("moa.evaluator.score") as eval_span:
             eval_result = await evaluator.score(raw_output, intent)
@@ -135,6 +153,10 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
                     intent=intent, agent_output=raw_output, channel=channel, target=platform_event.session_id,
                 )
                 await _card_sender.send_card(card)
+            await log_request(
+                request, 200, (time.monotonic() - start) * 1000,
+                event.session_id, agent_name, intent, "review", event.text, raw_output,
+            )
             return JSONResponse({
                 "trace_id": trace_id, "state": "SUSPENDED", "intent": intent,
                 "status": "pending_review", "message": "Output requires human approval before delivery",
@@ -142,6 +164,10 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
 
         if verdict.action == GuardianAction.DENY:
             root_span.set_attribute("moa.guard.blocked", True)
+            await log_request(
+                request, 200, (time.monotonic() - start) * 1000,
+                event.session_id, agent_name, intent, "deny", event.text, verdict.reason,
+            )
             return JSONResponse({
                 "trace_id": trace_id, "state": session_state.context.state.value,
                 "intent": intent, "status": "blocked", "message": verdict.reason,
@@ -152,6 +178,10 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
             response = adapter.adapt(raw_output, channel=channel, target=platform_event.session_id)
 
         memory.add(event.session_id, event.text, response.text)
+        await log_request(
+            request, 200, (time.monotonic() - start) * 1000,
+            event.session_id, agent_name, intent, verdict.action.value, event.text, response.text,
+        )
         return JSONResponse({
             "trace_id": trace_id, "state": session_state.context.state.value,
             "intent": intent, "text": response.text,

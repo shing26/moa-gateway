@@ -52,13 +52,26 @@ async def _execute_with_prompt(
     return await llm.chat(messages)
 
 
+async def _execute_with_runtime_or_injected(
+    llm: LLMClient | None,
+    envelope: AgentEnvelope,
+    role_tag: str,
+    extra_instructions: str,
+    agent_name: str,
+) -> str:
+    if llm is not None:
+        return await _execute_with_prompt(llm, envelope, role_tag, extra_instructions, agent_name)
+    async with _default_llm() as client:
+        return await _execute_with_prompt(client, envelope, role_tag, extra_instructions, agent_name)
+
+
 class CoderAgent:
     def __init__(self, llm: LLMClient | None = None) -> None:
-        self.llm = llm or _default_llm()
+        self._llm = llm
 
     async def execute(self, envelope: AgentEnvelope) -> str:
-        return await _execute_with_prompt(
-            self.llm, envelope,
+        return await _execute_with_runtime_or_injected(
+            self._llm, envelope,
             role_tag="编程与代码",
             extra_instructions=(
                 "\n\n你是一个专业的编码助手。当你输出代码时，请确保:"
@@ -73,11 +86,11 @@ class CoderAgent:
 
 class GeneralAgent:
     def __init__(self, llm: LLMClient | None = None) -> None:
-        self.llm = llm or _default_llm()
+        self._llm = llm
 
     async def execute(self, envelope: AgentEnvelope) -> str:
-        return await _execute_with_prompt(
-            self.llm, envelope,
+        return await _execute_with_runtime_or_injected(
+            self._llm, envelope,
             role_tag="通用问答与推理",
             extra_instructions=(
                 "\n\n你是一个通用助手。请遵循:"

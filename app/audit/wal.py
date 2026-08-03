@@ -102,6 +102,10 @@ class AsyncWal:
                 "eval_issues": list(entry.eval_issues),
                 "guard_action": entry.guard_action,
                 "guard_reason": entry.guard_reason,
+                "input_preview": entry.extra.get("input_preview", ""),
+                "output_preview": entry.extra.get("output_preview", ""),
+                "status": entry.extra.get("status"),
+                "duration_ms": entry.extra.get("duration_ms"),
             }, ensure_ascii=False)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")

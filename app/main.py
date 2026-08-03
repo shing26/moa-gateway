@@ -1,12 +1,13 @@
 from __future__ import annotations
-import logging, os
+import logging, os, pathlib
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from opentelemetry import trace
 import app.agents.loader
 from app.deps import (
-    _flag_client, _card_sender, _feishu_config, engine, tracer,
-    logger, init_feishu, init_prompts,
+    _card_sender, _feishu_config, _flag_client, engine, logger,
+    init_feishu, init_prompts, obsidian_sync, tracer,
 )
 from app.observability.tracing import setup_tracing, TraceConfig
 from app.middleware.flags import FeatureFlagMiddleware
@@ -17,6 +18,8 @@ from app.routes.webhook import webhook_router
 from app.routes.knowledge import router as knowledge_router
 
 app = FastAPI(title="MoA Engine Gateway", version="0.1.0")
+STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
+app.mount("/dashboard/static", StaticFiles(directory=STATIC_DIR), name="dashboard-static")
 app.include_router(dashboard_router)
 app.include_router(feishu_router)
 app.include_router(health_router)
@@ -41,10 +44,12 @@ async def _startup() -> None:
         logger.warning("opentelemetry tracing init failed")
     init_feishu()
     init_prompts()
+    await obsidian_sync.start()
     tracer = trace.get_tracer("moa-gateway")
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     logger.info("moa gateway shutting down")
+    await obsidian_sync.close()
     engine.session_store.clear_all()
     _flag_client.invalidate()

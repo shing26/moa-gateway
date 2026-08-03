@@ -33,9 +33,11 @@ class KnowledgeBase:
         self._db = vector_db
         self._docs: dict[str, KnowledgeDoc] = {}
 
-    async def add_document(self, title: str, content: str) -> str:
-        doc_id = uuid.uuid4().hex[:12]
+    async def add_document(self, title: str, content: str, doc_id: str | None = None) -> str:
+        doc_id = doc_id or uuid.uuid4().hex[:12]
         chunks = chunk_text(content)
+        if doc_id in self._docs:
+            await self._db.delete_by_metadata({"doc_id": doc_id})
         doc = KnowledgeDoc(id=doc_id, title=title, content=content, chunks=chunks, created_at="")
         self._docs[doc_id] = doc
         for i, chunk in enumerate(chunks):
@@ -49,6 +51,18 @@ class KnowledgeBase:
 
     async def list_docs(self) -> list[dict]:
         return [{"id": d.id, "title": d.title, "chunks": len(d.chunks)} for d in self._docs.values()]
+
+    async def get_doc(self, doc_id: str) -> dict | None:
+        doc = self._docs.get(doc_id)
+        if doc is None:
+            return None
+        return {
+            "id": doc.id,
+            "title": doc.title,
+            "content": doc.content,
+            "chunks": doc.chunks,
+            "created_at": doc.created_at,
+        }
 
     async def delete_doc(self, doc_id: str) -> bool:
         if doc_id not in self._docs:

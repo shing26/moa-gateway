@@ -18,6 +18,7 @@ from app.channels.feishu_cards import FeishuCardSender
 from app.memory import ConversationMemory
 from app.command_mode import CommandMode, parse_command
 from app.knowledge import KnowledgeBase
+from app.obsidian_sync import ObsidianVaultSync
 
 logger = logging.getLogger("moa.gateway")
 tracer: trace.Tracer = trace.get_tracer("moa-gateway")
@@ -33,6 +34,7 @@ _retriever = ContextRetriever(VectorDBClient())
 router = IntentRouter()
 memory = ConversationMemory()
 knowledge_base = KnowledgeBase(_retriever._client)
+obsidian_sync = ObsidianVaultSync.from_env(knowledge_base=knowledge_base)
 command_mode = CommandMode()
 adapter = ResponseAdapter()
 evaluator = RuleEvaluator()

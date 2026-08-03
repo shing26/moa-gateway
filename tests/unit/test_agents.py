@@ -84,3 +84,46 @@ async def test_llm_client_handles_api_error() -> None:
 
     with pytest.raises(Exception, match="API error"):
         await client.chat([{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
+async def test_general_agent_uses_runtime_env(monkeypatch, envelope: AgentEnvelope) -> None:
+    import os
+
+    from app.agents.stubs import GeneralAgent
+
+    seen: list[str] = []
+
+    class FakeClient:
+        def __init__(self, config: LLMConfig) -> None:
+            self.config = config
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def chat(self, messages, **kwargs):
+            return self.config.model
+
+    def make_client():
+        model = os.environ.get("LLM_MODEL", "")
+        seen.append(model)
+        return FakeClient(LLMConfig(model=model))
+
+    monkeypatch.setattr("app.agents.stubs._default_llm", make_client)
+    saved = os.environ.get("LLM_MODEL")
+    try:
+        os.environ["LLM_MODEL"] = "runtime-model-a"
+        first = await GeneralAgent().execute(envelope)
+        os.environ["LLM_MODEL"] = "runtime-model-b"
+        second = await GeneralAgent().execute(envelope)
+        assert first == "runtime-model-a"
+        assert second == "runtime-model-b"
+        assert seen == ["runtime-model-a", "runtime-model-b"]
+    finally:
+        if saved is None:
+            os.environ.pop("LLM_MODEL", None)
+        else:
+            os.environ["LLM_MODEL"] = saved

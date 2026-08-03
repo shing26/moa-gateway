@@ -45,6 +45,16 @@ class ContextRetriever:
         logger.debug("retrieved %d chunks for query=%s session=%s", len(chunks), query[:50], session_id)
         return RetrievalResult(chunks=chunks, context=context, doc_count=len(chunks))
 
+    async def retrieve_knowledge(self, query: str, top_k: int = 5) -> RetrievalResult:
+        result = await self._client.search(
+            query,
+            top_k=top_k,
+            filter_metadata={"source": "knowledge"},
+        )
+        chunks = [doc.content for doc in result.documents]
+        context = "\n\n---\n\n".join(chunks)
+        return RetrievalResult(chunks=chunks, context=context, doc_count=len(chunks))
+
     async def store_session_context(
         self,
         session_id: str,

@@ -4,7 +4,8 @@ import tempfile
 import pytest
 
 from app.audit.models import AuditEntry
-from app.audit.wal import AsyncWal
+from app.audit.wal import AsyncWal, LogConfig
+from app.middleware.request_logger import log_request
 from app.vectordb import VectorDBClient, VectorDocument, VectorSearchResult
 from app.vectordb.retriever import ContextRetriever
 
@@ -57,6 +58,34 @@ class TestAsyncWal:
         wal = AsyncWal()
         assert await wal.replay_all() == []
 
+    @pytest.mark.asyncio
+    async def test_log_request_stores_input_output_previews(self, monkeypatch, tmp_path):
+        wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
+        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+
+        class FakeRequest:
+            method = "POST"
+            url = "http://test/webhook/feishu"
+
+        await log_request(
+            FakeRequest(), 200, 12.3, "s1", "general", "search", "allow",
+            "用户输入内容", "模型输出内容",
+        )
+        entries = await wal.replay_all()
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry.extra["input_preview"] == "用户输入内容"
+        assert entry.extra["output_preview"] == "模型输出内容"
+        assert entry.agent_output == "模型输出内容"
+
+        files = list(tmp_path.glob("audit-*.jsonl"))
+        assert files
+        line = files[0].read_text(encoding="utf-8")
+        assert "用户输入内容" in line
+        assert "模型输出内容" in line
+        assert '"status": 200' in line
+        assert '"duration_ms": 12.3' in line
+
 
 class TestVectorDBClient:
     @pytest.mark.asyncio
@@ -86,6 +115,16 @@ class TestVectorDBClient:
         result = await db.search("message", filter_metadata={"session_id": "s1"})
         assert len(result.documents) == 1
         assert result.documents[0].id == "d1"
+
+    @pytest.mark.asyncio
+    async def test_search_matches_chinese_bigrams(self):
+        db = VectorDBClient()
+        await db.upsert(VectorDocument(id="d1", content="MOA Gateway Redis config: redis://localhost:6379/0"))
+        await db.upsert(VectorDocument(id="d2", content="Python is a programming language"))
+        result = await db.search("MOA网关的Redis连接地址")
+        assert len(result.documents) == 1
+        assert result.documents[0].id == "d1"
+        assert result.documents[0].score > 0
 
     @pytest.mark.asyncio
     async def test_delete_by_metadata(self):
