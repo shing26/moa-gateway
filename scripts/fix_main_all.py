@@ -1,5 +1,6 @@
-import re,ast
-with open('D:/HermesData/moa-gateway/app/main.py',encoding='utf-8-sig') as f:c=f.read()
+import re,ast,pathlib
+MAIN=pathlib.Path(__file__).resolve().parents[1]/'app'/'main.py'
+with open(MAIN,encoding='utf-8-sig') as f:c=f.read()
 
 # 1. Add loader import
 c=c.replace('from app.agents.contract import AgentEnvelope, get_agent','from app.agents.contract import AgentEnvelope, get_agent
@@ -18,5 +19,5 @@ async def _debug_exception_handler(request: Request, exc: Exception):
     )
 ')
 
-with open('D:/HermesData/moa-gateway/app/main.py','w',encoding='utf-8') as f:f.write(c)
+with open(MAIN,'w',encoding='utf-8') as f:f.write(c)
 ast.parse(c);print('OK')

@@ -1,7 +1,7 @@
 # MoA Engine — 完整阶段计划
 
 > **当前基线**: `feat/v0.1-mvp`，16 tests passed，Stage 1 scaffolding 已完成  
-> **仓库**: `D:\HermesData\moa-gateway`  
+> **仓库**: `<repo-root>`  
 > **冻结约束**: 见 `NO_SUBSTITUTES.md`
 
 ---
@@ -234,7 +234,7 @@ Stage 2 唯一阻塞项：**真实 Redis 实例可用** (Docker / 本地 / 远�
 
 启动命令：
 ```bash
-cd D:\HermesData\moa-gateway
+cd <repo-root>
 docker compose -f docker-compose.dev.yml up -d redis
 ```
 

@@ -1,4 +1,7 @@
-﻿with open('D:/HermesData/moa-gateway/app/main.py', 'r', encoding='utf-8-sig') as f:
+import pathlib
+MAIN = pathlib.Path(__file__).resolve().parents[1] / "app" / "main.py"
+
+with open(MAIN, 'r', encoding='utf-8-sig') as f:
     c = f.read()
 
 c = c.replace(
@@ -29,7 +32,7 @@ new = (
 
 c = c.replace(old, new, 1)
 
-with open('D:/HermesData/moa-gateway/app/main.py', 'w', encoding='utf-8') as f:
+with open(MAIN, 'w', encoding='utf-8') as f:
     f.write(c)
 
 import ast

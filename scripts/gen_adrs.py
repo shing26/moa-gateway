@@ -1,5 +1,5 @@
-﻿import pathlib
-root = pathlib.Path('D:/HermesData/moa-gateway/docs/adr')
+import pathlib
+root = pathlib.Path(__file__).resolve().parents[1] / 'docs' / 'adr'
 
 adrs = {
     'adr-005-redis-ha.md': '''# ADR-005: Redis HA + Memory Fallback

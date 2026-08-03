@@ -1,5 +1,5 @@
 import pathlib,ast
-p=pathlib.Path('D:/HermesData/moa-gateway/app/main.py')
+p=pathlib.Path(__file__).resolve().parents[1]/'app'/'main.py'
 c=p.read_text(encoding='utf-8-sig')
 q=chr(34)
 i=c.find('from app.agents.contract import AgentEnvelope, get_agent')

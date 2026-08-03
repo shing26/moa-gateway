@@ -1,4 +1,7 @@
-﻿with open('D:/HermesData/moa-gateway/app/router/intent_router.py', 'r', encoding='utf-8-sig') as f:
+import pathlib
+TARGET = pathlib.Path(__file__).resolve().parents[1] / "app" / "router" / "intent_router.py"
+
+with open(TARGET, 'r', encoding='utf-8-sig') as f:
     c = f.read()
 
 old = '''self._regex_map = [
@@ -21,7 +24,7 @@ new = '''self._regex_map = [
 
 c = c.replace(old, new, 1)
 
-with open('D:/HermesData/moa-gateway/app/router/intent_router.py', 'w', encoding='utf-8') as f:
+with open(TARGET, 'w', encoding='utf-8') as f:
     f.write(c)
 
 import ast

@@ -3,7 +3,7 @@ q = chr(34)
 n = chr(10)
 lines = []
 lines.append('import pathlib, ast')
-lines.append('p = pathlib.Path(' + q + 'D:/HermesData/moa-gateway/app/main.py' + q + ')')
+lines.append('p = pathlib.Path(__file__).resolve().parents[1] / ' + q + 'app/main.py' + q)
 lines.append('c = p.read_text(encoding=' + q + 'utf-8-sig' + q + ')')
 lines.append('q2 = chr(34)')
 lines.append('i = c.find(' + q + 'from app.agents.contract import AgentEnvelope, get_agent' + q + ')')

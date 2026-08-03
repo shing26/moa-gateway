@@ -8,7 +8,7 @@
 
 ## Notes
 
-- 仓库: D:\HermesData\moa-gateway
+- 仓库: <repo-root>
 - 分支: feat/v0.5-sprint4
 - 现有 121 个单元测试全绿
 - 已实现: 线程内存降级、异步 WAL、特征标志、提示词注册、RBAC Guard、OTel Tracing

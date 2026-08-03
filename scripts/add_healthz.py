@@ -1,4 +1,7 @@
-﻿with open('D:/HermesData/moa-gateway/app/main.py', 'r', encoding='utf-8-sig') as f:
+import pathlib
+MAIN = pathlib.Path(__file__).resolve().parents[1] / "app" / "main.py"
+
+with open(MAIN, 'r', encoding='utf-8-sig') as f:
     c = f.read()
 
 endpoint = '''
@@ -29,7 +32,7 @@ marker = '@app.get("/health")'
 c = c.replace('@app.get("/health")\nasync def health() -> dict[str, str]:\n    return {"status": "ok", "version": "0.1.0"}',
               '@app.get("/health")\nasync def health() -> dict[str, str]:\n    return {"status": "ok", "version": "0.1.0"}\n\n' + endpoint, 1)
 
-with open('D:/HermesData/moa-gateway/app/main.py', 'w', encoding='utf-8') as f:
+with open(MAIN, 'w', encoding='utf-8') as f:
     f.write(c)
 
 import ast

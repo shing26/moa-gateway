@@ -1,6 +1,6 @@
-import pathbl, ast
+import pathlib, ast
 q = chr(34)
-path = pathblib.Path("D:/HermesData/moa-gateway/app/main.py")
+path = pathlib.Path(__file__).resolve().parents[1] / "app" / "main.py"
 old = path.read_text(encoding="utf-8-sig")
 
 # 1: add loader import

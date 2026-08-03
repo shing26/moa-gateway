@@ -32,7 +32,7 @@
 
 ## 阶段 2 启动命令 (确认后执行)
 ```bash
-cd D:\HermesData\moa-gateway
+cd <repo-root>
 git checkout -b feat/v0.1-mvp
 codex exec --full-auto "根据 NO_SUBSTITUTES.md 的 Stage 2 要求，实现 v0.1 MVP 并让测试通过"
 ```
