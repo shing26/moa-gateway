@@ -8,7 +8,7 @@
 
 1. Add Docker build + publish step to .github/workflows/ci.yml
 2. Build on every tag push (git tag v*)
-3. Push to ghcr.io/shing26/moa-gateway
+3. Push to ghcr.io/<your-ghcr-owner>/moa-gateway
 4. Smoke test: build image locally and verify health endpoint
 
 ## Acceptance Criteria
