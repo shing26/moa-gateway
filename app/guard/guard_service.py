@@ -15,7 +15,7 @@ from app.guard.rbac import (
 logger = logging.getLogger("moa.guard.service")
 
 # ── Intents that always require human review ──────────────────────────
-HITL_INTENTS: set[str] = {"write_file", "execute_command", "send_message", "delete_resource"}
+HITL_INTENTS: set[str] = {"write_file", "execute_command", "send_message", "delete_resource", "execute_code"}
 
 # ── Resources that require elevated roles ─────────────────────────────
 SENSITIVE_RESOURCES: set[str] = {"guard", "prompt", "audit_log", "user_data"}

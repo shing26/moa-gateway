@@ -2,7 +2,7 @@ from __future__ import annotations
 import logging, os
 from opentelemetry import trace
 from app.config import settings
-from app.engine import Engine
+from app.engine import Engine, RedisHitlStorage, SessionStore
 from app.evaluator.evaluator import RuleEvaluator
 from app.feature_flags import DEFAULT_FLAGS, FeatureFlagClient
 from app.guard.guard_service import guard_service
@@ -15,10 +15,11 @@ from app.vectordb.retriever import ContextRetriever
 from app.channels.feishu import FeishuChannelAdapter, FeishuConfig
 from app.channels.feishu_auth import FeishuAuthConfig, FeishuTokenProvider
 from app.channels.feishu_cards import FeishuCardSender
-from app.memory import ConversationMemory
+from app.memory import ConversationMemory, RedisConversationStorage
 from app.command_mode import CommandMode, parse_command
 from app.knowledge import KnowledgeBase
 from app.obsidian_sync import ObsidianVaultSync
+from app.pipeline import MoAPipeline
 
 logger = logging.getLogger("moa.gateway")
 tracer: trace.Tracer = trace.get_tracer("moa-gateway")
@@ -32,14 +33,42 @@ _retriever = ContextRetriever(VectorDBClient())
 
 # Module-level singletons
 router = IntentRouter()
-memory = ConversationMemory()
+memory = ConversationMemory(
+    storage=RedisConversationStorage(
+        url=settings.redis_url,
+        enable_fallback=settings.redis_enable_fallback,
+    )
+)
 knowledge_base = KnowledgeBase(_retriever._client)
 obsidian_sync = ObsidianVaultSync.from_env(knowledge_base=knowledge_base)
 command_mode = CommandMode()
 adapter = ResponseAdapter()
 evaluator = RuleEvaluator()
 # permission_guard = FailClosedPermissionGuard()  # removed: unused legacy guard
-engine = Engine(router=router, adapter=adapter)
+engine = Engine(
+    router=router,
+    adapter=adapter,
+    session_store=SessionStore(
+        storage=RedisHitlStorage(
+            url=settings.redis_url,
+            enable_fallback=settings.redis_enable_fallback,
+        )
+    ),
+)
+
+pipeline = MoAPipeline(
+    engine=engine,
+    router=router,
+    memory=memory,
+    adapter=adapter,
+    evaluator=evaluator,
+    retriever=_retriever,
+    prompt_registry=_prompt_registry,
+    flag_client=_flag_client,
+    guard_service=guard_service,
+    command_mode=command_mode,
+    card_sender=None,
+)
 
 
 def init_feishu() -> None:
@@ -50,6 +79,7 @@ def init_feishu() -> None:
         _feishu_config = FeishuConfig(app_id=app_id, app_secret=app_secret)
         auth_provider = FeishuTokenProvider(FeishuAuthConfig(app_id=app_id, app_secret=app_secret))
         _card_sender = FeishuCardSender(auth_provider)
+        pipeline.set_card_sender(_card_sender)
         logger.info("feishu card sender initialized")
     else:
         logger.warning("FEISHU_APP_ID / FEISHU_APP_SECRET not set; HITL cards disabled")

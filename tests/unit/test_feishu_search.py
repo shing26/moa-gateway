@@ -3,7 +3,8 @@ import json
 
 from fastapi.testclient import TestClient
 
-from app.deps import knowledge_base
+from app.deps import _retriever, knowledge_base
+import app.pipeline as pipeline_module
 from app.main import app
 
 
@@ -33,16 +34,15 @@ def _event(text: str) -> dict:
 
 
 async def _cleanup() -> None:
+    await _retriever._client.delete_by_metadata({"session_id": "c-search-test"})
     for doc in await knowledge_base.list_docs():
         await knowledge_base.delete_doc(doc["id"])
 
 
 def test_feishu_message_injects_knowledge_context(monkeypatch) -> None:
-    import app.routes.feishu as feishu_route
-
     agent = FakeAgent()
-    monkeypatch.setattr(feishu_route, "get_agent", lambda name: agent)
-    asyncio.run(knowledge_base.add_document("search test doc", "moa gateway redis config guide"))
+    monkeypatch.setattr(pipeline_module, "get_agent", lambda name: agent)
+    asyncio.run(_retriever.store_session_context("c-search-test", "moa gateway redis config guide"))
     try:
         with TestClient(app) as client:
             res = client.post("/feishu/event", json=_event("moa gateway redis config"))
@@ -55,16 +55,14 @@ def test_feishu_message_injects_knowledge_context(monkeypatch) -> None:
 
 
 def test_feishu_message_writes_request_log(monkeypatch) -> None:
-    import app.routes.feishu as feishu_route
-
     agent = FakeAgent()
     calls = []
 
     async def fake_log(*args, **kwargs):
         calls.append(args)
 
-    monkeypatch.setattr(feishu_route, "get_agent", lambda name: agent)
-    monkeypatch.setattr(feishu_route, "log_request", fake_log)
+    monkeypatch.setattr(pipeline_module, "get_agent", lambda name: agent)
+    monkeypatch.setattr(pipeline_module, "log_request", fake_log)
     try:
         with TestClient(app) as client:
             res = client.post("/feishu/event", json=_event("moa gateway redis config"))

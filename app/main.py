@@ -10,6 +10,7 @@ from app.deps import (
     init_feishu, init_prompts, obsidian_sync, tracer,
 )
 from app.observability.tracing import setup_tracing, TraceConfig
+from app.middleware.auth import AuthMiddleware
 from app.middleware.flags import FeatureFlagMiddleware
 from app.routes.dashboard import router as dashboard_router
 from app.routes.feishu import router as feishu_router
@@ -26,6 +27,11 @@ app.include_router(health_router)
 app.include_router(webhook_router)
 app.include_router(knowledge_router)
 app.add_middleware(FeatureFlagMiddleware, client=_flag_client)
+app.add_middleware(
+    AuthMiddleware,
+    token=os.environ.get("WEBHOOK_AUTH_TOKEN", ""),
+    dashboard_password=os.environ.get("DASHBOARD_PASSWORD", ""),
+)
 
 @app.exception_handler(Exception)
 async def _debug_exception_handler(request: Request, exc: Exception):

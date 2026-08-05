@@ -20,6 +20,13 @@ class LLMConfig:
     extra_headers: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass
+class ChatResult:
+    messages: list[dict[str, Any]]
+    content: str
+    tool_calls: list[dict[str, Any]]
+
+
 class LLMClient:
     """Async HTTP client for OpenAI-compatible chat completion APIs."""
 
@@ -57,6 +64,45 @@ class LLMClient:
         content: str = choice["message"]["content"] or ""
         logger.debug("llm response: finish=%s tokens=%d", choice.get("finish_reason"), data.get("usage", {}))
         return content
+
+    async def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> ChatResult:
+        payload: dict[str, Any] = {
+            "model": model or self.config.model,
+            "messages": messages,
+            "tools": tools,
+            "max_tokens": max_tokens or self.config.max_tokens,
+            "temperature": temperature if temperature is not None else self.config.temperature,
+            "stream": False,
+        }
+        logger.debug(
+            "llm tools request: model=%s messages=%d tools=%d",
+            payload["model"],
+            len(messages),
+            len(tools),
+        )
+        response = await self._client.post("/chat/completions", json=payload)
+        response.raise_for_status()
+        data = response.json()
+        choice = data["choices"][0]
+        message = choice["message"]
+        updated_messages = list(messages)
+        updated_messages.append(message)
+        tool_calls: list[dict[str, Any]] = message.get("tool_calls") or []
+        content = "" if tool_calls else (message.get("content") or "")
+        logger.debug(
+            "llm tools response: finish=%s tool_calls=%d",
+            choice.get("finish_reason"),
+            len(tool_calls),
+        )
+        return ChatResult(messages=updated_messages, content=content, tool_calls=tool_calls)
 
     async def aclose(self) -> None:
         await self._client.aclose()

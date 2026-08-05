@@ -1,44 +1,17 @@
 ﻿from __future__ import annotations
+import json
 import logging
+from dataclasses import asdict, dataclass
 from typing import Any
+
+from redis.asyncio import Redis
+
 from app.fsm.state_machine import Event, State, next_state, StateContext
+from app.memory import _SyncBridge
 from app.models.events import MoAEvent
+from app.outbound.adapter import ResponseAdapter, OutboundResponse
 
 logger = logging.getLogger("moa.engine")
-
-
-class SessionStore:
-    """Manages HITL requests pending human approval."""
-
-    def __init__(self) -> None:
-        self._pending_hitl: dict[str, "HitlRequest"] = {}
-
-    def store_hitl(self, session_id: str, request: "HitlRequest") -> None:
-        self._pending_hitl[session_id] = request
-        logger.info("hitl stored session=%s intent=%s", session_id, request.intent)
-
-    def get_hitl(self, session_id: str) -> "HitlRequest | None":
-        return self._pending_hitl.get(session_id)
-
-    def remove_hitl(self, session_id: str) -> None:
-        self._pending_hitl.pop(session_id, None)
-        logger.info("hitl resolved session=%s", session_id)
-
-    def clear_all(self) -> None:
-        self._pending_hitl.clear()
-
-
-from dataclasses import dataclass
-
-@dataclass
-class SessionState:
-    session_id: str
-    context: StateContext
-    state_stack: list[str]
-
-    def __post_init__(self) -> None:
-        if self.state_stack is None:
-            self.state_stack = []
 
 
 @dataclass
@@ -52,7 +25,180 @@ class HitlRequest:
     target: str
 
 
-from app.outbound.adapter import ResponseAdapter, OutboundResponse
+class RedisHitlStorage:
+    KEY_PREFIX = "moa:hitl"
+    DEFAULT_TTL = 3600
+
+    def __init__(
+        self,
+        url: str = "redis://localhost:6379/0",
+        ttl: int = DEFAULT_TTL,
+        enable_fallback: bool = True,
+        timeout: float = 5.0,
+        client: Any | None = None,
+    ) -> None:
+        self.url = url
+        self.ttl = ttl
+        self._enable_fallback = enable_fallback
+        self._timeout = timeout
+        self._client = client
+        self._connected = False
+        self._bridge = _SyncBridge(timeout=timeout)
+        self._using_memory = False
+        self._memory: dict[str, str] = {}
+        self._written: set[str] = set()
+
+    @staticmethod
+    def key(session_id: str) -> str:
+        return f"{RedisHitlStorage.KEY_PREFIX}:{session_id}"
+
+    def _resolve(self) -> Any:
+        if self._using_memory:
+            return None
+        if not self._connected:
+            try:
+                client = self._bridge.call(self._connect_coro())
+            except Exception as exc:
+                self._fallback(exc)
+                return None
+            if client is None:
+                self._fallback()
+                return None
+            self._client = client
+            self._connected = True
+        return self._client
+
+    async def _connect_coro(self) -> Any:
+        client = self._client
+        if client is None:
+            client = Redis.from_url(
+                self.url,
+                socket_timeout=self._timeout,
+                decode_responses=True,
+                protocol=2,
+            )
+        try:
+            await client.ping()
+        except Exception:
+            if self._client is None:
+                await client.aclose()
+            return None
+        logger.info("redis hitl storage connected: %s", self.url)
+        return client
+
+    def _fallback(self, exc: Exception | None = None) -> None:
+        if not self._enable_fallback:
+            raise ConnectionError("redis unavailable and fallback disabled") from exc
+        if self._client is not None and not self._using_memory:
+            try:
+                self._bridge.call(self._client.aclose())
+            except Exception:
+                pass
+            self._client = None
+        self._connected = False
+        self._using_memory = True
+        logger.critical("redis hitl storage fallback to in-memory")
+
+    def get(self, key: str) -> str | None:
+        client = self._resolve()
+        if client is None:
+            return self._memory.get(key)
+        try:
+            return self._bridge.call(client.get(key))
+        except Exception as exc:
+            self._fallback(exc)
+            return self._memory.get(key)
+
+    def set(self, key: str, value: str, ttl: int | None = None) -> None:
+        client = self._resolve()
+        if client is None:
+            self._memory[key] = value
+            self._written.add(key)
+            return
+        try:
+            self._bridge.call(client.set(key, value, ex=ttl if ttl is not None else self.ttl))
+            self._written.add(key)
+        except Exception as exc:
+            self._fallback(exc)
+            self._memory[key] = value
+            self._written.add(key)
+
+    def delete(self, key: str) -> None:
+        client = self._resolve()
+        if client is None:
+            self._memory.pop(key, None)
+            self._written.discard(key)
+            return
+        try:
+            self._bridge.call(client.delete(key))
+            self._written.discard(key)
+        except Exception as exc:
+            self._fallback(exc)
+            self._memory.pop(key, None)
+            self._written.discard(key)
+
+    def clear(self) -> None:
+        for key in list(self._written):
+            self.delete(key)
+        self._written.clear()
+        self._memory.clear()
+
+
+class SessionStore:
+    """Manages HITL requests pending human approval."""
+
+    def __init__(self, storage: Any = None) -> None:
+        self._pending_hitl: dict[str, HitlRequest] = {}
+        self._storage = None
+        if storage is not None:
+            try:
+                self._storage = storage() if callable(storage) else storage
+            except Exception as exc:
+                logger.warning("hitl storage unavailable, using in-memory: %s", exc)
+                self._storage = None
+
+    def store_hitl(self, session_id: str, request: HitlRequest) -> None:
+        if self._storage is None:
+            self._pending_hitl[session_id] = request
+        else:
+            self._storage.set(self._storage.key(session_id), json.dumps(asdict(request)))
+        logger.info("hitl stored session=%s intent=%s", session_id, request.intent)
+
+    def get_hitl(self, session_id: str) -> HitlRequest | None:
+        if self._storage is None:
+            return self._pending_hitl.get(session_id)
+        raw = self._storage.get(self._storage.key(session_id))
+        if raw is None:
+            return None
+        try:
+            return HitlRequest(**json.loads(raw))
+        except Exception as exc:
+            logger.warning("hitl payload corrupt session=%s: %s", session_id, exc)
+            return None
+
+    def remove_hitl(self, session_id: str) -> None:
+        if self._storage is None:
+            self._pending_hitl.pop(session_id, None)
+        else:
+            self._storage.delete(self._storage.key(session_id))
+        logger.info("hitl resolved session=%s", session_id)
+
+    def clear_all(self) -> None:
+        if self._storage is None:
+            self._pending_hitl.clear()
+        else:
+            self._storage.clear()
+
+
+@dataclass
+class SessionState:
+    session_id: str
+    context: StateContext
+    state_stack: list[str]
+
+    def __post_init__(self) -> None:
+        if self.state_stack is None:
+            self.state_stack = []
 
 
 class Engine:

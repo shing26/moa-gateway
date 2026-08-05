@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any
 
 from app.agents.contract import AgentEnvelope, SubAgent, register_agent
 from app.agents.provider import LLMClient, LLMConfig
+from app.agents.tools import tool_registry
 
 logger = logging.getLogger("moa.agents")
+
+MAX_TOOL_ROUNDS = 3
 
 
 def _default_llm() -> LLMClient:
@@ -29,7 +33,7 @@ def _build_envelope_context(envelope: AgentEnvelope, role_tag: str) -> str:
     return "\n\n".join(parts)
 
 
-async def _execute_with_prompt(
+async def _execute_with_tools(
     llm: LLMClient,
     envelope: AgentEnvelope,
     role_tag: str,
@@ -49,7 +53,32 @@ async def _execute_with_prompt(
     messages.extend(history)
     messages.append({"role": "user", "content": envelope.user_raw_input})
     logger.info("%s execute trace=%s session=%s", agent_name, envelope.trace_id, envelope.session_id)
-    return await llm.chat(messages)
+    chat_with_tools = getattr(llm, "chat_with_tools", None)
+    if chat_with_tools is None:
+        return await llm.chat(messages)
+    schemas = tool_registry.list_schemas()
+    result = await chat_with_tools(messages, schemas)
+    for _ in range(MAX_TOOL_ROUNDS):
+        if not result.tool_calls:
+            break
+        for call in result.tool_calls:
+            tool = tool_registry.get(call["function"]["name"])
+            if tool is None:
+                output = '{"error": "unknown tool"}'
+            else:
+                try:
+                    arguments = json.loads(call["function"].get("arguments") or "{}")
+                    output = await tool.handler(**arguments)
+                except Exception as exc:
+                    output = f'{{"error": "{exc}"}}'
+            result.messages.append(
+                {"role": "tool", "tool_call_id": call["id"], "content": output}
+            )
+        result = await chat_with_tools(result.messages, schemas)
+    if result.tool_calls:
+        pending = ", ".join(call["function"]["name"] for call in result.tool_calls)
+        return result.content + f"\n[工具调用已达上限，待处理工具: {pending}]"
+    return result.content
 
 
 async def _execute_with_runtime_or_injected(
@@ -60,9 +89,9 @@ async def _execute_with_runtime_or_injected(
     agent_name: str,
 ) -> str:
     if llm is not None:
-        return await _execute_with_prompt(llm, envelope, role_tag, extra_instructions, agent_name)
+        return await _execute_with_tools(llm, envelope, role_tag, extra_instructions, agent_name)
     async with _default_llm() as client:
-        return await _execute_with_prompt(client, envelope, role_tag, extra_instructions, agent_name)
+        return await _execute_with_tools(client, envelope, role_tag, extra_instructions, agent_name)
 
 
 class CoderAgent:

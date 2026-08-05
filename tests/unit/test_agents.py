@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.agents.contract import AgentEnvelope, get_agent
-from app.agents.provider import LLMClient, LLMConfig
+from app.agents.provider import ChatResult, LLMClient, LLMConfig
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def fake_llm() -> LLMClient:
         json=lambda: {
             "choices": [
                 {
-                    "message": {"content": "def fib(n): return n if n <= 1 else fib(n-1) + fib(n-2)"},
+                    "message": {"role": "assistant", "content": "def fib(n): return n if n <= 1 else fib(n-1) + fib(n-2)"},
                     "finish_reason": "stop",
                 }
             ],
@@ -86,6 +86,78 @@ async def test_llm_client_handles_api_error() -> None:
         await client.chat([{"role": "user", "content": "hi"}])
 
 
+@pytest.mark.asyncio
+async def test_llm_client_chat_with_tools_payload_and_plain_content(fake_llm: LLMClient) -> None:
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "current_time",
+                "description": "get current time",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+    original = [{"role": "user", "content": "what time is it"}]
+    result = await fake_llm.chat_with_tools(original, tools)
+    assert isinstance(result, ChatResult)
+    assert result.content == "def fib(n): return n if n <= 1 else fib(n-1) + fib(n-2)"
+    assert result.tool_calls == []
+    assert len(result.messages) == 2
+    assert result.messages[0] == original[0]
+    assert result.messages[-1]["role"] == "assistant"
+    assert result.messages[-1]["content"] == result.content
+    assert original == [{"role": "user", "content": "what time is it"}]
+
+    call_args = fake_llm._client.post.call_args
+    payload = call_args.kwargs["json"]
+    assert payload["tools"] == tools
+    assert payload["stream"] is False
+    assert payload["model"] == "gpt-4o-mini"
+    assert payload["messages"] == original
+    assert payload["max_tokens"] == 4096
+
+
+@pytest.mark.asyncio
+async def test_llm_client_chat_with_tools_returns_tool_calls() -> None:
+    client = LLMClient(LLMConfig(api_key="test-key", base_url="http://localhost:0"))
+    tool_calls = [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "current_time", "arguments": "{}"},
+        }
+    ]
+    assistant_message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
+    mock_post = AsyncMock(
+        return_value=MagicMock(
+            status_code=200,
+            json=lambda: {
+                "choices": [{"message": assistant_message, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+            raise_for_status=lambda: None,
+        )
+    )
+    client._client.post = mock_post
+
+    result = await client.chat_with_tools([{"role": "user", "content": "what time is it"}], [])
+    assert result.content == ""
+    assert result.tool_calls == tool_calls
+    assert len(result.messages) == 2
+    assert result.messages[-1] == assistant_message
+    payload = mock_post.call_args.kwargs["json"]
+    assert payload["tools"] == []
+
+
+@pytest.mark.asyncio
+async def test_llm_client_chat_with_tools_handles_api_error() -> None:
+    client = LLMClient(LLMConfig(api_key="bad-key", base_url="http://localhost:0"))
+    mock_post = AsyncMock(side_effect=Exception("API error"))
+    client._client.post = mock_post
+
+    with pytest.raises(Exception, match="API error"):
+        await client.chat_with_tools([{"role": "user", "content": "hi"}], [])
 @pytest.mark.asyncio
 async def test_general_agent_uses_runtime_env(monkeypatch, envelope: AgentEnvelope) -> None:
     import os
