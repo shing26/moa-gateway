@@ -12,6 +12,7 @@ from app.deps import (
 from app.observability.tracing import setup_tracing, TraceConfig
 from app.middleware.auth import AuthMiddleware
 from app.middleware.flags import FeatureFlagMiddleware
+from app.config import settings
 from app.routes.dashboard import router as dashboard_router
 from app.routes.feishu import router as feishu_router
 from app.routes.health import router as health_router
@@ -31,6 +32,7 @@ app.add_middleware(
     AuthMiddleware,
     token=os.environ.get("WEBHOOK_AUTH_TOKEN", ""),
     dashboard_password=os.environ.get("DASHBOARD_PASSWORD", ""),
+    feishu_verification_token=settings.feishu_verification_token,
 )
 
 @app.exception_handler(Exception)

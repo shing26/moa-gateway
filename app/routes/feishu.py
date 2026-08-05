@@ -7,6 +7,8 @@ from app.channels.base import ChannelMessage
 from app.channels.feishu import FeishuChannelAdapter, FeishuConfig
 from app.channels.feishu_auth import FeishuAuthConfig, FeishuTokenProvider
 from app.channels.feishu_event import parse_feishu_event
+from app.channels.feishu_signature import verify_verification_token
+from app.config import settings
 from app.deps import pipeline
 from app.fsm.state_machine import Event as FsmEvent
 from app.models.events import MoAEvent, new_trace_id
@@ -43,6 +45,9 @@ async def feishu_event(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error":"invalid_json"}, status_code=400)
+
+    if not verify_verification_token(body, settings.feishu_verification_token, settings.feishu_encrypt_key):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     header = body.get("header", {}) if isinstance(body.get("header"), dict) else {}
     event_id = header.get("event_id", body.get("event_id", ""))

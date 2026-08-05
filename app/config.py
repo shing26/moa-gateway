@@ -45,6 +45,8 @@ class Settings:
         self.router_llm_timeout_ms: int = int(os.getenv("ROUTER_LLM_TIMEOUT_MS", "2000"))
         self.micro_llm_timeout_ms: int = int(os.getenv("MICRO_LLM_TIMEOUT_MS", "1000"))
         self.hitl_enabled: bool = _parse_bool(os.getenv("HITL_ENABLED"), False)
+        self.feishu_verification_token: str = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
+        self.feishu_encrypt_key: str = os.getenv("FEISHU_ENCRYPT_KEY", "")
 
     def to_redis_config(self) -> dict[str, Any]:
         return {

@@ -12,6 +12,44 @@ from app.models.events import MoAEvent, PlatformEvent, new_trace_id
 
 webhook_router = APIRouter()
 
+@webhook_router.post("/webhook/callback")
+async def webhook_callback(request: Request) -> JSONResponse:
+    body = await request.json()
+    parsed = parse_card_callback(body)
+    if parsed is None:
+        logger.warning("unparseable card callback: %s", body)
+        return JSONResponse({"error": "invalid_callback_payload"}, status_code=400)
+    session_id, trace_id, action = parsed
+    logger.info("card callback session=%s trace=%s action=%s", session_id, trace_id, action)
+    hitl_id = trace_id or session_id
+    hitl = engine.session_store.get_hitl(hitl_id)
+    if hitl is None:
+        logger.warning("hitl request not found hitl_id=%s session=%s", hitl_id, session_id)
+        return JSONResponse({"error": "hitl_request_not_found"}, status_code=404)
+    if action == "approve":
+        fsm_event = FsmEvent.HUMAN_APPROVED
+    elif action == "reject":
+        fsm_event = FsmEvent.HUMAN_REJECTED
+    else:
+        return JSONResponse({"error": f"unknown_action:{action}"}, status_code=400)
+    moa_event = MoAEvent(
+        trace_id=trace_id, event=fsm_event, session_id=session_id, text="",
+        context={"source": "feishu_card_callback", "action": action},
+    )
+    session_state = await engine.handle_event(moa_event)
+    if action == "approve":
+        engine.session_store.remove_hitl(hitl_id)
+        response = adapter.adapt(hitl.agent_output, channel=hitl.channel, target=hitl.target)
+        return JSONResponse({
+            "trace_id": trace_id, "state": session_state.context.state.value, "text": response.text, "status": "approved",
+        })
+    else:
+        engine.session_store.remove_hitl(hitl_id)
+        return JSONResponse({
+            "trace_id": trace_id, "state": session_state.context.state.value, "status": "rejected",
+        })
+
+
 @webhook_router.post("/webhook/{channel}")
 async def webhook(channel: str, request: Request) -> JSONResponse:
     with tracer.start_as_current_span("moa.webhook.receive") as root_span:
@@ -61,43 +99,6 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
             "trace_id": result.trace_id, "state": result.state,
             "intent": result.intent, "text": result.text,
             "need_human_review": result.need_human_review, "status": "ok",
-        })
-
-
-@webhook_router.post("/webhook/callback")
-async def webhook_callback(request: Request) -> JSONResponse:
-    body = await request.json()
-    parsed = parse_card_callback(body)
-    if parsed is None:
-        logger.warning("unparseable card callback: %s", body)
-        return JSONResponse({"error": "invalid_callback_payload"}, status_code=400)
-    session_id, trace_id, action = parsed
-    logger.info("card callback session=%s action=%s", session_id, action)
-    hitl = engine.session_store.get_hitl(session_id)
-    if hitl is None:
-        logger.warning("hitl request not found for session=%s", session_id)
-        return JSONResponse({"error": "hitl_request_not_found"}, status_code=404)
-    if action == "approve":
-        fsm_event = FsmEvent.HUMAN_APPROVED
-    elif action == "reject":
-        fsm_event = FsmEvent.HUMAN_REJECTED
-    else:
-        return JSONResponse({"error": f"unknown_action:{action}"}, status_code=400)
-    moa_event = MoAEvent(
-        trace_id=trace_id, event=fsm_event, session_id=session_id, text="",
-        context={"source": "feishu_card_callback", "action": action},
-    )
-    session_state = await engine.handle_event(moa_event)
-    if action == "approve":
-        engine.session_store.remove_hitl(session_id)
-        response = adapter.adapt(hitl.agent_output, channel=hitl.channel, target=hitl.target)
-        return JSONResponse({
-            "trace_id": trace_id, "state": session_state.context.state.value, "text": response.text, "status": "approved",
-        })
-    else:
-        engine.session_store.remove_hitl(session_id)
-        return JSONResponse({
-            "trace_id": trace_id, "state": session_state.context.state.value, "status": "rejected",
         })
 
 

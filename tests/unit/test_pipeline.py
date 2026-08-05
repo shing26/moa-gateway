@@ -236,7 +236,7 @@ async def test_review_path_via_execution_marker(monkeypatch):
     assert result.state == "SUSPENDED"
     assert result.text == "Output requires human approval before delivery"
     assert result.need_human_review is True
-    stored = engine.session_store.get_hitl("s1")
+    stored = engine.session_store.get_hitl(result.trace_id)
     assert stored is not None
     assert "EXECUTION_REQUIRES_APPROVAL" in stored.agent_output
     assert stored.intent == "coding"
@@ -278,7 +278,28 @@ async def test_review_via_real_guard_hitl_intent(monkeypatch):
     )
     result = await p.run(make_event(), channel="test", target="t1")
     assert result.status == "pending_review"
-    assert engine.session_store.get_hitl("s1") is not None
+    assert engine.session_store.get_hitl(result.trace_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_review_same_session_twice_stores_both_by_trace_id(monkeypatch):
+    class ExecuteCodeAgent:
+        async def execute(self, envelope):
+            return "EXECUTION_REQUIRES_APPROVAL: code=print('1')"
+
+    patch_agents(monkeypatch, ExecuteCodeAgent())
+    engine = Engine()
+    guard = FakeGuard(GuardVerdict(action=GuardianAction.REVIEW, reason="needs approval"))
+    p = make_pipeline(engine=engine, guard=guard)
+    first = await p.run(make_event(session_id="s1"), channel="test", target="t1")
+    second = await p.run(make_event(session_id="s1"), channel="test", target="t1")
+    assert first.trace_id != second.trace_id
+    first_stored = engine.session_store.get_hitl(first.trace_id)
+    second_stored = engine.session_store.get_hitl(second.trace_id)
+    assert first_stored is not None
+    assert second_stored is not None
+    assert first_stored.trace_id == first.trace_id
+    assert second_stored.trace_id == second.trace_id
 
 
 @pytest.mark.asyncio

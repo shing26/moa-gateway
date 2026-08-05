@@ -1,13 +1,14 @@
 ﻿from __future__ import annotations
 import json
 import logging
+import time
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from redis.asyncio import Redis
 
 from app.fsm.state_machine import Event, State, next_state, StateContext
-from app.memory import _SyncBridge
+from app.memory import _SHARED_BRIDGE
 from app.models.events import MoAEvent
 from app.outbound.adapter import ResponseAdapter, OutboundResponse
 
@@ -34,38 +35,45 @@ class RedisHitlStorage:
         url: str = "redis://localhost:6379/0",
         ttl: int = DEFAULT_TTL,
         enable_fallback: bool = True,
-        timeout: float = 5.0,
+        timeout: float = 1.0,
         client: Any | None = None,
+        retry_after: float = 30.0,
     ) -> None:
         self.url = url
         self.ttl = ttl
         self._enable_fallback = enable_fallback
         self._timeout = timeout
         self._client = client
+        self._injected = client is not None
         self._connected = False
-        self._bridge = _SyncBridge(timeout=timeout)
+        self._bridge = _SHARED_BRIDGE
         self._using_memory = False
         self._memory: dict[str, str] = {}
         self._written: set[str] = set()
+        self._retry_after = retry_after
+        self._last_attempt = 0.0
 
     @staticmethod
-    def key(session_id: str) -> str:
-        return f"{RedisHitlStorage.KEY_PREFIX}:{session_id}"
+    def key(trace_id: str) -> str:
+        return f"{RedisHitlStorage.KEY_PREFIX}:{trace_id}"
 
     def _resolve(self) -> Any:
-        if self._using_memory:
+        if not self._using_memory and self._connected:
+            return self._client
+        if self._using_memory and time.monotonic() - self._last_attempt < self._retry_after:
             return None
-        if not self._connected:
-            try:
-                client = self._bridge.call(self._connect_coro())
-            except Exception as exc:
-                self._fallback(exc)
-                return None
-            if client is None:
-                self._fallback()
-                return None
-            self._client = client
-            self._connected = True
+        self._last_attempt = time.monotonic()
+        try:
+            client = self._bridge.call(self._connect_coro())
+        except Exception as exc:
+            self._fallback(exc)
+            return None
+        if client is None:
+            self._fallback()
+            return None
+        self._client = client
+        self._connected = True
+        self._using_memory = False
         return self._client
 
     async def _connect_coro(self) -> Any:
@@ -89,7 +97,7 @@ class RedisHitlStorage:
     def _fallback(self, exc: Exception | None = None) -> None:
         if not self._enable_fallback:
             raise ConnectionError("redis unavailable and fallback disabled") from exc
-        if self._client is not None and not self._using_memory:
+        if self._client is not None and not self._using_memory and not self._injected:
             try:
                 self._bridge.call(self._client.aclose())
             except Exception:
@@ -97,6 +105,7 @@ class RedisHitlStorage:
             self._client = None
         self._connected = False
         self._using_memory = True
+        self._last_attempt = time.monotonic()
         logger.critical("redis hitl storage fallback to in-memory")
 
     def get(self, key: str) -> str | None:
@@ -158,30 +167,34 @@ class SessionStore:
                 self._storage = None
 
     def store_hitl(self, session_id: str, request: HitlRequest) -> None:
+        hitl_id = request.trace_id or session_id
         if self._storage is None:
-            self._pending_hitl[session_id] = request
+            self._pending_hitl[hitl_id] = request
         else:
-            self._storage.set(self._storage.key(session_id), json.dumps(asdict(request)))
-        logger.info("hitl stored session=%s intent=%s", session_id, request.intent)
+            self._storage.set(self._storage.key(hitl_id), json.dumps(asdict(request)))
+        logger.info(
+            "hitl stored hitl_id=%s session=%s intent=%s",
+            hitl_id, session_id, request.intent,
+        )
 
-    def get_hitl(self, session_id: str) -> HitlRequest | None:
+    def get_hitl(self, hitl_id: str) -> HitlRequest | None:
         if self._storage is None:
-            return self._pending_hitl.get(session_id)
-        raw = self._storage.get(self._storage.key(session_id))
+            return self._pending_hitl.get(hitl_id)
+        raw = self._storage.get(self._storage.key(hitl_id))
         if raw is None:
             return None
         try:
             return HitlRequest(**json.loads(raw))
         except Exception as exc:
-            logger.warning("hitl payload corrupt session=%s: %s", session_id, exc)
+            logger.warning("hitl payload corrupt hitl_id=%s: %s", hitl_id, exc)
             return None
 
-    def remove_hitl(self, session_id: str) -> None:
+    def remove_hitl(self, hitl_id: str) -> None:
         if self._storage is None:
-            self._pending_hitl.pop(session_id, None)
+            self._pending_hitl.pop(hitl_id, None)
         else:
-            self._storage.delete(self._storage.key(session_id))
-        logger.info("hitl resolved session=%s", session_id)
+            self._storage.delete(self._storage.key(hitl_id))
+        logger.info("hitl resolved hitl_id=%s", hitl_id)
 
     def clear_all(self) -> None:
         if self._storage is None:

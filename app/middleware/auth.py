@@ -9,25 +9,36 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-_ALLOWED = ("/health", "/healthz", "/feishu/event", "/docs", "/openapi.json")
+_ALLOWED = ("/health", "/healthz", "/docs", "/openapi.json")
+_LARK_VERIFIED_PATHS = ("/feishu/event", "/webhook/callback")
 _WEBHOOK_PREFIX = "/webhook"
-_WEBHOOK_EXEMPT = "/webhook/callback"
 _DASHBOARD_PREFIX = "/dashboard"
 _DASHBOARD_STATIC = "/dashboard/static"
 _DASHBOARD_USER = "admin"
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: Any, token: str = "", dashboard_password: str = "") -> None:
+    def __init__(
+        self,
+        app: Any,
+        token: str = "",
+        dashboard_password: str = "",
+        feishu_verification_token: str = "",
+    ) -> None:
         super().__init__(app)
         self._token = token
         self._dashboard_password = dashboard_password
+        self._feishu_verification_token = feishu_verification_token
 
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         path = request.url.path
+        if path in _LARK_VERIFIED_PATHS:
+            if self._feishu_verification_token and request.headers.get("X-Lark-Token") != self._feishu_verification_token:
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            return await call_next(request)
         if self._is_allowed(path):
             return await call_next(request)
-        if path.startswith(_WEBHOOK_PREFIX) and not path.startswith(_WEBHOOK_EXEMPT):
+        if path.startswith(_WEBHOOK_PREFIX):
             if self._token and request.headers.get("X-Gateway-Token") != self._token:
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
         elif path.startswith(_DASHBOARD_PREFIX) and not path.startswith(_DASHBOARD_STATIC):

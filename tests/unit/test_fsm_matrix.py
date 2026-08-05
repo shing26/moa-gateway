@@ -4,6 +4,7 @@ from app.fsm.state_machine import (
     Event,
     InvalidStateTransitionException,
     State,
+    TRANSITIONS,
     next_state,
 )
 
@@ -33,3 +34,17 @@ def test_needs_human_transition():
 
 def test_reset_from_init():
     assert next_state(State.INIT, Event.RESET) == State.INIT
+
+
+def test_sensitive_detected_new_transitions():
+    assert next_state(State.INIT, Event.SENSITIVE_DETECTED) == State.SUSPENDED
+    assert next_state(State.SUSPENDED, Event.SENSITIVE_DETECTED) == State.SUSPENDED
+    assert next_state(State.EXECUTING, Event.SENSITIVE_DETECTED) == State.SUSPENDED
+    assert next_state(State.RETRY, Event.SENSITIVE_DETECTED) == State.SUSPENDED
+
+
+def test_sensitive_detected_matrix_never_raises():
+    sensitive = [(s, e) for (s, e) in TRANSITIONS if e == Event.SENSITIVE_DETECTED]
+    assert sensitive
+    for (s, e) in sensitive:
+        assert next_state(s, e) == TRANSITIONS[(s, e)]

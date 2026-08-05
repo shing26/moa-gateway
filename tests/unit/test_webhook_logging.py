@@ -118,3 +118,33 @@ def test_webhook_writes_request_log_on_agent_failure(monkeypatch) -> None:
     assert call[1] == 500
     assert call[7] == "hello"
     assert call[6] == "error"
+
+
+def test_webhook_debug_text_not_500(monkeypatch) -> None:
+    real_handle = pipeline.engine.handle_event
+    _patch_pipeline(monkeypatch, FakeAgent())
+    monkeypatch.setattr(pipeline.engine, "handle_event", real_handle)
+
+    async def fake_score(*args, **kwargs):
+        return SimpleNamespace(score=1.0, need_human_review=False)
+
+    async def fake_log(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(pipeline.evaluator, "score", fake_score)
+    monkeypatch.setattr(
+        pipeline.guard_service,
+        "evaluate",
+        lambda *a, **k: GuardVerdict(action=GuardianAction.ALLOW, reason="ok", role=None),
+    )
+    monkeypatch.setattr(
+        pipeline.adapter, "adapt", lambda *a, **k: SimpleNamespace(text="hello reply")
+    )
+    monkeypatch.setattr(pipeline_module, "log_request", fake_log)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        res = client.post(
+            "/webhook/test",
+            json={"session_id": "s-debug", "chat_id": "c-debug", "text": "帮我 debug 这个报错"},
+        )
+        assert res.status_code != 500

@@ -8,7 +8,11 @@ from fastapi.testclient import TestClient
 from app.middleware.auth import AuthMiddleware
 
 
-def build_client(token: str = "", dashboard_password: str = "") -> TestClient:
+def build_client(
+    token: str = "",
+    dashboard_password: str = "",
+    feishu_verification_token: str = "",
+) -> TestClient:
     inner = FastAPI()
 
     @inner.get("/health")
@@ -39,7 +43,12 @@ def build_client(token: str = "", dashboard_password: str = "") -> TestClient:
     async def static_asset():
         return {"ok": True}
 
-    inner.add_middleware(AuthMiddleware, token=token, dashboard_password=dashboard_password)
+    inner.add_middleware(
+        AuthMiddleware,
+        token=token,
+        dashboard_password=dashboard_password,
+        feishu_verification_token=feishu_verification_token,
+    )
     return TestClient(inner)
 
 
@@ -99,3 +108,39 @@ def test_allow_list_always_passes():
         assert client.post("/feishu/event").status_code == 200
         assert client.get("/docs").status_code == 200
         assert client.get("/openapi.json").status_code == 200
+
+
+def test_feishu_event_requires_lark_token_when_configured():
+    with build_client(feishu_verification_token="lark-secret") as client:
+        no_header = client.post("/feishu/event", json={"schema": "2.0", "header": {}})
+        assert no_header.status_code == 401
+        assert no_header.json() == {"error": "unauthorized"}
+        wrong = client.post("/feishu/event", headers={"X-Lark-Token": "wrong"})
+        assert wrong.status_code == 401
+        ok = client.post("/feishu/event", headers={"X-Lark-Token": "lark-secret"})
+        assert ok.status_code == 200
+
+
+def test_feishu_event_fail_open_when_not_configured():
+    with build_client() as client:
+        assert client.post("/feishu/event").status_code == 200
+
+
+def test_webhook_callback_requires_lark_token_when_configured():
+    with build_client(token="gateway-secret", feishu_verification_token="lark-secret") as client:
+        no_header = client.post("/webhook/callback")
+        assert no_header.status_code == 401
+        assert no_header.json() == {"error": "unauthorized"}
+        gateway_only = client.post(
+            "/webhook/callback", headers={"X-Gateway-Token": "gateway-secret"}
+        )
+        assert gateway_only.status_code == 401
+        wrong = client.post("/webhook/callback", headers={"X-Lark-Token": "wrong"})
+        assert wrong.status_code == 401
+        ok = client.post("/webhook/callback", headers={"X-Lark-Token": "lark-secret"})
+        assert ok.status_code == 200
+
+
+def test_webhook_callback_fail_open_when_not_configured():
+    with build_client(token="gateway-secret") as client:
+        assert client.post("/webhook/callback").status_code == 200

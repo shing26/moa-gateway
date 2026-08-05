@@ -1,8 +1,10 @@
 from __future__ import annotations
 import asyncio
+import fnmatch
 import json
 import logging
 import threading
+import time
 from collections import defaultdict
 from typing import Any, Awaitable
 
@@ -12,7 +14,7 @@ logger = logging.getLogger("moa.memory")
 
 
 class _SyncBridge:
-    def __init__(self, timeout: float = 5.0) -> None:
+    def __init__(self, timeout: float = 1.0) -> None:
         self._timeout = timeout
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -36,6 +38,9 @@ class _SyncBridge:
         return future.result(self._timeout)
 
 
+_SHARED_BRIDGE = _SyncBridge(timeout=1.0)
+
+
 class RedisConversationStorage:
     KEY_PREFIX = "moa:mem"
     DEFAULT_TTL = 86400
@@ -45,37 +50,44 @@ class RedisConversationStorage:
         url: str = "redis://localhost:6379/0",
         ttl: int = DEFAULT_TTL,
         enable_fallback: bool = True,
-        timeout: float = 5.0,
+        timeout: float = 1.0,
         client: Any | None = None,
+        retry_after: float = 30.0,
     ) -> None:
         self.url = url
         self.ttl = ttl
         self._enable_fallback = enable_fallback
         self._timeout = timeout
         self._client = client
+        self._injected = client is not None
         self._connected = False
-        self._bridge = _SyncBridge(timeout=timeout)
+        self._bridge = _SHARED_BRIDGE
         self._using_memory = False
         self._memory: dict[str, list[str]] = {}
+        self._retry_after = retry_after
+        self._last_attempt = 0.0
 
     @staticmethod
     def key(session_id: str) -> str:
         return f"{RedisConversationStorage.KEY_PREFIX}:{session_id}"
 
     def _resolve(self) -> Any:
-        if self._using_memory:
+        if not self._using_memory and self._connected:
+            return self._client
+        if self._using_memory and time.monotonic() - self._last_attempt < self._retry_after:
             return None
-        if not self._connected:
-            try:
-                client = self._bridge.call(self._connect_coro())
-            except Exception as exc:
-                self._fallback(exc)
-                return None
-            if client is None:
-                self._fallback()
-                return None
-            self._client = client
-            self._connected = True
+        self._last_attempt = time.monotonic()
+        try:
+            client = self._bridge.call(self._connect_coro())
+        except Exception as exc:
+            self._fallback(exc)
+            return None
+        if client is None:
+            self._fallback()
+            return None
+        self._client = client
+        self._connected = True
+        self._using_memory = False
         return self._client
 
     async def _connect_coro(self) -> Any:
@@ -99,7 +111,7 @@ class RedisConversationStorage:
     def _fallback(self, exc: Exception | None = None) -> None:
         if not self._enable_fallback:
             raise ConnectionError("redis unavailable and fallback disabled") from exc
-        if self._client is not None and not self._using_memory:
+        if self._client is not None and not self._using_memory and not self._injected:
             try:
                 self._bridge.call(self._client.aclose())
             except Exception:
@@ -107,6 +119,7 @@ class RedisConversationStorage:
             self._client = None
         self._connected = False
         self._using_memory = True
+        self._last_attempt = time.monotonic()
         logger.critical("redis conversation storage fallback to in-memory")
 
     def rpush(self, key: str, value: str) -> None:
@@ -161,6 +174,18 @@ class RedisConversationStorage:
             self._fallback(exc)
             self._memory.pop(key, None)
 
+    def scan_keys(self, prefix: str | None = None) -> list[str]:
+        pattern = f"{self.KEY_PREFIX}:*" if prefix is None else prefix
+        client = self._resolve()
+        if client is None:
+            return [k for k in self._memory if fnmatch.fnmatchcase(k, pattern)]
+        try:
+            keys = self._bridge.call(client.keys(pattern))
+        except Exception as exc:
+            self._fallback(exc)
+            return [k for k in self._memory if fnmatch.fnmatchcase(k, pattern)]
+        return list(keys)
+
     @staticmethod
     def _slice(items: list[str], start: int, end: int) -> list[str]:
         if not items:
@@ -197,7 +222,12 @@ class ConversationMemory:
         self._storage.rpush(key, json.dumps({"role": "assistant", "content": assistant_msg}))
         self._storage.ltrim(key, -(self._max * 2), -1)
         self._storage.expire(key, self._storage.ttl)
-        self._store.setdefault(session_id, [])
+        history = self._store[session_id]
+        history.append({"role": "user", "content": user_msg})
+        history.append({"role": "assistant", "content": assistant_msg})
+        while len(history) > self._max * 2:
+            history.pop(0)
+            history.pop(0)
 
     def get_history(self, session_id: str, limit: int = 10) -> list[dict[str, str]]:
         if self._storage is None:
@@ -209,7 +239,18 @@ class ConversationMemory:
                 history.append(json.loads(item))
             except Exception:
                 continue
+        if history and session_id not in self._store:
+            self._store[session_id] = list(history)
         return history
+
+    def list_sessions(self) -> list[str]:
+        sessions = set(self._store.keys())
+        if self._storage is not None:
+            prefix = f"{self._storage.KEY_PREFIX}:"
+            for key in self._storage.scan_keys():
+                if key.startswith(prefix):
+                    sessions.add(key[len(prefix):])
+        return list(sessions)
 
     def clear(self, session_id: str) -> None:
         if self._storage is None:

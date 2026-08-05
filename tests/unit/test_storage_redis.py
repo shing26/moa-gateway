@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import fnmatch
 import json
 
 import pytest
 
 from app.engine import HitlRequest, RedisHitlStorage, SessionStore
-from app.memory import ConversationMemory, RedisConversationStorage
+from app.memory import _SHARED_BRIDGE, ConversationMemory, RedisConversationStorage
 
 
 class FakeRedisClient:
@@ -49,6 +50,10 @@ class FakeRedisClient:
     async def expire(self, key: str, ttl: int) -> None:
         self.expires[key] = ttl
 
+    async def keys(self, pattern: str = "*") -> list[str]:
+        all_keys = set(self.data) | set(self.lists) | set(self.expires)
+        return sorted(k for k in all_keys if fnmatch.fnmatchcase(k, pattern))
+
     @staticmethod
     def _slice(items: list[str], start: int, end: int) -> list[str]:
         if not items:
@@ -80,24 +85,24 @@ class TestSessionStoreRedis:
         store = SessionStore(storage=RedisHitlStorage(client=fake))
         req = _hitl()
         store.store_hitl("sess-1", req)
-        assert "moa:hitl:sess-1" in fake.data
-        assert fake.expires.get("moa:hitl:sess-1") == RedisHitlStorage.DEFAULT_TTL
-        got = store.get_hitl("sess-1")
+        assert "moa:hitl:trace-1" in fake.data
+        assert fake.expires.get("moa:hitl:trace-1") == RedisHitlStorage.DEFAULT_TTL
+        got = store.get_hitl("trace-1")
         assert got == req
-        store.remove_hitl("sess-1")
-        assert store.get_hitl("sess-1") is None
-        assert "moa:hitl:sess-1" not in fake.data
+        store.remove_hitl("trace-1")
+        assert store.get_hitl("trace-1") is None
+        assert "moa:hitl:trace-1" not in fake.data
 
     @pytest.mark.asyncio
     async def test_custom_ttl(self):
         fake = FakeRedisClient()
         store = SessionStore(storage=RedisHitlStorage(client=fake, ttl=120))
         store.store_hitl("sess-1", _hitl())
-        assert fake.expires.get("moa:hitl:sess-1") == 120
+        assert fake.expires.get("moa:hitl:trace-1") == 120
 
     @pytest.mark.asyncio
     async def test_key_format(self):
-        assert RedisHitlStorage.key("sess-1") == "moa:hitl:sess-1"
+        assert RedisHitlStorage.key("trace-1") == "moa:hitl:trace-1"
         assert RedisConversationStorage.key("sess-1") == "moa:mem:sess-1"
 
     @pytest.mark.asyncio
@@ -106,7 +111,7 @@ class TestSessionStoreRedis:
         store = SessionStore(storage=RedisHitlStorage(client=fake))
         req = _hitl(agent_output="secret", target="chat_999")
         store.store_hitl("sess-1", req)
-        payload = json.loads(fake.data["moa:hitl:sess-1"])
+        payload = json.loads(fake.data["moa:hitl:trace-1"])
         assert payload == {
             "session_id": "sess-1",
             "trace_id": "trace-1",
@@ -116,26 +121,40 @@ class TestSessionStoreRedis:
             "channel": "feishu",
             "target": "chat_999",
         }
-        assert store.get_hitl("sess-1") == req
+        assert store.get_hitl("trace-1") == req
 
     @pytest.mark.asyncio
     async def test_corrupt_payload_returns_none(self):
         fake = FakeRedisClient()
         store = SessionStore(storage=RedisHitlStorage(client=fake))
-        fake.data["moa:hitl:sess-1"] = "not-json"
-        assert store.get_hitl("sess-1") is None
+        fake.data["moa:hitl:trace-1"] = "not-json"
+        assert store.get_hitl("trace-1") is None
 
     @pytest.mark.asyncio
     async def test_clear_all(self):
         fake = FakeRedisClient()
         store = SessionStore(storage=RedisHitlStorage(client=fake))
-        store.store_hitl("s1", _hitl(session_id="s1"))
-        store.store_hitl("s2", _hitl(session_id="s2"))
+        store.store_hitl("s1", _hitl(session_id="s1", trace_id="t-1"))
+        store.store_hitl("s2", _hitl(session_id="s2", trace_id="t-2"))
         store.clear_all()
-        assert "moa:hitl:s1" not in fake.data
-        assert "moa:hitl:s2" not in fake.data
-        assert store.get_hitl("s1") is None
-        assert store.get_hitl("s2") is None
+        assert "moa:hitl:t-1" not in fake.data
+        assert "moa:hitl:t-2" not in fake.data
+        assert store.get_hitl("t-1") is None
+        assert store.get_hitl("t-2") is None
+
+    @pytest.mark.asyncio
+    async def test_same_session_different_trace_ids_independent(self):
+        fake = FakeRedisClient()
+        store = SessionStore(storage=RedisHitlStorage(client=fake))
+        store.store_hitl("sess-1", _hitl(session_id="sess-1", trace_id="trace-a", agent_output="first-out"))
+        store.store_hitl("sess-1", _hitl(session_id="sess-1", trace_id="trace-b", agent_output="second-out"))
+        assert "moa:hitl:trace-a" in fake.data
+        assert "moa:hitl:trace-b" in fake.data
+        assert store.get_hitl("trace-a").agent_output == "first-out"
+        assert store.get_hitl("trace-b").agent_output == "second-out"
+        store.remove_hitl("trace-b")
+        assert store.get_hitl("trace-b") is None
+        assert store.get_hitl("trace-a") is not None
 
     @pytest.mark.asyncio
     async def test_falls_back_to_memory_on_connect_failure(self):
@@ -143,10 +162,10 @@ class TestSessionStoreRedis:
         store = SessionStore(storage=RedisHitlStorage(client=fake))
         req = _hitl()
         store.store_hitl("sess-1", req)
-        assert "moa:hitl:sess-1" not in fake.data
-        assert store.get_hitl("sess-1") == req
-        store.remove_hitl("sess-1")
-        assert store.get_hitl("sess-1") is None
+        assert "moa:hitl:trace-1" not in fake.data
+        assert store.get_hitl("trace-1") == req
+        store.remove_hitl("trace-1")
+        assert store.get_hitl("trace-1") is None
 
     @pytest.mark.asyncio
     async def test_falls_back_when_set_fails_after_connect(self):
@@ -157,9 +176,9 @@ class TestSessionStoreRedis:
         fake = FlakyClient()
         store = SessionStore(storage=RedisHitlStorage(client=fake))
         store.store_hitl("sess-1", _hitl())
-        assert store.get_hitl("sess-1") == _hitl()
-        store.remove_hitl("sess-1")
-        assert store.get_hitl("sess-1") is None
+        assert store.get_hitl("trace-1") == _hitl()
+        store.remove_hitl("trace-1")
+        assert store.get_hitl("trace-1") is None
 
     @pytest.mark.asyncio
     async def test_fallback_disabled_raises(self):
@@ -175,18 +194,18 @@ class TestSessionStoreRedis:
         store = SessionStore(storage=broken_factory)
         req = _hitl()
         store.store_hitl("sess-1", req)
-        assert store.get_hitl("sess-1") == req
-        store.remove_hitl("sess-1")
-        assert store.get_hitl("sess-1") is None
+        assert store.get_hitl("trace-1") == req
+        store.remove_hitl("trace-1")
+        assert store.get_hitl("trace-1") is None
 
     def test_default_storage_is_memory(self):
         store = SessionStore()
         req = _hitl()
         store.store_hitl("sess-1", req)
-        assert store._pending_hitl["sess-1"] is req
-        assert store.get_hitl("sess-1") is req
+        assert store._pending_hitl["trace-1"] is req
+        assert store.get_hitl("trace-1") is req
         store.clear_all()
-        assert store.get_hitl("sess-1") is None
+        assert store.get_hitl("trace-1") is None
 
 
 class TestConversationMemoryRedis:
@@ -286,3 +305,93 @@ class TestConversationMemoryRedis:
         ]
         mem.clear("s1")
         assert mem.get_history("s1") == []
+
+
+class TestSharedBridge:
+    def test_both_storages_share_one_bridge(self):
+        hitl = RedisHitlStorage(client=FakeRedisClient())
+        conv = RedisConversationStorage(client=FakeRedisClient())
+        assert hitl._bridge is _SHARED_BRIDGE
+        assert conv._bridge is _SHARED_BRIDGE
+        assert hitl._bridge is conv._bridge
+
+    def test_bridge_default_timeout_is_one_second(self):
+        assert _SHARED_BRIDGE._timeout == 1.0
+        assert RedisHitlStorage()._timeout == 1.0
+        assert RedisConversationStorage()._timeout == 1.0
+
+    def test_hitl_retry_recovers_after_temporary_connect_failure(self):
+        fake = FakeRedisClient(fail_ping=True)
+        storage = RedisHitlStorage(client=fake, retry_after=0.0)
+        assert storage.get("k") is None
+        assert storage._using_memory is True
+        fake.fail_ping = False
+        storage.set("k", "v")
+        assert storage._using_memory is False
+        assert fake.data.get("k") == "v"
+
+    def test_conversation_retry_recovers_after_temporary_connect_failure(self):
+        fake = FakeRedisClient(fail_ping=True)
+        storage = RedisConversationStorage(client=fake, retry_after=0.0)
+        storage.rpush("moa:mem:s1", "x")
+        assert storage._using_memory is True
+        assert "moa:mem:s1" in storage._memory
+        fake.fail_ping = False
+        storage.rpush("moa:mem:s1", "y")
+        assert storage._using_memory is False
+        assert fake.lists["moa:mem:s1"] == ["y"]
+
+
+class TestListSessions:
+    def test_list_sessions_memory_mode(self):
+        mem = ConversationMemory(max_turns=2)
+        mem.add("s1", "u1", "a1")
+        mem.add("s2", "u2", "a2")
+        assert sorted(mem.list_sessions()) == ["s1", "s2"]
+
+    def test_list_sessions_redis_mode_unions_redis_keys(self):
+        fake = FakeRedisClient()
+        mem = ConversationMemory(max_turns=2, storage=RedisConversationStorage(client=fake))
+        mem.add("s1", "u1", "a1")
+        fake.lists["moa:mem:s2"] = [
+            json.dumps({"role": "user", "content": "u"}),
+            json.dumps({"role": "assistant", "content": "a"}),
+        ]
+        assert set(mem.list_sessions()) == {"s1", "s2"}
+
+    def test_list_sessions_redis_mode_empty_after_clear(self):
+        fake = FakeRedisClient()
+        mem = ConversationMemory(max_turns=2, storage=RedisConversationStorage(client=fake))
+        mem.add("s1", "u1", "a1")
+        mem.clear("s1")
+        assert mem.list_sessions() == []
+
+    def test_add_maintains_local_cache_in_redis_mode(self):
+        fake = FakeRedisClient()
+        mem = ConversationMemory(max_turns=1, storage=RedisConversationStorage(client=fake))
+        mem.add("s1", "u1", "a1")
+        mem.add("s1", "u2", "a2")
+        assert mem._store["s1"] == [
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a2"},
+        ]
+        assert sorted(mem.list_sessions()) == ["s1"]
+        assert mem.get_history("s1") == [
+            {"role": "user", "content": "u2"},
+            {"role": "assistant", "content": "a2"},
+        ]
+
+    def test_get_history_backfills_store_on_first_redis_read(self):
+        fake = FakeRedisClient()
+        fake.lists["moa:mem:s9"] = [
+            json.dumps({"role": "user", "content": "u"}),
+            json.dumps({"role": "assistant", "content": "a"}),
+        ]
+        mem = ConversationMemory(storage=RedisConversationStorage(client=fake))
+        assert "s9" not in mem._store
+        assert mem.get_history("s9") == [
+            {"role": "user", "content": "u"},
+            {"role": "assistant", "content": "a"},
+        ]
+        assert "s9" in mem._store
+        assert "s9" in mem.list_sessions()

@@ -27,7 +27,7 @@ async def test_engine_stores_and_retrieves_hitl(engine: Engine):
         intent="write_file", agent_name="coder", channel="feishu", target="chat_123",
     )
     engine.session_store.store_hitl("sess-1", req)
-    retrieved = engine.session_store.get_hitl("sess-1")
+    retrieved = engine.session_store.get_hitl("trace-1")
     assert retrieved is not None
     assert retrieved.agent_output == "confidential data"
 
@@ -39,13 +39,36 @@ async def test_engine_removes_hitl(engine: Engine):
         intent="assistant", agent_name="general", channel="feishu", target="chat_456",
     )
     engine.session_store.store_hitl("sess-2", req)
-    engine.session_store.remove_hitl("sess-2")
-    assert engine.session_store.get_hitl("sess-2") is None
+    engine.session_store.remove_hitl("trace-2")
+    assert engine.session_store.get_hitl("trace-2") is None
 
 
 @pytest.mark.asyncio
 async def test_engine_get_hitl_returns_none_for_unknown(engine: Engine):
     assert engine.session_store.get_hitl("nonexistent") is None
+
+
+@pytest.mark.asyncio
+async def test_engine_same_session_different_trace_ids_independent(engine: Engine):
+    first = HitlRequest(
+        session_id="sess-dup", trace_id="trace-a", agent_output="first output",
+        intent="run_code", agent_name="coder", channel="feishu", target="chat_1",
+    )
+    second = HitlRequest(
+        session_id="sess-dup", trace_id="trace-b", agent_output="second output",
+        intent="run_code", agent_name="coder", channel="feishu", target="chat_1",
+    )
+    engine.session_store.store_hitl("sess-dup", first)
+    engine.session_store.store_hitl("sess-dup", second)
+    retrieved_first = engine.session_store.get_hitl("trace-a")
+    retrieved_second = engine.session_store.get_hitl("trace-b")
+    assert retrieved_first is not None
+    assert retrieved_first.agent_output == "first output"
+    assert retrieved_second is not None
+    assert retrieved_second.agent_output == "second output"
+    engine.session_store.remove_hitl("trace-b")
+    assert engine.session_store.get_hitl("trace-b") is None
+    assert engine.session_store.get_hitl("trace-a") is not None
 
 
 # ── FSM-level HITL state transitions ───────────────────────────────────
@@ -121,9 +144,37 @@ def test_webhook_execute_code_marker_triggers_review(monkeypatch) -> None:
         assert body["status"] == "pending_review"
         assert body["intent"] == "coding"
 
-        stored = pipeline.engine.session_store.get_hitl("hitl-sess")
+        stored = pipeline.engine.session_store.get_hitl(body["trace_id"])
         assert stored is not None
         assert "EXECUTION_REQUIRES_APPROVAL" in stored.agent_output
         assert stored.intent == "coding"
         assert stored.agent_name == "coder"
-        pipeline.engine.session_store.remove_hitl("hitl-sess")
+        pipeline.engine.session_store.remove_hitl(body["trace_id"])
+
+
+def test_webhook_callback_resolves_hitl_by_trace_id(monkeypatch) -> None:
+    async def fake_handle(event):
+        return SimpleNamespace(context=SimpleNamespace(state=SimpleNamespace(value="EXECUTING")))
+
+    req = HitlRequest(
+        session_id="cb-sess", trace_id="cb-trace", agent_output="callback output",
+        intent="run_code", agent_name="coder", channel="feishu", target="chat_1",
+    )
+    store = pipeline.engine.session_store
+    store.store_hitl("cb-sess", req)
+    monkeypatch.setattr(pipeline.engine, "handle_event", fake_handle)
+    try:
+        with TestClient(app) as client:
+            res = client.post(
+                "/webhook/callback",
+                json={"action": {"value": {"session_id": "cb-sess", "trace_id": "cb-trace", "action": "approve"}}},
+            )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["trace_id"] == "cb-trace"
+        assert body["state"] == "EXECUTING"
+        assert body["status"] == "approved"
+        assert body["text"] == "callback output"
+        assert store.get_hitl("cb-trace") is None
+    finally:
+        store.remove_hitl("cb-trace")

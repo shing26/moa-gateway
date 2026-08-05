@@ -490,15 +490,17 @@ async def dashboard_knowledge_search(body: SearchQuery) -> JSONResponse:
 async def dashboard_sessions() -> JSONResponse:
     sessions = []
     seen: set[str] = set()
-    for sid in list(memory._store.keys()):
+    for sid in memory.list_sessions():
         seen.add(sid)
-        history = memory.get_history(sid, limit=3)
+        full = memory.get_history(sid, limit=50)
+        history = full[-6:]
         mode = command_mode.get(sid) or "default"
         sessions.append({
             "id": sid,
             "session_id": sid[:16],
             "mode": mode,
             "mode_label": MODES.get(mode, {}).get("label", mode),
+            "message_count": len(full),
             "history": [{"role": h["role"], "content": h["content"][:80]} for h in history],
         })
     for sid in list(command_mode._store.keys()):
@@ -509,6 +511,7 @@ async def dashboard_sessions() -> JSONResponse:
                 "session_id": sid[:16],
                 "mode": mode,
                 "mode_label": MODES.get(mode, {}).get("label", mode),
+                "message_count": 0,
                 "history": [],
             })
     return JSONResponse({"sessions": sessions})
