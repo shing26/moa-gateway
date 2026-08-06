@@ -42,7 +42,7 @@ class PolicyEngine:
         return hits
 
 
-_IPV4_RE = re.compile(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)")
+_IPV4_RE = re.compile(r"(?<!\d)(?:\d{1,3}\s*\.\s*){3}\d{1,3}(?!\d)")
 
 
 def _parse_ipv4(candidate: str) -> tuple[int, int, int, int] | None:
@@ -70,7 +70,7 @@ class InternalIpPolicy(Policy):
     def detect(self, text: str) -> list[PolicyHit]:
         hits: list[PolicyHit] = []
         for m in _IPV4_RE.finditer(text):
-            octets = _parse_ipv4(m.group(0))
+            octets = _parse_ipv4(re.sub(r"\s+", "", m.group(0)))
             if octets is None:
                 continue
             if self._is_private(octets):
@@ -126,6 +126,68 @@ _PRICE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\d+(\.\d+)?\s*(元/月|元/年|元/次|美元|美金)"), "周期性价格"),
 ]
 
+_CN_DIGITS = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_UNITS = {"十": 10, "百": 100, "千": 1000, "万": 10000}
+_CN_AMOUNT_RE = re.compile(r"[零一二两三四五六七八九十百千万]+(?=(元|块|美元|美金))")
+
+
+def _cn_to_int(s: str) -> int:
+    total = 0
+    section = 0
+    num = 0
+    for ch in s:
+        if ch in _CN_DIGITS:
+            num = _CN_DIGITS[ch]
+        elif ch in _CN_UNITS:
+            unit = _CN_UNITS[ch]
+            if unit == 10000:
+                section = (section + num) * unit
+                total += section
+                section = 0
+                num = 0
+            else:
+                if num == 0:
+                    num = 1
+                section += num * unit
+                num = 0
+        else:
+            return 0
+    return total + section + num
+
+
+def _normalize_cn_amounts(text: str) -> tuple[str, list[tuple[int, int, str]]]:
+    spans: list[tuple[int, int, str]] = []
+
+    def _repl(m: re.Match[str]) -> str:
+        value = str(_cn_to_int(m.group(0)))
+        spans.append((m.start(), m.end(), value))
+        return value
+
+    return _CN_AMOUNT_RE.sub(_repl, text), spans
+
+
+def _map_snippet(text: str, spans: list[tuple[int, int, str]], start: int, end: int) -> str:
+    pieces: list[str] = []
+    norm_pos = start
+    cum = 0
+    for orig_lo, orig_hi, repl in spans:
+        n_lo = orig_lo + cum
+        n_hi = n_lo + len(repl)
+        if n_hi <= norm_pos:
+            cum += len(repl) - (orig_hi - orig_lo)
+            continue
+        if n_lo >= end:
+            break
+        if norm_pos < n_lo:
+            pieces.append(text[norm_pos - cum:n_lo - cum])
+            norm_pos = n_lo
+        pieces.append(text[orig_lo:orig_hi])
+        norm_pos = n_hi
+        cum += len(repl) - (orig_hi - orig_lo)
+    if norm_pos < end:
+        pieces.append(text[norm_pos - cum:end - cum])
+    return "".join(pieces)
+
 
 class NoPriceCommitmentPolicy(Policy):
     def __init__(self) -> None:
@@ -137,10 +199,11 @@ class NoPriceCommitmentPolicy(Policy):
         )
 
     def detect(self, text: str) -> list[PolicyHit]:
+        normalized, spans = _normalize_cn_amounts(text)
         hits: list[PolicyHit] = []
         for pattern, detail in _PRICE_PATTERNS:
-            for m in pattern.finditer(text):
-                hits.append(PolicyHit(self.policy_id, self.severity, m.group(0)[:120], detail))
+            for m in pattern.finditer(normalized):
+                hits.append(PolicyHit(self.policy_id, self.severity, _map_snippet(text, spans, m.start(), m.end())[:120], detail))
         return hits
 
 

@@ -45,6 +45,23 @@ class TestInternalIpPolicy:
         policy = InternalIpPolicy()
         assert policy.detect("999.999.999.999 不是合法 IP") == []
 
+    def test_detects_space_obfuscated_private_ip(self):
+        policy = InternalIpPolicy()
+        hits = policy.detect("内网服务器地址是 10 .20 .30 .40")
+        assert len(hits) == 1
+        assert hits[0].policy_id == "policy.security.internal_ip"
+        assert hits[0].snippet == "10 .20 .30 .40"
+
+    def test_detects_irregular_space_obfuscated_private_ip(self):
+        policy = InternalIpPolicy()
+        hits = policy.detect("地址 192 .  168 . 1 . 1")
+        assert len(hits) == 1
+        assert hits[0].snippet == "192 .  168 . 1 . 1"
+
+    def test_space_obfuscated_public_ip_still_ignored(self):
+        policy = InternalIpPolicy()
+        assert policy.detect("公网 8 .8 .8 .8") == []
+
 
 class TestSecretLeakPolicy:
     def test_detects_openai_style_key(self):
@@ -109,6 +126,35 @@ class TestNoPriceCommitmentPolicy:
     def test_ignores_fee_mentions_without_numbers(self):
         policy = NoPriceCommitmentPolicy()
         assert policy.detect("具体费用请咨询销售") == []
+
+    def test_detects_cn_numeral_price(self):
+        policy = NoPriceCommitmentPolicy()
+        hits = policy.detect("尊享版定价三百九十九元每月")
+        assert len(hits) >= 1
+        assert hits[0].policy_id == "policy.compliance.no_price_commitment"
+        assert hits[0].snippet == "定价三百九十九元"
+
+    def test_detects_cn_numeral_periodic_price(self):
+        policy = NoPriceCommitmentPolicy()
+        hits = policy.detect("基础版收费一百二十元每年")
+        assert len(hits) >= 1
+        assert hits[0].severity == "review"
+
+    def test_cn_to_int_units(self):
+        from app.guard.policies import _cn_to_int
+
+        assert _cn_to_int("三百九十九") == 399
+        assert _cn_to_int("三十") == 30
+        assert _cn_to_int("十二") == 12
+        assert _cn_to_int("一千零五") == 1005
+        assert _cn_to_int("一万二千三百四十五") == 12345
+        assert _cn_to_int("两百") == 200
+        assert _cn_to_int("一万一") == 10001
+
+    def test_ignores_cn_char_unrelated_to_price(self):
+        policy = NoPriceCommitmentPolicy()
+        assert policy.detect("这里用一元二次方程求解") == []
+        assert policy.detect("价格需以合同为准, 具体面议") == []
 
 
 class TestPolicyEngine:
