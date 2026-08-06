@@ -198,6 +198,72 @@ Dashboard 提供：
 pytest tests/unit -q
 ```
 
+## 安全合规基线
+
+Guard 策略引擎 + 可审计 HITL 审批闭环，覆盖输出内容检测、审计落盘与可视化监控。
+
+### 策略引擎
+
+内置 3 条策略（`app/guard/policies.py`，单例 `policy_engine`）：
+
+| ID | 名称 | 严重级 | 说明 |
+| --- | --- | --- | --- |
+| `policy.security.internal_ip` | 内网 IP 泄露 | deny | 检测内网、回环、链路本地及运营商 NAT 地址（10.x / 172.16-31.x / 192.168.x / 127.x / 169.254.x / 100.64.x） |
+| `policy.security.secret_leak` | 密钥泄露 | deny | 检测 OpenAI 风格密钥、AWS Access Key、GitHub Token、私钥块及 API Key 赋值 |
+| `policy.compliance.no_price_commitment` | 价格承诺 | review | 检测价格承诺表述（金额 + 单位），命中后需人工复核 |
+
+严重级：`deny` 直接拦截；`review` 进入人工审批。管线按 **行为 DENY > 输出 DENY > 行为 REVIEW > 输出 REVIEW > ALLOW** 合并守卫结果，命中策略 ID 会写入 `PipelineResult.policy_hits` 并进入审计。
+
+自定义策略：继承 `Policy`、实现 `detect()` 返回 `PolicyHit` 列表，再 `policy_engine.register()` 注册（同 ID 自动去重）：
+
+```python
+from app.guard.policies import Policy, PolicyHit, policy_engine
+
+class PiiPhonePolicy(Policy):
+    def __init__(self) -> None:
+        super().__init__(
+            policy_id="policy.security.pii_phone",
+            name="手机号泄露",
+            description="检测 11 位手机号泄露",
+            severity="deny",
+        )
+
+    def detect(self, text: str) -> list[PolicyHit]:
+        return [PolicyHit(self.policy_id, self.severity, m.group(0))
+                for m in re.finditer(r"\b1[3-9]\d{9}\b", text)]
+
+policy_engine.register(PiiPhonePolicy())
+```
+
+### 审计链路
+
+- **双写**：每次请求经 `log_request` 写入 JSONL WAL（默认 `logs/audit-YYYY-MM-DD.jsonl`，90 天保留），可选配置 Elasticsearch 后由 `EsWriter` 批量写入，ES 不可用时自动回退 WAL
+- **ES 配置**：`ES_HOSTS`（逗号分隔，如 `http://es1:9200,http://es2:9200`）+ `ES_INDEX_PREFIX`（默认 `moa-audit`），留空则关闭 ES 通道
+- **审计字段**（`AuditEntry`）：`trace_id` / `session_id` / `agent_name` / `intent` / `guard_action` / `guard_reason` / `eval_score` / `eval_issues`，安全合规改造新增 `policy_hits`（命中策略 ID 列表）、`violation`（首个命中策略）、`hitl_decision`（approve / reject）、`hitl_duration_ms`（审批耗时，毫秒）
+
+### Dashboard 安全合规页
+
+访问 `/dashboard/security`：
+
+- **拦截趋势**：近 7 天 `deny` / `review` 每日次数（表格 + 柱状图）
+- **高风险会话 Top10**：按 deny / review 拦截次数聚合，展示最近一次违规策略
+- **人工审批耗时分布**：审批样本数、P50 / P95 / 最大耗时，并按 0-30s / 30-120s / 120s+ 分桶
+- **策略清单**：服务端注册策略列表（ID / 名称 / 严重度 / 说明），自动同步注册结果
+
+### 红队测试快速开始
+
+```bash
+uv run python scripts/redteam/run_redteam.py
+```
+
+约 200 条对抗 prompt 检测策略引擎的召回率 / 精确率 / 误拦截率，报告输出至 `scripts/redteam/report.json`。指标定义、目录结构、扩展与限制详见 [docs/redteam.md](docs/redteam.md)。
+
+### HITL 审批与审计闭环
+
+- `execute_code` 等敏感操作与 `review` 级策略命中 → 守卫走 REVIEW，输出挂起（`SUSPENDED` / `pending_review`），待审批请求持久化到 Redis（`moa:hitl:*`，1 小时 TTL）
+- 配置飞书后向用户发送审批卡片（通过 / 拒绝按钮），回调 `/webhook/callback` 驱动 FSM 推进：通过则输出送达渠道，拒绝则丢弃
+- 每次审批以 `trace_id` 关联：`hitl_decision` + `hitl_duration_ms` 写入审计，可在 Dashboard 安全合规页查看审批耗时分布，形成"拦截 → 审批 → 审计"闭环
+
 ## 安全说明
 
 - 所有密钥、Token、Cookie 均通过环境变量注入，`*.env` 和 `logs/` 已加入 `.gitignore`

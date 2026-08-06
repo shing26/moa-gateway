@@ -1,9 +1,12 @@
 from types import SimpleNamespace
 
+import time
+
 from fastapi.testclient import TestClient
 
 from app.deps import pipeline
 import app.pipeline as pipeline_module
+from app.engine import HitlRequest
 from app.guard.rbac import GuardianAction, GuardVerdict
 from app.main import app
 from app.vectordb.retriever import RetrievalResult
@@ -148,3 +151,42 @@ def test_webhook_debug_text_not_500(monkeypatch) -> None:
             json={"session_id": "s-debug", "chat_id": "c-debug", "text": "帮我 debug 这个报错"},
         )
         assert res.status_code != 500
+
+
+def test_webhook_callback_approve_logs_hitl_decision_and_duration(monkeypatch) -> None:
+    calls = []
+
+    async def fake_log(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    async def fake_handle(event):
+        return SimpleNamespace(context=SimpleNamespace(state=SimpleNamespace(value="EXECUTING")))
+
+    req = HitlRequest(
+        session_id="log-sess", trace_id="log-trace", agent_output="callback output",
+        intent="run_code", agent_name="coder", channel="feishu", target="chat_1",
+        created_at=time.time() - 3.0,
+    )
+    store = pipeline.engine.session_store
+    store.store_hitl("log-sess", req)
+    monkeypatch.setattr(pipeline.engine, "handle_event", fake_handle)
+    monkeypatch.setattr(webhook_route, "log_request", fake_log)
+    try:
+        with TestClient(app) as client:
+            res = client.post(
+                "/webhook/callback",
+                json={"action": {"value": {"session_id": "log-sess", "trace_id": "log-trace", "action": "approve"}}},
+            )
+        assert res.status_code == 200
+        assert res.json()["status"] == "approved"
+        assert res.json()["text"] == "callback output"
+    finally:
+        store.remove_hitl("log-trace")
+
+    assert calls
+    args, kwargs = calls[0]
+    assert kwargs["hitl_decision"] == "approve"
+    assert kwargs["hitl_duration_ms"] > 0
+    assert kwargs["agent_name"] == "coder"
+    assert kwargs["intent"] == "run_code"
+    assert kwargs["guard_action"] == "hitl_approve"

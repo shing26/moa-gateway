@@ -24,6 +24,7 @@ class HitlRequest:
     agent_name: str
     channel: str
     target: str
+    created_at: float = 0.0
 
 
 class RedisHitlStorage:
@@ -171,7 +172,10 @@ class SessionStore:
         if self._storage is None:
             self._pending_hitl[hitl_id] = request
         else:
-            self._storage.set(self._storage.key(hitl_id), json.dumps(asdict(request)))
+            payload = asdict(request)
+            if not payload.get("created_at"):
+                payload.pop("created_at", None)
+            self._storage.set(self._storage.key(hitl_id), json.dumps(payload))
         logger.info(
             "hitl stored hitl_id=%s session=%s intent=%s",
             hitl_id, session_id, request.intent,

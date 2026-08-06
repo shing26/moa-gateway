@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import tempfile
+import dataclasses
 import pytest
 
 from app.audit.models import AuditEntry
@@ -181,3 +182,41 @@ class TestContextRetriever:
         result = await retriever.retrieve("nonexistent_content_xyz", session_id="s99")
         assert result.doc_count == 0
         assert result.context == ""
+
+
+class TestAuditEntryPolicyFields:
+    def test_policy_fields_defaults(self):
+        entry = AuditEntry(
+            trace_id="t1", session_id="s1", agent_name="coder",
+            agent_output="x", intent="coding", eval_score=1.0,
+        )
+        assert entry.policy_hits == ()
+        assert entry.violation == ""
+        assert entry.hitl_decision == ""
+        assert entry.hitl_duration_ms == 0.0
+
+    def test_policy_fields_can_be_set(self):
+        entry = AuditEntry(
+            trace_id="t1", session_id="s1", agent_name="coder",
+            agent_output="x", intent="coding", eval_score=1.0,
+            policy_hits=("pol-1", "pol-2"),
+            violation="pol-1",
+            hitl_decision="rejected",
+            hitl_duration_ms=1234.5,
+        )
+        assert entry.policy_hits == ("pol-1", "pol-2")
+        assert entry.violation == "pol-1"
+        assert entry.hitl_decision == "rejected"
+        assert entry.hitl_duration_ms == 1234.5
+
+    def test_asdict_preserves_policy_hits_tuple(self):
+        entry = AuditEntry(
+            trace_id="t1", session_id="s1", agent_name="coder",
+            agent_output="x", intent="coding", eval_score=1.0,
+            policy_hits=("pol-1",),
+            violation="pol-1",
+        )
+        data = dataclasses.asdict(entry)
+        assert data["policy_hits"] == ("pol-1",)
+        assert data["violation"] == "pol-1"
+        assert data["hitl_decision"] == ""

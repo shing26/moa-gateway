@@ -12,6 +12,7 @@ from app.prompt_registry import PromptEntry, PromptRegistry
 from app.router.intent_router import IntentRouter
 from app.vectordb import VectorDBClient
 from app.vectordb.retriever import ContextRetriever
+from app.audit.es_writer import EsWriter, build_es_writer
 from app.channels.feishu import FeishuChannelAdapter, FeishuConfig
 from app.channels.feishu_auth import FeishuAuthConfig, FeishuTokenProvider
 from app.channels.feishu_cards import FeishuCardSender
@@ -33,6 +34,7 @@ _retriever = ContextRetriever(VectorDBClient())
 
 # Module-level singletons
 router = IntentRouter()
+es_writer: EsWriter | None = None
 memory = ConversationMemory(
     storage=RedisConversationStorage(
         url=settings.redis_url,
@@ -100,6 +102,18 @@ def init_prompts() -> None:
     _prompt_registry.set_active("general", "stable")
     _flag_client.seed(DEFAULT_FLAGS)
     logger.info("prompt registry initialized with defaults")
+
+
+def init_audit() -> None:
+    global es_writer
+    es_writer = build_es_writer(settings)
+    if es_writer is not None:
+        logger.info("es audit writer enabled: %s", settings.es_hosts)
+    else:
+        logger.info("es audit writer disabled (ES_HOSTS not set)")
+
+
+init_audit()
 _redis_store = None
 
 async def _close_redis():

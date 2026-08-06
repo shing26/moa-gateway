@@ -1,4 +1,5 @@
 from __future__ import annotations
+import time
 from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -40,11 +41,25 @@ async def webhook_callback(request: Request) -> JSONResponse:
     if action == "approve":
         engine.session_store.remove_hitl(hitl_id)
         response = adapter.adapt(hitl.agent_output, channel=hitl.channel, target=hitl.target)
+        hitl_duration_ms = round((time.time() - hitl.created_at) * 1000, 1) if hitl.created_at > 0 else 0.0
+        await log_request(
+            request, 200, 0, session_id=session_id, agent_name=hitl.agent_name,
+            intent=hitl.intent, guard_action=f"hitl_{action}", input_text="",
+            output_text=hitl.agent_output[:2000], hitl_decision=action,
+            hitl_duration_ms=hitl_duration_ms,
+        )
         return JSONResponse({
             "trace_id": trace_id, "state": session_state.context.state.value, "text": response.text, "status": "approved",
         })
     else:
         engine.session_store.remove_hitl(hitl_id)
+        hitl_duration_ms = round((time.time() - hitl.created_at) * 1000, 1) if hitl.created_at > 0 else 0.0
+        await log_request(
+            request, 200, 0, session_id=session_id, agent_name=hitl.agent_name,
+            intent=hitl.intent, guard_action=f"hitl_{action}", input_text="",
+            output_text=hitl.agent_output[:2000], hitl_decision=action,
+            hitl_duration_ms=hitl_duration_ms,
+        )
         return JSONResponse({
             "trace_id": trace_id, "state": session_state.context.state.value, "status": "rejected",
         })

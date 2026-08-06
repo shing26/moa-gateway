@@ -11,7 +11,8 @@ from app.channels.feishu_cards import ApprovalCard
 from app.command_mode import MODES, parse_command
 from app.config import settings
 from app.engine import HitlRequest
-from app.guard.guard_service import GuardianAction
+from app.guard.guard_service import GuardianAction, GuardVerdict
+from app.guard.rbac import Role
 from app.middleware.request_logger import log_request
 from app.models.events import MoAEvent
 from app.prompt_registry.canary import CanaryConfig, select_canary_version
@@ -26,6 +27,17 @@ class PipelineResult:
     status: str
     need_human_review: bool = False
     fallback: str = ""
+    policy_hits: tuple[str, ...] = ()
+
+
+def _merge_guard(verdict: GuardVerdict, output_verdict: GuardVerdict, policy_ids: tuple[str, ...]) -> GuardVerdict:
+    if verdict.action == GuardianAction.DENY:
+        return verdict
+    if output_verdict.action == GuardianAction.DENY:
+        return output_verdict
+    if output_verdict.action == GuardianAction.REVIEW:
+        return output_verdict
+    return verdict
 
 
 class MoAPipeline:
@@ -169,11 +181,27 @@ class MoAPipeline:
             guard_intent = "execute_code"
             guard_hitl = True
         verdict = self.guard_service.evaluate(agent_name, guard_intent, payload, hitl_enabled=guard_hitl)
+        if verdict.action == GuardianAction.DENY:
+            policy_ids: tuple[str, ...] = ()
+        else:
+            try:
+                role = Role(payload.get("role", "operator"))
+            except ValueError:
+                role = None
+            try:
+                output_verdict, policy_ids = self.guard_service.evaluate_output(
+                    raw_output, intent=guard_intent, role=role, hitl_enabled=guard_hitl,
+                )
+            except Exception:
+                output_verdict = GuardVerdict(action=GuardianAction.ALLOW, reason="ok")
+                policy_ids = ()
+            verdict = _merge_guard(verdict, output_verdict, policy_ids)
 
         if verdict.action == GuardianAction.REVIEW:
             hitl_request = HitlRequest(
                 session_id=event.session_id, trace_id=event.trace_id, agent_output=raw_output,
                 intent=intent, agent_name=agent_name, channel=channel, target=target,
+                created_at=time.time(),
             )
             self.engine.session_store.store_hitl(event.session_id, hitl_request)
             if self.card_sender:
@@ -186,11 +214,12 @@ class MoAPipeline:
                 await log_request(
                     request, 200, (time.monotonic() - start) * 1000,
                     event.session_id, agent_name, intent, "review", event.text, raw_output,
+                    policy_hits=policy_ids,
                 )
             return PipelineResult(
                 trace_id=event.trace_id, state="SUSPENDED", intent=intent,
                 text="Output requires human approval before delivery",
-                status="pending_review", need_human_review=True,
+                status="pending_review", need_human_review=True, policy_hits=policy_ids,
             )
 
         if verdict.action == GuardianAction.DENY:
@@ -198,10 +227,11 @@ class MoAPipeline:
                 await log_request(
                     request, 200, (time.monotonic() - start) * 1000,
                     event.session_id, agent_name, intent, "deny", event.text, verdict.reason,
+                    policy_hits=policy_ids,
                 )
             return PipelineResult(
                 trace_id=event.trace_id, state=state, intent=intent,
-                text=verdict.reason, status="blocked",
+                text=verdict.reason, status="blocked", policy_hits=policy_ids,
             )
 
         response = self.adapter.adapt(raw_output, channel=channel, target=target)
@@ -210,10 +240,11 @@ class MoAPipeline:
             await log_request(
                 request, 200, (time.monotonic() - start) * 1000,
                 event.session_id, agent_name, intent, verdict.action.value, event.text, response.text,
+                policy_hits=policy_ids,
             )
         return PipelineResult(
             trace_id=event.trace_id, state=state, intent=intent,
             text=response.text, status="ok",
             need_human_review=eval_result.need_human_review or verdict.action != GuardianAction.ALLOW,
-            fallback=fallback,
+            fallback=fallback, policy_hits=policy_ids,
         )

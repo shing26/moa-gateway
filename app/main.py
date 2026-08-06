@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from opentelemetry import trace
 import app.agents.loader
 from app.deps import (
-    _card_sender, _feishu_config, _flag_client, engine, logger,
+    _card_sender, _feishu_config, _flag_client, engine, es_writer, logger,
     init_feishu, init_prompts, obsidian_sync, tracer,
 )
 from app.observability.tracing import setup_tracing, TraceConfig
@@ -58,6 +58,8 @@ async def _startup() -> None:
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     logger.info("moa gateway shutting down")
+    if es_writer is not None:
+        await es_writer.aclose()
     await obsidian_sync.close()
     engine.session_store.clear_all()
     _flag_client.invalidate()

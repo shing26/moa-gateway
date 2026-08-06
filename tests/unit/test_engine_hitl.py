@@ -43,6 +43,36 @@ async def test_engine_removes_hitl(engine: Engine):
     assert engine.session_store.get_hitl("trace-2") is None
 
 
+def test_hitl_request_created_at_defaults_to_zero():
+    req = HitlRequest(
+        session_id="sess-d", trace_id="trace-d", agent_output="data",
+        intent="assistant", agent_name="general", channel="feishu", target="chat_0",
+    )
+    assert req.created_at == 0.0
+
+
+def test_hitl_request_created_at_explicit():
+    req = HitlRequest(
+        session_id="sess-e", trace_id="trace-e", agent_output="data",
+        intent="assistant", agent_name="general", channel="feishu", target="chat_0",
+        created_at=123.456,
+    )
+    assert req.created_at == 123.456
+
+
+@pytest.mark.asyncio
+async def test_hitl_request_created_at_survives_store_roundtrip(engine: Engine):
+    req = HitlRequest(
+        session_id="sess-r", trace_id="trace-r", agent_output="data",
+        intent="assistant", agent_name="general", channel="feishu", target="chat_0",
+        created_at=111.222,
+    )
+    engine.session_store.store_hitl("sess-r", req)
+    retrieved = engine.session_store.get_hitl("trace-r")
+    assert retrieved is not None
+    assert retrieved.created_at == 111.222
+
+
 @pytest.mark.asyncio
 async def test_engine_get_hitl_returns_none_for_unknown(engine: Engine):
     assert engine.session_store.get_hitl("nonexistent") is None

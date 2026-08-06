@@ -14,6 +14,17 @@ def _parse_bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() in {"1", "true"}
 
 
+def _parse_es_hosts(value: str | None) -> list[str]:
+    if not value:
+        return []
+    hosts: list[str] = []
+    for item in value.split(","):
+        item = item.strip()
+        if item:
+            hosts.append(item)
+    return hosts
+
+
 def _parse_sentinel_hosts(value: str | None) -> list[tuple[str, int]]:
     if not value:
         return []
@@ -47,6 +58,8 @@ class Settings:
         self.hitl_enabled: bool = _parse_bool(os.getenv("HITL_ENABLED"), False)
         self.feishu_verification_token: str = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
         self.feishu_encrypt_key: str = os.getenv("FEISHU_ENCRYPT_KEY", "")
+        self.es_hosts: list[str] = _parse_es_hosts(os.getenv("ES_HOSTS", ""))
+        self.es_index_prefix: str = os.getenv("ES_INDEX_PREFIX", "moa-audit")
 
     def to_redis_config(self) -> dict[str, Any]:
         return {

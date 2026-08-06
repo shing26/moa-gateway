@@ -18,3 +18,7 @@ class AuditEntry:
     guard_reason: str = ""
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     extra: dict[str, Any] = field(default_factory=dict)
+    policy_hits: tuple[str, ...] = ()
+    violation: str = ""
+    hitl_decision: str = ""
+    hitl_duration_ms: float = 0.0

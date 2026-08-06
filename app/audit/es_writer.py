@@ -105,3 +105,14 @@ class EsWriter:
         if self._client:
             await self._client.aclose()
             self._client = None
+
+
+def build_es_writer(settings: Any) -> EsWriter | None:
+    hosts = getattr(settings, "es_hosts", None) or []
+    if not hosts:
+        return None
+    config = EsConfig(
+        hosts=[str(h) for h in hosts],
+        index_prefix=getattr(settings, "es_index_prefix", "moa-audit"),
+    )
+    return EsWriter(config=config)

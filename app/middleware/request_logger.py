@@ -24,6 +24,9 @@ async def log_request(
     guard_action: str = "",
     input_text: str = "",
     output_text: str = "",
+    policy_hits: tuple[str, ...] = (),
+    hitl_decision: str = "",
+    hitl_duration_ms: float = 0.0,
 ) -> None:
     input_preview = input_text.strip()[:500]
     output_preview = output_text.strip()[:2000]
@@ -35,6 +38,10 @@ async def log_request(
         intent=intent or "unknown",
         eval_score=0.0,
         guard_action=guard_action,
+        policy_hits=policy_hits,
+        violation=policy_hits[0] if policy_hits else "",
+        hitl_decision=hitl_decision,
+        hitl_duration_ms=hitl_duration_ms,
         extra={
             "method": request.method if hasattr(request, "method") else "",
             "path": str(request.url) if hasattr(request, "url") else "",
@@ -42,6 +49,16 @@ async def log_request(
             "duration_ms": round(duration_ms, 1),
             "input_preview": input_preview,
             "output_preview": output_preview,
+            "policy_hits": policy_hits,
+            "hitl_decision": hitl_decision,
+            "hitl_duration_ms": hitl_duration_ms,
         },
     )
     await _wal.append(entry)
+    try:
+        from app.deps import es_writer
+
+        if es_writer is not None:
+            await es_writer.write(entry)
+    except Exception:
+        logger.warning("es audit write failed", exc_info=True)

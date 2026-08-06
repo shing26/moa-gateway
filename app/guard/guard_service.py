@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
 
+from app.guard.policies import policy_engine
 from app.guard.rbac import (
     GuardianAction,
     GuardVerdict,
@@ -88,6 +90,32 @@ class GuardService:
     @staticmethod
     def _resolve_resource(intent: str, payload: dict[str, Any]) -> str:
         return payload.get("resource", intent) if isinstance(payload, dict) else intent
+
+    def evaluate_output(
+        self,
+        text: str,
+        *,
+        intent: str = "assistant",
+        role: Role | None = None,
+        hitl_enabled: bool = True,
+    ) -> tuple[GuardVerdict, tuple[str, ...]]:
+        if role is None:
+            role = resolve_role({"role": os.environ.get("MOA_DEFAULT_ROLE", "operator")})
+        hits = policy_engine.check(text)
+        policy_ids = tuple(hit.policy_id for hit in hits)
+        if any(hit.severity == "deny" for hit in hits):
+            return GuardVerdict(
+                action=GuardianAction.DENY,
+                reason=f"policy deny: {', '.join(policy_ids)}",
+                role=role,
+            ), policy_ids
+        if any(hit.severity == "review" for hit in hits):
+            return GuardVerdict(
+                action=GuardianAction.REVIEW,
+                reason=f"policy review: {', '.join(policy_ids)}",
+                role=role,
+            ), policy_ids
+        return GuardVerdict(action=GuardianAction.ALLOW, reason="ok", role=role), ()
 
 
 # Singleton for convenience.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import html
 import json
 import os
@@ -15,6 +16,7 @@ from app.command_mode import MODES
 from app.config import settings
 from app.deps import _flag_client, _retriever, command_mode, knowledge_base, memory, obsidian_sync
 from app.feature_flags import DEFAULT_FLAGS
+from app.guard.policies import policy_engine
 
 router = APIRouter()
 
@@ -24,6 +26,7 @@ PAGES = [
     ("sessions", "会话", "活跃会话、模式与记忆管理"),
     ("test", "测试台", "向本机网关发送测试请求"),
     ("logs", "请求日志", "审计请求记录与详情"),
+    ("security", "安全合规", "策略拦截、高风险会话与人工审批耗时"),
     ("ops", "运维", "Provider 配置、Feature Flag 与运行状态"),
 ]
 
@@ -56,6 +59,12 @@ NAV_ICONS = {
         'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
         '<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/>'
         '<circle cx="3.5" cy="6" r="1"/><circle cx="3.5" cy="12" r="1"/><circle cx="3.5" cy="18" r="1"/></svg>'
+    ),
+    "security": (
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+        'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        '<path d="M12 2 4 5.5v5.6c0 5 3.4 9.6 8 10.9 4.6-1.3 8-5.9 8-10.9V5.5z"/>'
+        '<path d="m9 11.5 2 2 4-4"/></svg>'
     ),
     "ops": (
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
@@ -125,6 +134,220 @@ def _read_recent_logs(count: int = 50) -> list[dict[str, Any]]:
             continue
     entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
     return entries[:count]
+
+
+def _load_audit_entries(days: int = 7) -> list[dict[str, Any]]:
+    log_dir = pathlib.Path("logs")
+    if not log_dir.exists():
+        return []
+    today = datetime.date.today()
+    cutoff = today - datetime.timedelta(days=days - 1)
+    entries: list[dict[str, Any]] = []
+    for path in sorted(log_dir.glob("audit-*.jsonl"), key=lambda p: p.name, reverse=True):
+        try:
+            file_date = datetime.date.fromisoformat(path.name[len("audit-"):-len(".jsonl")])
+        except ValueError:
+            continue
+        if file_date < cutoff:
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(data, dict):
+                continue
+            ts = data.get("timestamp", "")
+            if not ts:
+                continue
+            try:
+                datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            entries.append(data)
+    entries.sort(key=lambda e: e.get("timestamp", ""), reverse=True)
+    return entries
+
+
+def _trend_by_day(entries: list[dict[str, Any]], days: int = 7) -> list[dict[str, Any]]:
+    today = datetime.date.today()
+    dates = [(today - datetime.timedelta(days=offset)).isoformat() for offset in range(days - 1, -1, -1)]
+    buckets = {d: {"date": d, "deny": 0, "review": 0} for d in dates}
+    for entry in entries:
+        ts = entry.get("timestamp", "")
+        try:
+            day = datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00")).date().isoformat()
+        except (TypeError, ValueError):
+            continue
+        if day not in buckets:
+            continue
+        action = str(entry.get("guard_action", ""))
+        if action == "deny":
+            buckets[day]["deny"] += 1
+        elif action == "review":
+            buckets[day]["review"] += 1
+    return [buckets[d] for d in dates]
+
+
+def _top_risky_sessions(entries: list[dict[str, Any]], top_n: int = 10) -> list[dict[str, Any]]:
+    agg: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        action = str(entry.get("guard_action", ""))
+        if action not in ("deny", "review"):
+            continue
+        sid = str(entry.get("session_id", "") or "unknown")
+        item = agg.setdefault(sid, {"session_id": sid, "count": 0, "timestamp": "", "recent_violation": ""})
+        item["count"] += 1
+        ts = str(entry.get("timestamp", ""))
+        if ts > item["timestamp"]:
+            item["timestamp"] = ts
+            hits = entry.get("policy_hits")
+            if isinstance(hits, list) and hits:
+                item["recent_violation"] = str(hits[0])
+            else:
+                item["recent_violation"] = str(entry.get("violation", ""))
+    rows = sorted(agg.values(), key=lambda r: (-r["count"], r["session_id"]))[:top_n]
+    for row in rows:
+        row.pop("timestamp", None)
+    return rows
+
+
+def _percentile(sorted_values: list[float], p: int) -> float:
+    if not sorted_values:
+        return 0.0
+    n = len(sorted_values)
+    pos = (p / 100.0) * (n - 1)
+    lo = int(pos)
+    hi = min(lo + 1, n - 1)
+    frac = pos - lo
+    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * frac
+
+
+def _hitl_latency_stats(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    durations: list[float] = []
+    for entry in entries:
+        if not entry.get("hitl_decision"):
+            continue
+        try:
+            value = float(entry.get("hitl_duration_ms", 0))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            durations.append(value)
+    if not durations:
+        return {"count": 0, "p50_ms": 0.0, "p95_ms": 0.0, "max_ms": 0.0,
+                "buckets": {"lt30": 0, "30to120": 0, "gt120": 0}}
+    sorted_d = sorted(durations)
+    return {
+        "count": len(sorted_d),
+        "p50_ms": round(_percentile(sorted_d, 50), 1),
+        "p95_ms": round(_percentile(sorted_d, 95), 1),
+        "max_ms": round(sorted_d[-1], 1),
+        "buckets": {
+            "lt30": sum(1 for d in sorted_d if d < 30_000),
+            "30to120": sum(1 for d in sorted_d if 30_000 <= d < 120_000),
+            "gt120": sum(1 for d in sorted_d if d >= 120_000),
+        },
+    }
+
+
+def _fmt_ms(ms: float) -> str:
+    return f"{ms / 1000:.1f} 秒 · {ms:.0f} ms"
+
+
+def _sev_badge(severity: str) -> str:
+    color = {"high": "#e5484d", "medium": "#f5a524", "low": "#2f9e44"}.get(severity, "#6b7280")
+    return (f'<span style="display:inline-block;padding:1px 10px;border-radius:10px;'
+            f'font-size:12px;color:#fff;background:{color};">{_esc(severity or "unknown")}</span>')
+
+
+def _bar_row(label: str, count: int, total: int, color: str) -> str:
+    pct = round(count / total * 100) if total else 0
+    return (
+        '<div style="display:flex;align-items:center;gap:10px;margin:6px 0;font-size:13px;">'
+        f'<span style="width:70px;flex:none;color:#6b7280;">{label}</span>'
+        '<div style="flex:1;background:#f1f3f5;border-radius:4px;height:14px;overflow:hidden;">'
+        f'<div style="width:{pct}%;height:100%;background:{color};border-radius:4px;"></div></div>'
+        f'<span style="width:32px;flex:none;text-align:right;" class="mono">{count}</span>'
+        f'<span style="width:40px;flex:none;color:#6b7280;">{pct}%</span></div>'
+    )
+
+
+def _trend_rows(rows: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        f'<tr><td class="mono">{_esc(r["date"])}</td>'
+        f'<td>{r["deny"]}</td><td>{r["review"]}</td></tr>'
+        for r in rows
+    ) or '<tr><td colspan="3" class="muted">暂无数据</td></tr>'
+
+
+def _trend_chart(rows: list[dict[str, Any]]) -> str:
+    max_total = max((r["deny"] + r["review"] for r in rows), default=1) or 1
+    parts = []
+    for row in rows:
+        deny_w = round(row["deny"] / max_total * 100)
+        review_w = round(row["review"] / max_total * 100)
+        parts.append(
+            '<div style="display:flex;align-items:center;gap:10px;margin:6px 0;font-size:13px;">'
+            f'<span style="width:70px;flex:none;color:#6b7280;">{_esc(row["date"][5:])}</span>'
+            '<span style="width:52px;flex:none;color:#6b7280;">deny</span>'
+            '<div style="flex:1;background:#f1f3f5;border-radius:4px;height:16px;overflow:hidden;">'
+            f'<div style="width:{deny_w}%;height:100%;background:#e5484d;border-radius:4px;"></div></div>'
+            f'<span style="width:28px;flex:none;text-align:right;" class="mono">{row["deny"]}</span>'
+            '<span style="width:64px;flex:none;color:#6b7280;">review</span>'
+            '<div style="flex:1;background:#f1f3f5;border-radius:4px;height:16px;overflow:hidden;">'
+            f'<div style="width:{review_w}%;height:100%;background:#f5a524;border-radius:4px;"></div></div>'
+            f'<span style="width:28px;flex:none;text-align:right;" class="mono">{row["review"]}</span></div>'
+        )
+    return '<div style="margin-top:16px;">' + "\n".join(parts) + "</div>"
+
+
+def _risky_rows(rows: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        f'<tr><td class="mono">{_esc(r["session_id"])}</td>'
+        f'<td>{r["count"]}</td>'
+        f'<td class="muted">{_esc(r["recent_violation"]) or "—"}</td></tr>'
+        for r in rows
+    )
+
+
+def _latency_block(stats: dict[str, Any]) -> str:
+    if not stats["count"]:
+        return '<p class="empty-state">暂无人工审批记录</p>'
+    buckets = stats["buckets"]
+    total = stats["count"]
+    bars = (
+        _bar_row("0-30s", buckets["lt30"], total, "#2f9e44")
+        + _bar_row("30-120s", buckets["30to120"], total, "#f5a524")
+        + _bar_row("120s+", buckets["gt120"], total, "#e5484d")
+    )
+    return (
+        '<div class="stat-band">'
+        f'<div class="stat-card"><span class="stat-label">审批样本</span><strong class="stat-value">{stats["count"]}</strong></div>'
+        f'<div class="stat-card"><span class="stat-label">P50</span><strong class="stat-value">{_fmt_ms(stats["p50_ms"])}</strong></div>'
+        f'<div class="stat-card"><span class="stat-label">P95</span><strong class="stat-value">{_fmt_ms(stats["p95_ms"])}</strong></div>'
+        f'<div class="stat-card"><span class="stat-label">最大</span><strong class="stat-value">{_fmt_ms(stats["max_ms"])}</strong></div>'
+        "</div>"
+        '<div style="margin-top:16px;">' + bars + "</div>"
+    )
+
+
+def _policy_rows() -> str:
+    rows = []
+    for policy in policy_engine.list():
+        rows.append(
+            f'<tr><td class="mono">{_esc(policy.policy_id)}</td>'
+            f'<td>{_esc(policy.name)}</td>'
+            f'<td>{_sev_badge(policy.severity)}</td>'
+            f'<td class="muted">{_esc(policy.description)}</td></tr>'
+        )
+    return "\n".join(rows) or '<tr><td colspan="4" class="muted">暂无策略</td></tr>'
 
 
 def _esc(value: Any) -> str:
@@ -359,6 +582,52 @@ def _ops() -> str:
 """
 
 
+def _security() -> str:
+    entries = _load_audit_entries(7)
+    trend = _trend_by_day(entries, 7)
+    risky = _top_risky_sessions(entries, 10)
+    latency = _hitl_latency_stats(entries)
+    empty_attr = "" if risky else " hidden"
+    return f"""
+<section class="panel">
+  <div class="panel-head"><h2>拦截趋势</h2><span class="muted">近 7 天 deny / review 次数</span></div>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead><tr><th>日期</th><th>Deny 拦截</th><th>Review 待审</th></tr></thead>
+      <tbody>{_trend_rows(trend)}</tbody>
+    </table>
+  </div>
+  {_trend_chart(trend)}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>高风险会话 Top10</h2><span class="muted">按 deny / review 拦截次数聚合</span></div>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead><tr><th>会话 ID</th><th>拦截次数</th><th>最近一次违规</th></tr></thead>
+      <tbody>{_risky_rows(risky)}</tbody>
+    </table>
+  </div>
+  <p class="empty-state"{empty_attr}>暂无拦截记录</p>
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>人工审批耗时分布</h2><span class="muted">hitl_approve / hitl_reject 决策耗时</span></div>
+  {_latency_block(latency)}
+</section>
+
+<section class="panel">
+  <div class="panel-head"><h2>策略清单</h2><span class="muted">策略在服务端统一注册，规则可配置</span></div>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead><tr><th>策略 ID</th><th>名称</th><th>严重度</th><th>说明</th></tr></thead>
+      <tbody>{_policy_rows()}</tbody>
+    </table>
+  </div>
+</section>
+"""
+
+
 def _session_detail(sid: str) -> str:
     options = "".join(
         f'<option value="{key}"{" selected" if command_mode.get(sid) == key else ""}>'
@@ -403,6 +672,7 @@ def _render(page_key: str) -> HTMLResponse:
         "sessions": _sessions,
         "test": _test,
         "logs": _logs,
+        "security": _security,
         "ops": _ops,
     }[page_key]()
     return _shell(label, page_key, subtitle, content)
@@ -661,6 +931,11 @@ async def dashboard_test_page() -> HTMLResponse:
 @router.get("/dashboard/logs", response_class=HTMLResponse)
 async def dashboard_logs_page() -> HTMLResponse:
     return _render("logs")
+
+
+@router.get("/dashboard/security", response_class=HTMLResponse)
+async def dashboard_security_page() -> HTMLResponse:
+    return _render("security")
 
 
 @router.get("/dashboard/ops", response_class=HTMLResponse)

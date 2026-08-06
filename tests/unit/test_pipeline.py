@@ -414,3 +414,60 @@ async def test_set_card_sender(monkeypatch):
     p = make_pipeline()
     p.set_card_sender(sender)
     assert p.card_sender is sender
+
+
+class PolicyOutputAgent:
+    def __init__(self, output):
+        self.output = output
+
+    async def execute(self, envelope):
+        return self.output
+
+
+@pytest.mark.asyncio
+async def test_output_internal_ip_blocks_with_policy_hit(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "hitl_enabled", False)
+    patch_agents(monkeypatch, PolicyOutputAgent("服务器地址是 10.0.0.1"))
+    p = make_pipeline(guard=GuardService())
+    result = await p.run(make_event(), channel="test", target="s1")
+    assert result.status == "blocked"
+    assert "policy.security.internal_ip" in result.policy_hits
+
+
+@pytest.mark.asyncio
+async def test_output_price_commitment_reviews_with_policy_hit(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "hitl_enabled", True)
+    patch_agents(monkeypatch, PolicyOutputAgent("优惠价只要 99 元"))
+    engine = Engine()
+    p = make_pipeline(engine=engine, guard=GuardService())
+    result = await p.run(make_event(), channel="test", target="s1")
+    assert result.status == "pending_review"
+    assert "policy.compliance.no_price_commitment" in result.policy_hits
+
+
+@pytest.mark.asyncio
+async def test_normal_output_has_empty_policy_hits(monkeypatch):
+    patch_agents(monkeypatch, OkAgent())
+    p = make_pipeline(guard=GuardService())
+    result = await p.run(make_event(), channel="test", target="s1")
+    assert result.status == "ok"
+    assert result.policy_hits == ()
+
+
+@pytest.mark.asyncio
+async def test_output_policy_exception_keeps_pipeline_ok(monkeypatch):
+    patch_agents(monkeypatch, OkAgent())
+    guard = GuardService()
+
+    def boom(text, *, intent="assistant", role=None, hitl_enabled=True):
+        raise RuntimeError("policy engine exploded")
+
+    monkeypatch.setattr(guard, "evaluate_output", boom)
+    p = make_pipeline(guard=guard)
+    result = await p.run(make_event(), channel="test", target="s1")
+    assert result.status == "ok"
+    assert result.policy_hits == ()
