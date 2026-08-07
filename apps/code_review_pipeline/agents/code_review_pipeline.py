@@ -41,7 +41,7 @@ class CodeReviewPipeline:
         logger.info("pr loaded repo=%s pr=%s files=%d", pr.repo, pr.pr_number, len(pr.changed_files))
 
         # Build a shared diff payload for agents.
-        # In Week2 we will also inject semgrep/ruff/bandit results into static agent.
+        # In Week2 we also inject semgrep/ruff/bandit results into static agent.
         diff_payload = {
             "pr_title": pr.title,
             "diff": "\n".join(f.patch or "" for f in pr.changed_files if f.patch),
@@ -52,8 +52,17 @@ class CodeReviewPipeline:
                     "additions": f.additions,
                     "deletions": f.deletions,
                     "changes": f.changes,
+                    "patch": f.patch,
                 }
                 for f in pr.changed_files
+            ],
+            "changed_python_files": [
+                {
+                    "filename": f.filename,
+                    "content": f.content or f.patch or "",
+                }
+                for f in pr.changed_files
+                if f.filename.endswith(".py") and f.content
             ],
         }
 

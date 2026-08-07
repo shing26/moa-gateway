@@ -13,6 +13,7 @@ class PRFile:
     changes: int
     patch: str | None = None
     sha: str | None = None
+    content: str | None = None
 
 
 @dataclass(frozen=True)

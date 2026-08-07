@@ -43,6 +43,7 @@ async def build_pr_context_from_github(client: GitHubClient, body: dict[str, Any
             changes=int(f.get("changes", 0)),
             patch=str(f.get("patch")) if f.get("patch") is not None else None,
             sha=str(f.get("sha", "")),
+            content=str(f.get("patch")) if str(f.get("filename", "")).endswith(".py") and f.get("patch") is not None else None,
         )
         for f in files
     ]
