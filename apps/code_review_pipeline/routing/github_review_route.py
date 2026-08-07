@@ -1,0 +1,120 @@
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from fastapi import APIRouter
+from fastapi.responses import JSONResponse
+
+from app.deps import logger, tracer
+from app.models.events import MoAEvent, PlatformEvent
+from apps.code_review_pipeline.agents.code_review_pipeline import CodeReviewPipeline
+from apps.code_review_pipeline.notifications.feishu_notifier import FeishuReviewNotifier
+from apps.code_review_pipeline.storage.review_store import ReviewStore
+
+github_review_router = APIRouter()
+logger = logging.getLogger("moa.code_review.route")
+
+_review_store = ReviewStore()
+_feishu_notifier = FeishuReviewNotifier.from_env()
+
+
+@github_review_router.post("/webhook/github/review")
+async def github_review_webhook(request: Any) -> JSONResponse:
+    with tracer.start_as_current_span("moa.code_review.webhook") as span:
+        body = await request.json()
+        platform_event = PlatformEvent(
+            platform="github",
+            message_id=str(body.get("id", "")),
+            session_id=str(body.get("repository", {}).get("full_name", "")),
+            user_id=str(body.get("pull_request", {}).get("user", {}).get("login", "")),
+            payload=body,
+        )
+        trace_id = f"cr_{platform_event.session_id}:{platform_event.message_id}"
+        span.set_attribute("moa.channel", "github")
+        span.set_attribute("moa.trace_id", trace_id)
+
+        try:
+            pipeline = CodeReviewPipeline.from_env()
+        except Exception as exc:
+            logger.error("github review pipeline init failed: %s", exc)
+            return JSONResponse({"error": "pipeline_init_failed", "detail": str(exc)[:500]}, status_code=500)
+
+        event = MoAEvent(
+            trace_id=trace_id,
+            event=None,
+            session_id=platform_event.session_id,
+            text="",
+            context=body,
+        )
+
+        try:
+            pr, result = await pipeline.run(event)
+        except Exception as exc:
+            logger.exception("github review run failed")
+            return JSONResponse({"error": "pipeline_run_failed", "detail": str(exc)[:500]}, status_code=500)
+
+        _review_store.save(_record_from_result(result))
+
+        findings_by_severity = _count_by_severity(result)
+        notification = _build_notification(result, findings_by_severity)
+        try:
+            await _feishu_notifier.send_summary(notification)
+        except Exception as exc:
+            logger.warning("feishu notification failed: %s", exc)
+
+        return JSONResponse(
+            {
+                "trace_id": trace_id,
+                "repo": pr.repo,
+                "pr_number": pr.pr_number,
+                "changed_files": len(pr.changed_files),
+                "findings_by_severity": findings_by_severity,
+                "need_human_review": result.overall_need_human_review,
+                "status": "accepted",
+            }
+        )
+
+
+def _count_by_severity(result: Any) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for attr in ("triage", "static_analysis", "semantic_review", "test_coverage", "report"):
+        section = getattr(result, attr, None)
+        if not section:
+            continue
+        for finding in getattr(section, "findings", ()) or ():
+            key = str(getattr(finding, "severity", "unknown")).lower()
+            counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _build_notification(result: Any, findings_by_severity: dict[str, int]) -> Any:
+    from apps.code_review_pipeline.notifications.feishu_notifier import ReviewNotification
+    return ReviewNotification(
+        trace_id=result.trace_id,
+        repo=result.pr.repo,
+        pr_number=result.pr.pr_number,
+        author=result.pr.author,
+        changed_files=len(result.pr.changed_files),
+        overall_need_human_review=result.overall_need_human_review,
+        findings_by_severity=findings_by_severity,
+    )
+
+
+def _record_from_result(result: Any) -> Any:
+    from apps.code_review_pipeline.storage.review_store import ReviewRecord
+    total_findings = 0
+    for attr in ("triage", "static_analysis", "semantic_review", "test_coverage", "report"):
+        section = getattr(result, attr, None)
+        if section:
+            total_findings += len(getattr(section, "findings", ()) or ())
+    return ReviewRecord(
+        trace_id=result.trace_id,
+        repo=result.pr.repo,
+        pr_number=result.pr.pr_number,
+        head_sha=result.pr.head_sha,
+        author=result.pr.author,
+        findings_count=total_findings,
+        need_human_review=result.overall_need_human_review,
+        raw={},
+    )
