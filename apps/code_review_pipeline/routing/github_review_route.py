@@ -10,12 +10,12 @@ from app.deps import logger, tracer
 from app.models.events import MoAEvent, PlatformEvent
 from apps.code_review_pipeline.agents.code_review_pipeline import CodeReviewPipeline
 from apps.code_review_pipeline.notifications.feishu_notifier import FeishuReviewNotifier
-from apps.code_review_pipeline.storage.review_store import ReviewStore
+from apps.code_review_pipeline.storage.review_store import ReviewStore, build_review_store
 
 github_review_router = APIRouter()
 logger = logging.getLogger("moa.code_review.route")
 
-_review_store = ReviewStore()
+_review_store = build_review_store()
 _feishu_notifier = FeishuReviewNotifier.from_env()
 
 
