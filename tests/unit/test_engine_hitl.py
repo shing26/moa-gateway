@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -182,6 +183,10 @@ def test_webhook_execute_code_marker_triggers_review(monkeypatch) -> None:
         pipeline.engine.session_store.remove_hitl(body["trace_id"])
 
 
+@pytest.mark.skipif(
+    not os.environ.get("WEBHOOK_AUTH_TOKEN"),
+    reason="requires WEBHOOK_AUTH_TOKEN to be set",
+)
 def test_webhook_callback_resolves_hitl_by_trace_id(monkeypatch) -> None:
     async def fake_handle(event):
         return SimpleNamespace(context=SimpleNamespace(state=SimpleNamespace(value="EXECUTING")))
