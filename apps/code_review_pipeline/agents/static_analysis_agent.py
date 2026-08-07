@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 from typing import Any, Sequence
@@ -8,7 +9,11 @@ from app.agents.contract import AgentEnvelope
 from app.agents.provider import LLMClient
 from apps.code_review_pipeline.routing.llm_factory import build_code_review_llm
 from apps.code_review_pipeline.schemas.pipeline import Finding
-from apps.code_review_pipeline.agents.static_tool import run_ruff_on_files, RuffExecutionError
+from apps.code_review_pipeline.agents.static_tool import (
+    BanditExecutionError,
+    RuffExecutionError,
+    run_static_tools,
+)
 
 logger = logging.getLogger("moa.code_review.agents")
 
@@ -67,22 +72,40 @@ def _build_diff_context(envelope: AgentEnvelope) -> str:
     return diff[:12000]
 
 
-def _build_tool_context(findings: Sequence[dict[str, Any]]) -> str:
+def _to_mapping(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        return item
+    if hasattr(item, "__dataclass_fields__"):
+        return dataclasses.asdict(item)
+    return {}
+
+
+def _build_tool_context(findings: Sequence[Any]) -> str:
     """Build a compact tool findings context for LLM judgment."""
     if not findings:
         return ""
-    lines = [f"Ruff produced {len(findings)} finding(s):"]
-    for idx, item in enumerate(findings, start=1):
-        code = item.get("code", "")
-        message = item.get("message", "")
-        filename = item.get("filename", "")
+    lines = [f"Static tools produced {len(findings)} finding(s):"]
+    for idx, raw in enumerate(findings, start=1):
+        item = _to_mapping(raw)
+        code = item.get("code", item.get("rule_code", item.get("test_id", "")))
+        message = item.get("message", item.get("issue_text", ""))
+        filename = item.get("filename", item.get("file", ""))
         location = item.get("location") or {}
-        row = location.get("row", 0)
-        column = location.get("column", 0)
+        row = (
+            location.get("row", 0)
+            or item.get("line_number", 0)
+            or item.get("line", 0)
+        )
+        column = (
+            location.get("column", 0)
+            or item.get("col_offset", 0)
+            or item.get("column", 0)
+        )
         fix = item.get("fix") or {}
         fix_message = fix.get("message") if isinstance(fix, dict) else ""
+        source = item.get("source", "tool")
         lines.append(
-            f"{idx}. [{code}] {filename}:{row}:{column} - {message}"
+            f"{idx}. [{source}:{code}] {filename}:{row}:{column} - {message}"
             + (f" | fix: {fix_message}" if fix_message else "")
         )
     return "\n".join(lines)
@@ -110,21 +133,21 @@ class StaticAnalysisAgent:
                 ensure_ascii=False,
             )
 
-        # Step 2: run ruff on the changed files only.
+        # Step 2: run static tools on the changed files only.
         try:
-            ruff_findings = run_ruff_on_files(changed_files)
-        except RuffExecutionError as exc:
-            logger.error("ruff execution failed: %s", exc)
+            tool_findings = run_static_tools(changed_files, run_ruff=True, run_bandit=True)
+        except (RuffExecutionError, BanditExecutionError) as exc:
+            logger.error("static tool execution failed: %s", exc)
             return json.dumps(
                 {
                     "findings": [],
                     "summary": f"静态扫描执行失败：{exc}",
-                    "recommendation": "请检查环境是否安装了 ruff，或稍后重试。",
+                    "recommendation": "请检查环境是否安装了 ruff/bandit，或稍后重试。",
                 },
                 ensure_ascii=False,
             )
 
-        tool_context = _build_tool_context(ruff_findings)
+        tool_context = _build_tool_context(tool_findings)
         diff_context = _build_diff_context(envelope)
 
         user_input_parts = []
