@@ -117,6 +117,9 @@ class InMemoryVectorStore:
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:limit]
 
+    def close(self) -> None:
+        pass
+
     @staticmethod
     def _cosine(a: tuple[float, ...], b: tuple[float, ...]) -> float:
         if not a or not b or len(a) != len(b):
