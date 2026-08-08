@@ -6,6 +6,7 @@ from typing import Any
 
 from app.agents.contract import AgentEnvelope
 from app.agents.provider import LLMClient
+from apps.code_review_pipeline.rag.retriever import RetrievalResult, retrieve_team_patterns
 from apps.code_review_pipeline.routing.llm_factory import build_code_review_llm
 
 logger = logging.getLogger("moa.code_review.agents")
@@ -51,12 +52,37 @@ class SemanticReviewAgent:
     async def execute(self, envelope: AgentEnvelope) -> str:
         llm = self._llm or build_code_review_llm()
         system = SYSTEM_PROMPT
+
+        # Step 1: retrieve team patterns from vector store.
+        try:
+            rag_result = await retrieve_team_patterns(envelope, limit=5)
+        except Exception as exc:
+            logger.warning("RAG retrieval failed: %s", exc)
+            rag_result = RetrievalResult(context="", chunks=[], doc_count=0)
+
         rag_context = envelope.agent_local_slot.get("rag_context", {})
+        team_patterns = rag_context.get("patterns", [])
+        historical_prs = rag_context.get("historical_prs", [])
+
+        # Inject retrieved RAG context if available.
+        if rag_result.context:
+            team_patterns = list(team_patterns) + [rag_result.context]
+        if rag_result.chunks:
+            historical_prs = list(historical_prs) + [
+                {
+                    "trace_id": item.get("trace_id", ""),
+                    "source_id": item.get("source_id", ""),
+                    "score": item.get("score", 0.0),
+                    "content": item.get("content", "")[:500],
+                }
+                for item in rag_result.chunks
+            ]
+
         user_input = envelope.user_raw_input or json.dumps({
             "diff": envelope.agent_local_slot.get("diff", ""),
             "pr_title": envelope.agent_local_slot.get("pr_title", ""),
-            "team_patterns": rag_context.get("patterns", []),
-            "historical_prs": rag_context.get("historical_prs", []),
+            "team_patterns": team_patterns,
+            "historical_prs": historical_prs,
         }, ensure_ascii=False)
 
         messages = [

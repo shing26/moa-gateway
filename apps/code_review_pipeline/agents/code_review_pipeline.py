@@ -9,6 +9,7 @@ from apps.code_review_pipeline.agents.semantic_review_agent import SemanticRevie
 from apps.code_review_pipeline.agents.static_analysis_agent import StaticAnalysisAgent
 from apps.code_review_pipeline.agents.test_coverage_agent import TestCoverageAgent
 from apps.code_review_pipeline.agents.triage_agent import TriageAgent
+from apps.code_review_pipeline.rag.retriever import retrieve_team_patterns
 from apps.code_review_pipeline.routing.github_client import GitHubClient, GitHubRepo
 from apps.code_review_pipeline.routing.github_webhook_adapter import (
     PRFetchError,
@@ -41,7 +42,7 @@ class CodeReviewPipeline:
         logger.info("pr loaded repo=%s pr=%s files=%d", pr.repo, pr.pr_number, len(pr.changed_files))
 
         # Build a shared diff payload for agents.
-        # In Week2 we also inject semgrep/ruff/bandit results into static agent.
+        # Week3: enrich semantic review with team-specific RAG context.
         diff_payload = {
             "pr_title": pr.title,
             "diff": "\n".join(f.patch or "" for f in pr.changed_files if f.patch),
@@ -68,9 +69,29 @@ class CodeReviewPipeline:
 
         triage_output = await self._triage.execute(_envelope_from_event(event, diff_payload, agent="triage"))
         static_output = await self._static.execute(_envelope_from_event(event, diff_payload, agent="static_analysis"))
-        semantic_output = await self._semantic.execute(
-            _envelope_from_event(event, diff_payload, agent="semantic_review", rag_context={})
-        )
+
+        # Retrieve team-specific patterns for semantic review.
+        semantic_envelope = _envelope_from_event(event, diff_payload, agent="semantic_review")
+        try:
+            rag_result = await retrieve_team_patterns(semantic_envelope, limit=5)
+        except Exception as exc:
+            logger.warning("RAG retrieval failed: %s", exc)
+            rag_result = None
+
+        if rag_result and rag_result.context:
+            semantic_envelope.agent_local_slot["rag_context"] = {
+                "patterns": [rag_result.context],
+                "historical_prs": [
+                    {
+                        "source_id": item.get("source_id", ""),
+                        "score": item.get("score", 0.0),
+                        "content": item.get("content", "")[:500],
+                    }
+                    for item in rag_result.chunks
+                ],
+            }
+
+        semantic_output = await self._semantic.execute(semantic_envelope)
         test_output = await self._test.execute(_envelope_from_event(event, diff_payload, agent="test_coverage"))
         report_output = await self._report.execute(
             _envelope_from_event(event, diff_payload, agent="report", report_inputs={
