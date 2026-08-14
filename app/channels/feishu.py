@@ -40,7 +40,7 @@ class FeishuChannelAdapter(ChannelAdapter):
                 resp.raise_for_status()
                 data = resp.json()
                 if data.get("code") != 0:
-                    logger.error("feishu send failed: %s code=%s", data, data.get("code"))
+                    logger.error("feishu send failed status=%s body=%s", resp.status_code, resp.text)
                     return False
                 return True
         except Exception as exc:

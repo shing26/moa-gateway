@@ -117,6 +117,7 @@ async def _load_historical_pr(
     repo: GitHubRepo,
     pr_number: int,
     modules: tuple[str, ...],
+    min_approvers: int = 2,
 ) -> HistoricalPR | None:
     pr = await _fetch_pr(client, repo, pr_number)
     files = await _fetch_pr_files(client, repo, pr_number)
@@ -130,7 +131,7 @@ async def _load_historical_pr(
         for review in reviews
         if review.get("state", "").upper() == "APPROVED"
     )
-    if len(set(approvers)) <= 2:
+    if len(set(approvers)) < min_approvers:
         return None
 
     diff_parts = []
@@ -261,7 +262,7 @@ async def ingest_repo(
         pr_number = int(raw.get("number", 0))
         logger.info("[%d/%d] processing PR #%d", idx, len(raw_prs), pr_number)
         try:
-            pr = await _load_historical_pr(client, repo_obj, pr_number, modules)
+            pr = await _load_historical_pr(client, repo_obj, pr_number, modules, min_approvers=min_approvers)
         except Exception as exc:
             logger.warning("failed to load PR #%d: %s", pr_number, exc)
             continue

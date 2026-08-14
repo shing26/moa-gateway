@@ -13,3 +13,4 @@ build
 cloudflared.exe
 
 logs/
+data/

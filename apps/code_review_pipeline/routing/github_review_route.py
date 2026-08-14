@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
-
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.deps import logger, tracer
@@ -20,7 +18,7 @@ _feishu_notifier = FeishuReviewNotifier.from_env()
 
 
 @github_review_router.post("/webhook/github/review")
-async def github_review_webhook(request: Any) -> JSONResponse:
+async def github_review_webhook(request: Request) -> JSONResponse:
     with tracer.start_as_current_span("moa.code_review.webhook") as span:
         body = await request.json()
         platform_event = PlatformEvent(
@@ -72,6 +70,8 @@ async def github_review_webhook(request: Any) -> JSONResponse:
                 "findings_by_severity": findings_by_severity,
                 "need_human_review": result.overall_need_human_review,
                 "status": "accepted",
+                "recommendation": getattr(result.report, "recommendation", None),
+                "summary": getattr(result.report, "summary", "") or "",
             }
         )
 
@@ -98,6 +98,7 @@ def _build_notification(result: Any, findings_by_severity: dict[str, int]) -> An
         changed_files=len(result.pr.changed_files),
         overall_need_human_review=result.overall_need_human_review,
         findings_by_severity=findings_by_severity,
+        report=getattr(result, "report", None),
     )
 
 

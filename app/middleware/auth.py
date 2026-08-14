@@ -33,7 +33,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         path = request.url.path
         if path in _LARK_VERIFIED_PATHS:
-            if self._feishu_verification_token and request.headers.get("X-Lark-Token") != self._feishu_verification_token:
+            lark_token = request.headers.get("X-Lark-Token")
+            if lark_token and self._feishu_verification_token and lark_token != self._feishu_verification_token:
                 return JSONResponse({"error": "unauthorized"}, status_code=401)
             return await call_next(request)
         if self._is_allowed(path):

@@ -27,6 +27,7 @@ class AgentFindingResult:
     summary: str
     recommendation: str
     need_human_review: bool = False
+    stats: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
@@ -92,22 +93,103 @@ class PgVectorStore:
 
 
 class InMemoryVectorStore:
-    def __init__(self) -> None:
+    def __init__(self, db_path: str | None = None) -> None:
         self._items: list[dict[str, Any]] = []
+        self._db_path = db_path
+        self._conn: sqlite3.Connection | None = None
+        if db_path:
+            self._conn = self._init_sqlite(db_path)
+            self._load_from_sqlite()
+
+    @staticmethod
+    def _init_sqlite(db_path: str) -> sqlite3.Connection:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS code_review_vectors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trace_id TEXT,
+                source_type TEXT,
+                source_id TEXT,
+                content TEXT,
+                embedding TEXT,
+                metadata TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_code_review_vectors_source
+            ON code_review_vectors (trace_id, source_id)
+            """
+        )
+        conn.commit()
+        return conn
+
+    def _load_from_sqlite(self) -> None:
+        if not self._conn:
+            return
+        try:
+            rows = self._conn.execute(
+                "SELECT trace_id, source_type, source_id, content, embedding, metadata FROM code_review_vectors"
+            ).fetchall()
+            for row in rows:
+                trace_id, source_type, source_id, content, embedding, metadata = row
+                self._items.append(
+                    {
+                        "trace_id": trace_id,
+                        "source_type": source_type,
+                        "source_id": source_id,
+                        "content": content,
+                        "vector": tuple(json.loads(embedding)) if embedding else (),
+                        "metadata": json.loads(metadata) if metadata else {},
+                        "score": 0.0,
+                    }
+                )
+        except Exception as exc:
+            logger.error("failed to load sqlite vector store: %s", exc)
+
+    def _upsert_to_sqlite(self, item: dict[str, Any]) -> None:
+        if not self._conn:
+            return
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO code_review_vectors (trace_id, source_type, source_id, content, embedding, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trace_id, source_id) DO UPDATE SET
+                    content = excluded.content,
+                    embedding = excluded.embedding,
+                    metadata = excluded.metadata
+                """,
+                (
+                    item.get("trace_id"),
+                    item.get("source_type"),
+                    item.get("source_id"),
+                    item.get("content"),
+                    json.dumps(item.get("vector", ()), ensure_ascii=False),
+                    json.dumps(item.get("metadata", {}), ensure_ascii=False),
+                ),
+            )
+            self._conn.commit()
+        except Exception as exc:
+            logger.error("sqlite upsert failed: %s", exc)
 
     def upsert(self, items: list[EmbeddingResult], *, trace_id: str, source_type: str) -> None:
         for item in items:
-            self._items.append(
-                {
-                    "trace_id": trace_id,
-                    "source_type": source_type,
-                    "source_id": item.source_id,
-                    "content": item.text,
-                    "vector": item.vector,
-                    "metadata": item.metadata or {},
-                    "score": 0.0,
-                }
-            )
+            record = {
+                "trace_id": trace_id,
+                "source_type": source_type,
+                "source_id": item.source_id,
+                "content": item.text,
+                "vector": item.vector,
+                "metadata": item.metadata or {},
+                "score": 0.0,
+            }
+            self._items.append(record)
+            self._upsert_to_sqlite(record)
 
     def search(self, vector: tuple[float, ...], *, limit: int = 5) -> list[dict[str, Any]]:
         scored = []
@@ -118,7 +200,12 @@ class InMemoryVectorStore:
         return scored[:limit]
 
     def close(self) -> None:
-        pass
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
 
     @staticmethod
     def _cosine(a: tuple[float, ...], b: tuple[float, ...]) -> float:
@@ -141,7 +228,11 @@ def build_vector_store() -> VectorStore:
     )
     if not dsn:
         logger.info("no database URL configured; using in-memory vector store")
+        db_path = os.getenv("CODE_REVIEW_VECTOR_DB_PATH")
+        if db_path:
+            return InMemoryVectorStore(db_path=db_path)
         return InMemoryVectorStore()
+
     try:
         import psycopg  # noqa: F401
     except Exception as exc:

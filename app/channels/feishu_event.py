@@ -7,10 +7,15 @@ logger = logging.getLogger("moa.channels.feishu_event")
 def parse_feishu_event(body):
     schema = body.get("schema", "1.0")
     header = body.get("header", {}) if isinstance(body.get("header"), dict) else {}
-    
+
     if schema == "2.0":
         event_type = header.get("event_type", "")
-        challenge = body.get("event", {}).get("challenge") if isinstance(body.get("event"), dict) else None
+        event = body.get("event", {})
+        if isinstance(event, dict):
+            challenge = event.get("challenge")
+        else:
+            # v2 url_verification 可能直接把 challenge 放在 body 顶层
+            challenge = body.get("challenge")
     else:
         event_type = body.get("type", "")
         challenge = body.get("challenge")
@@ -52,6 +57,14 @@ def parse_feishu_event(body):
         result["event_type"] = "card_action"
         result["message_id"] = body.get("open_message_id")
         result["chat_id"] = body.get("open_chat_id")
+        return result
+
+    if event_type == "card.action.trigger":
+        result["event_type"] = "card_action"
+        event = body.get("event", {})
+        result["message_id"] = event.get("context", {}).get("open_message_id")
+        result["chat_id"] = event.get("context", {}).get("open_chat_id")
+        result["action"] = event.get("action", {}).get("value", {})
         return result
 
     return result

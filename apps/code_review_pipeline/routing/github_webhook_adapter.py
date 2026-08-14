@@ -27,10 +27,13 @@ async def build_pr_context_from_github(client: GitHubClient, body: dict[str, Any
 
     pr_payload = dict(body.get("pull_request", {}))
     repo_payload = dict(body.get("repository", {}))
-    repo = GitHubRepo(
-        owner=str(repo_payload.get("owner", {}).get("login", "")),
-        name=str(repo_payload.get("name", "")),
-    )
+    full_name = str(repo_payload.get("full_name", "")).strip()
+    if full_name and "/" in full_name:
+        owner, name = full_name.split("/", 1)
+    else:
+        owner = str(repo_payload.get("owner", {}).get("login", ""))
+        name = str(repo_payload.get("name", ""))
+    repo = GitHubRepo(owner=owner, name=name)
     pr_number = int(pr_payload.get("number", 0))
     files = await client.get_pr_files(repo, pr_number)
 
