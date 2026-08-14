@@ -1,0 +1,30 @@
+{"id":"e2e-001","input":"帮我用 Python 写个快速排序","expected":{"intent":"coding","status":"ok"},"judge_criteria":"代码正确、可运行"}
+{"id":"e2e-002","input":"介绍一下项目架构","expected":{"intent":"assistant","status":"ok"},"judge_criteria":"回答准确、有条理"}
+{"id":"e2e-003","input":"今天天气怎么样","expected":{"intent":"assistant","status":"ok"},"judge_criteria":"回答自然不编造"}
+{"id":"e2e-004","input":"把这句翻译成英文：你好世界","expected":{"intent":"translate","status":"ok"},"judge_criteria":"翻译准确"}
+{"id":"e2e-005","input":"写一个 Python 函数计算斐波那契","expected":{"intent":"coding","status":"ok"},"judge_criteria":"代码正确、有注释"}
+{"id":"e2e-006","input":"总结这篇文章","expected":{"intent":"summarize","status":"ok"},"judge_criteria":"摘要简洁"}
+{"id":"e2e-007","input":"搜索 Python 异步文档","expected":{"intent":"search","status":"ok"},"judge_criteria":"回答与请求相关"}
+{"id":"e2e-008","input":"分析这段代码的复杂度","expected":{"intent":"analyze","status":"ok"},"judge_criteria":"分析有依据"}
+{"id":"e2e-009","input":"请解释什么是 FSM","expected":{"intent":"assistant","status":"ok"},"judge_criteria":"解释准确"}
+{"id":"e2e-010","input":"写一个单例模式示例","expected":{"intent":"coding","status":"ok"},"judge_criteria":"代码可运行"}
+{"id":"e2e-011","input":"如何排查 Redis 连接超时","expected":{"intent":"assistant","status":"ok"},"judge_criteria":"步骤清晰"}
+{"id":"e2e-012","input":"把这段 Markdown 转成 HTML","expected":{"intent":"assistant","status":"ok"},"judge_criteria":"转换结果可理解"}
+{"id":"e2e-013","input":"帮我生成一份周报模板","expected":{"intent":"assistant","status":"ok"},"judge_criteria":"模板结构完整"}
+{"id":"e2e-014","input":"写一个 SQL 查询用户表","expected":{"intent":"coding","status":"ok"},"judge_criteria":"SQL 语法正确"}
+{"id":"e2e-015","input":"解释 async/await 的原理","expected":{"intent":"assistant","status":"ok"},"judge_criteria":"解释准确"}
+{"id":"e2e-016","input":"翻译一段技术文档","expected":{"intent":"translate","status":"ok"},"judge_criteria":"术语翻译准确"}
+{"id":"e2e-017","input":"总结这段会议纪要","expected":{"intent":"summarize","status":"ok"},"judge_criteria":"要点完整"}
+{"id":"e2e-018","input":"查找 httpx 的用法","expected":{"intent":"search","status":"ok"},"judge_criteria":"回答相关"}
+{"id":"e2e-019","input":"对比 FastAPI 和 Flask","expected":{"intent":"analyze","status":"ok"},"judge_criteria":"对比客观"}
+{"id":"e2e-020","input":"写一个装饰器记录耗时","expected":{"intent":"coding","status":"ok"},"judge_criteria":"代码正确"}
+{"id":"e2e-021","input":"推荐一个学习 Python 的路线","expected":{"intent":"assistant","status":"ok"},"judge_criteria":"建议合理"}
+{"id":"e2e-022","input":"解释 JWT 的组成","expected":{"intent":"assistant","status":"ok"},"judge_criteria":"解释准确"}
+{"id":"e2e-023","input":"写一个二分查找","expected":{"intent":"coding","status":"ok"},"judge_criteria":"代码可运行"}
+{"id":"e2e-024","input":"总结这本书的核心观点","expected":{"intent":"summarize","status":"ok"},"judge_criteria":"提炼准确"}
+{"id":"e2e-025","input":"搜索 Redis 文档","expected":{"intent":"search","status":"ok"},"judge_criteria":"回答相关"}
+{"id":"e2e-026","input":"分析数据库索引失效原因","expected":{"intent":"analyze","status":"ok"},"judge_criteria":"分析有据"}
+{"id":"e2e-027","input":"把这句话翻成中文：Hello world","expected":{"intent":"translate","status":"ok"},"judge_criteria":"翻译准确"}
+{"id":"e2e-028","input":"写一个爬虫示例","expected":{"intent":"coding","status":"ok"},"judge_criteria":"代码结构清晰"}
+{"id":"e2e-029","input":"介绍设计模式中的工厂模式","expected":{"intent":"assistant","status":"ok"},"judge_criteria":"解释准确"}
+{"id":"e2e-030","input":"总结上周工作进展","expected":{"intent":"summarize","status":"ok"},"judge_criteria":"要点完整"}

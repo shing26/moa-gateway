@@ -1,0 +1,50 @@
+{"id":"intent-001","input":"帮我写一个 FastAPI hello world 的代码","expected_intent":"coding"}
+{"id":"intent-002","input":"今天天气怎么样","expected_intent":"assistant","note":"边界：非路由意图"}
+{"id":"intent-003","input":"把这句翻译成英文","expected_intent":"translate"}
+{"id":"intent-004","input":"你好","expected_intent":"greeting"}
+{"id":"intent-005","input":"请修复这个 Python 报错","expected_intent":"debug"}
+{"id":"intent-006","input":"搜索项目文档","expected_intent":"search"}
+{"id":"intent-007","input":"总结这篇论文","expected_intent":"summarize"}
+{"id":"intent-008","input":"分析这段代码性能","expected_intent":"coding","note":"边界：同时含 analyze 与 coding 关键词，coding 优先级更高"}
+{"id":"intent-009","input":"实现一个冒泡排序","expected_intent":"coding"}
+{"id":"intent-010","input":"取消当前任务","expected_intent":"control"}
+{"id":"intent-011","input":"hello","expected_intent":"greeting"}
+{"id":"intent-012","input":"帮我 debug traceback","expected_intent":"debug"}
+{"id":"intent-013","input":"refactor 这个模块","expected_intent":"coding"}
+{"id":"intent-014","input":"translate hello","expected_intent":"translate"}
+{"id":"intent-015","input":"summarize this article","expected_intent":"summarize"}
+{"id":"intent-016","input":"find api docs","expected_intent":"search"}
+{"id":"intent-017","input":"统计本周数据","expected_intent":"analyze"}
+{"id":"intent-018","input":"reset session","expected_intent":"control"}
+{"id":"intent-019","input":"用 class 定义一个用户模型","expected_intent":"coding"}
+{"id":"intent-020","input":"您好","expected_intent":"greeting"}
+{"id":"intent-021","input":"报错信息在哪","expected_intent":"debug"}
+{"id":"intent-022","input":"把中文翻成英文","expected_intent":"translate"}
+{"id":"intent-023","input":"查找错误日志","expected_intent":"debug","note":"边界：错误关键词优先于查找"}
+{"id":"intent-024","input":"概括项目背景","expected_intent":"summarize"}
+{"id":"intent-025","input":"对比两个方案","expected_intent":"analyze"}
+{"id":"intent-026","input":"stop","expected_intent":"control"}
+{"id":"intent-027","input":"写一个 Python 函数","expected_intent":"coding"}
+{"id":"intent-028","input":"今天有什么新消息","expected_intent":"assistant"}
+{"id":"intent-029","input":"这段代码为什么报错","expected_intent":"debug","note":"边界：同时含 coding 与 debug 关键词，debug 优先级更高"}
+{"id":"intent-030","input":"搜索最新论文","expected_intent":"search"}
+{"id":"intent-031","input":"帮我总结会议纪要","expected_intent":"summarize"}
+{"id":"intent-032","input":"分析用户流失原因","expected_intent":"analyze"}
+{"id":"intent-033","input":"请实现一个单例模式","expected_intent":"coding"}
+{"id":"intent-034","input":"重置密码流程","expected_intent":"control"}
+{"id":"intent-035","input":"translate the document","expected_intent":"translate"}
+{"id":"intent-036","input":"debug the exception","expected_intent":"debug"}
+{"id":"intent-037","input":"search github repos","expected_intent":"search"}
+{"id":"intent-038","input":"compare two algorithms","expected_intent":"analyze"}
+{"id":"intent-039","input":"summarize the meeting","expected_intent":"summarize"}
+{"id":"intent-040","input":"讲个笑话","expected_intent":"assistant"}
+{"id":"intent-041","input":"模块化重构","expected_intent":"coding"}
+{"id":"intent-042","input":"翻译这段文档","expected_intent":"translate"}
+{"id":"intent-043","input":"查找客户资料","expected_intent":"search"}
+{"id":"intent-044","input":"统计 Q3 营收","expected_intent":"analyze"}
+{"id":"intent-045","input":"写个 class 处理订单","expected_intent":"coding"}
+{"id":"intent-046","input":"exception traceback","expected_intent":"debug"}
+{"id":"intent-047","input":"取消所有定时任务","expected_intent":"control"}
+{"id":"intent-048","input":"总结本周进展","expected_intent":"summarize"}
+{"id":"intent-049","input":"帮我查找 Redis 配置","expected_intent":"search"}
+{"id":"intent-050","input":"请介绍 REST API","expected_intent":"assistant","note":"边界：API 不触发 coding 关键词"}
