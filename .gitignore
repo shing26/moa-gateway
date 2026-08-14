@@ -10,6 +10,7 @@ build
 !/*/
 !.gitignore
 !.env.template
+!.dockerignore
 cloudflared.exe
 
 logs/
