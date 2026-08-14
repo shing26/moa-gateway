@@ -80,7 +80,7 @@ HTML_SHELL = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{{title}} · MoA Gateway</title>
+      <title>{{title}} · Agent Gateway</title>
 <link rel="stylesheet" href="/dashboard/static/tokens.css">
 <link rel="stylesheet" href="/dashboard/static/dashboard.css">
 </head>
@@ -89,7 +89,7 @@ HTML_SHELL = """<!DOCTYPE html>
   <aside class="sidebar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">M</span>
-      <div class="brand-text"><strong>MoA Gateway</strong><span>v0.1.0 · 管理后台</span></div>
+      <div class="brand-text"><strong>Agent Gateway</strong><span>v0.1.0 · 管理后台</span></div>
     </div>
     <nav class="nav" aria-label="主导航">{{nav}}</nav>
     <div class="sidebar-foot">本地模式 · 无鉴权 · 数据仅本机可见</div>

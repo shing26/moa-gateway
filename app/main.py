@@ -20,7 +20,7 @@ from app.routes.webhook import webhook_router
 from app.routes.knowledge import router as knowledge_router
 from apps.code_review_pipeline.routing.github_review_route import github_review_router
 
-app = FastAPI(title="MoA Engine Gateway", version="0.1.0")
+app = FastAPI(title="Agent Gateway", version="0.1.0")
 STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
 app.mount("/dashboard/static", StaticFiles(directory=STATIC_DIR), name="dashboard-static")
 app.include_router(dashboard_router)

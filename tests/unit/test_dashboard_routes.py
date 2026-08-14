@@ -15,7 +15,7 @@ def test_dashboard_pages_render():
                      "/dashboard/sessions", "/dashboard/test", "/dashboard/logs", "/dashboard/ops"):
             res = client.get(path)
             assert res.status_code == 200
-            assert "MoA Gateway" in res.text
+            assert "Agent Gateway" in res.text
 
 
 def test_dashboard_static_assets_served():

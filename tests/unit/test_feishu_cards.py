@@ -17,7 +17,7 @@ def test_approval_card_includes_buttons():
     )
     payload = card.to_card_payload()
     assert payload["header"]["template"] == "orange"
-    assert "MoA Engine" in payload["header"]["title"]["content"]
+    assert "Agent Gateway" in payload["header"]["title"]["content"]
     elements = payload["elements"]
     actions = [e for e in elements if e.get("tag") == "action"]
     assert len(actions) == 1

@@ -26,7 +26,7 @@ class ApprovalCard:
         return {
             "config": {"wide_screen_mode": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "MoA Engine - 人工审批请求"},
+                "title": {"tag": "plain_text", "content": "Agent Gateway - 人工审批请求"},
                 "template": "orange",
             },
             "elements": [
