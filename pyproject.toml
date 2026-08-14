@@ -12,6 +12,7 @@ dependencies = [
   "opentelemetry-api>=1.25",
   "opentelemetry-sdk>=1.25",
   "python-dotenv>=1.0",
+  "litellm>=1.96.2",
 ]
 
 [dependency-groups]

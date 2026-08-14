@@ -172,6 +172,12 @@ class MoAPipeline:
                 text="agent execution failed", status="error",
             )
 
+        llm_metrics = envelope.agent_local_slot.get("llm_metrics") or {}
+        llm_model = str(llm_metrics.get("model_used", ""))
+        cost_usd = float(llm_metrics.get("cost_usd", 0.0))
+        llm_latency_ms = float(llm_metrics.get("llm_latency_ms", 0.0))
+        fallback_used = str(llm_metrics.get("fallback_used", ""))
+
         eval_result = await self.evaluator.score(raw_output, intent)
 
         payload = {"intent": intent, "resource": intent, "role": os.environ.get("MOA_DEFAULT_ROLE", "operator")}
@@ -215,6 +221,10 @@ class MoAPipeline:
                     request, 200, (time.monotonic() - start) * 1000,
                     event.session_id, agent_name, intent, "review", event.text, raw_output,
                     policy_hits=policy_ids,
+                    llm_model=llm_model,
+                    cost_usd=cost_usd,
+                    llm_latency_ms=llm_latency_ms,
+                    fallback_used=fallback_used,
                 )
             return PipelineResult(
                 trace_id=event.trace_id, state="SUSPENDED", intent=intent,
@@ -228,6 +238,10 @@ class MoAPipeline:
                     request, 200, (time.monotonic() - start) * 1000,
                     event.session_id, agent_name, intent, "deny", event.text, verdict.reason,
                     policy_hits=policy_ids,
+                    llm_model=llm_model,
+                    cost_usd=cost_usd,
+                    llm_latency_ms=llm_latency_ms,
+                    fallback_used=fallback_used,
                 )
             return PipelineResult(
                 trace_id=event.trace_id, state=state, intent=intent,
@@ -241,6 +255,10 @@ class MoAPipeline:
                 request, 200, (time.monotonic() - start) * 1000,
                 event.session_id, agent_name, intent, verdict.action.value, event.text, response.text,
                 policy_hits=policy_ids,
+                llm_model=llm_model,
+                cost_usd=cost_usd,
+                llm_latency_ms=llm_latency_ms,
+                fallback_used=fallback_used,
             )
         return PipelineResult(
             trace_id=event.trace_id, state=state, intent=intent,

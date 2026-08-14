@@ -53,6 +53,14 @@ def _patch_github_and_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(GitHubClient, "get_pr_files", _mock_get_pr_files)
     monkeypatch.setattr(GitHubClient, "get_pr", _mock_get_pr)
     monkeypatch.setattr("apps.code_review_pipeline.routing.llm_factory.build_code_review_llm", lambda: DummyLLM())
+    for module in (
+        "apps.code_review_pipeline.agents.triage_agent",
+        "apps.code_review_pipeline.agents.static_analysis_agent",
+        "apps.code_review_pipeline.agents.semantic_review_agent",
+        "apps.code_review_pipeline.agents.test_coverage_agent",
+        "apps.code_review_pipeline.agents.report_agent",
+    ):
+        monkeypatch.setattr(f"{module}.build_code_review_llm", lambda: DummyLLM())
     monkeypatch.setenv("GITHUB_TOKEN", "test-token")
 
 

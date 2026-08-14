@@ -1,13 +1,18 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
-
 logger = logging.getLogger("moa.agents.provider")
+
+
+def _get_litellm() -> Any:
+    import litellm
+
+    return litellm
 
 
 @dataclass
@@ -20,9 +25,10 @@ class LLMConfig:
     temperature: float = 0.7
     provider: str = "direct"
     extra_headers: dict[str, str] = field(default_factory=dict)
+    fallback_models: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_env(cls, prefix: str = "LLM") -> "LLMConfig":
+    def from_env(cls, prefix: str = "LLM") -> LLMConfig:
         key = prefix.upper()
         provider = os.getenv(f"{key}_PROVIDER", "direct").lower()
         base_url = os.getenv(f"{key}_BASE_URL", "https://api.openai.com/v1")
@@ -31,6 +37,11 @@ class LLMConfig:
         timeout = float(os.getenv(f"{key}_TIMEOUT") or "120")
         max_tokens = int(os.getenv(f"{key}_MAX_TOKENS") or "4096")
         temperature = float(os.getenv(f"{key}_TEMPERATURE") or "0.7")
+        fallback_models = [
+            item.strip()
+            for item in os.getenv(f"{key}_FALLBACK_MODELS", "").split(",")
+            if item.strip()
+        ]
 
         if provider == "openrouter":
             base_url = os.getenv(f"{key}_BASE_URL", "https://openrouter.ai/api/v1")
@@ -51,6 +62,7 @@ class LLMConfig:
             max_tokens=max_tokens,
             temperature=temperature,
             provider=provider,
+            fallback_models=fallback_models,
         )
 
 
@@ -61,20 +73,45 @@ class ChatResult:
     tool_calls: list[dict[str, Any]]
 
 
+def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _tool_call_dict(call: Any) -> dict[str, Any]:
+    if isinstance(call, dict):
+        return call
+    function = _get_attr(call, "function", None)
+    return {
+        "id": _get_attr(call, "id", ""),
+        "type": _get_attr(call, "type", "function"),
+        "function": {
+            "name": _get_attr(function, "name", "") if function else "",
+            "arguments": _get_attr(function, "arguments", "{}") if function else "{}",
+        },
+    }
+
+
+def _message_dict(message: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "role": "assistant",
+        "content": _get_attr(message, "content", None),
+    }
+    tool_calls = _get_attr(message, "tool_calls", None)
+    if tool_calls:
+        result["tool_calls"] = [_tool_call_dict(call) for call in tool_calls]
+    return result
+
+
 class LLMClient:
-    """Async HTTP client for OpenAI-compatible chat completion APIs."""
+    """Async LLM client backed by LiteLLM with model fallback and cost tracking."""
 
     def __init__(self, config: LLMConfig | None = None) -> None:
         self.config = config or LLMConfig()
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if self.config.api_key and self.config.api_key.strip():
-            headers["Authorization"] = f"Bearer {self.config.api_key.strip()}"
-        headers.update(self.config.extra_headers)
-        self._client = httpx.AsyncClient(
-            base_url=self.config.base_url.rstrip("/"),
-            headers=headers,
-            timeout=self.config.timeout,
-        )
+        self.last_metrics: dict[str, Any] = {}
 
     async def chat(
         self,
@@ -84,20 +121,15 @@ class LLMClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
     ) -> str:
-        payload: dict[str, Any] = {
-            "model": model or self.config.model,
-            "messages": messages,
-            "max_tokens": max_tokens or self.config.max_tokens,
-            "temperature": temperature if temperature is not None else self.config.temperature,"stream": False,
-        }
-        logger.debug("llm request: model=%s messages=%d", payload["model"], len(messages))
-        response = await self._client.post("/chat/completions", json=payload)
-        response.raise_for_status()
-        data = response.json()
-        choice = data["choices"][0]
-        content: str = choice["message"]["content"] or ""
-        logger.debug("llm response: finish=%s tokens=%d", choice.get("finish_reason"), data.get("usage", {}))
-        return content
+        response, _ = await self._acompletion(
+            messages=messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        choice = _get_attr(response, "choices", [None])[0] if _get_attr(response, "choices", None) else None
+        message = _get_attr(choice, "message", None)
+        return _get_attr(message, "content", "") or ""
 
     async def chat_with_tools(
         self,
@@ -108,41 +140,125 @@ class LLMClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
     ) -> ChatResult:
-        payload: dict[str, Any] = {
-            "model": model or self.config.model,
+        response, _ = await self._acompletion(
+            messages=messages,
+            tools=tools,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        choice = _get_attr(response, "choices", [None])[0] if _get_attr(response, "choices", None) else None
+        message = _get_attr(choice, "message", None)
+        assistant_message = _message_dict(message)
+        updated_messages = list(messages)
+        updated_messages.append(assistant_message)
+        tool_calls = assistant_message.get("tool_calls") or []
+        content = "" if tool_calls else (assistant_message.get("content") or "")
+        return ChatResult(
+            messages=updated_messages,
+            content=content,
+            tool_calls=tool_calls,
+        )
+
+    async def _acompletion(
+        self,
+        *,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+    ) -> tuple[Any, str]:
+        primary = model or self.config.model
+        candidates = [primary, *self.config.fallback_models]
+        last_exc: Exception | None = None
+        start = time.monotonic()
+        for candidate in candidates:
+            try:
+                kwargs = self._build_kwargs(
+                    candidate,
+                    messages,
+                    tools,
+                    max_tokens,
+                    temperature,
+                )
+                litellm_module = _get_litellm()
+                response = await litellm_module.acompletion(**kwargs)
+                fallback_used = candidate if candidate != primary else ""
+                self._record_metrics(response, candidate, fallback_used, start)
+                return response, candidate
+            except Exception as exc:
+                last_exc = exc
+                logger.warning("litellm request failed model=%s: %s", candidate, exc)
+        if last_exc is None:
+            raise RuntimeError("no LLM models configured")
+        raise last_exc
+
+    def _build_kwargs(
+        self,
+        model: str,
+        messages: list[dict],
+        tools: list[dict] | None,
+        max_tokens: int | None,
+        temperature: float | None,
+    ) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "model": model,
             "messages": messages,
-            "tools": tools,
             "max_tokens": max_tokens or self.config.max_tokens,
             "temperature": temperature if temperature is not None else self.config.temperature,
             "stream": False,
+            "timeout": self.config.timeout,
         }
-        logger.debug(
-            "llm tools request: model=%s messages=%d tools=%d",
-            payload["model"],
-            len(messages),
-            len(tools),
-        )
-        response = await self._client.post("/chat/completions", json=payload)
-        response.raise_for_status()
-        data = response.json()
-        choice = data["choices"][0]
-        message = choice["message"]
-        updated_messages = list(messages)
-        updated_messages.append(message)
-        tool_calls: list[dict[str, Any]] = message.get("tool_calls") or []
-        content = "" if tool_calls else (message.get("content") or "")
-        logger.debug(
-            "llm tools response: finish=%s tool_calls=%d",
-            choice.get("finish_reason"),
-            len(tool_calls),
-        )
-        return ChatResult(messages=updated_messages, content=content, tool_calls=tool_calls)
+        if self.config.api_key and self.config.api_key.strip():
+            kwargs["api_key"] = self.config.api_key.strip()
+        if self.config.base_url:
+            kwargs["api_base"] = self.config.base_url
+        if self.config.extra_headers:
+            kwargs["extra_headers"] = dict(self.config.extra_headers)
+        if tools is not None:
+            kwargs["tools"] = tools
+        return kwargs
+
+    def _record_metrics(
+        self,
+        response: Any,
+        model: str,
+        fallback_used: str,
+        start: float,
+    ) -> None:
+        usage = _get_attr(response, "usage", None)
+        prompt_tokens = int(_get_attr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(_get_attr(usage, "completion_tokens", 0) or 0)
+        cost_usd = 0.0
+        litellm_module = _get_litellm()
+        try:
+            cost_usd = float(litellm_module.completion_cost(completion_response=response))
+        except Exception:
+            try:
+                cost_usd = float(
+                    litellm_module.completion_cost(
+                        model=model,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                    )
+                )
+            except Exception:
+                cost_usd = 0.0
+        self.last_metrics = {
+            "model_used": model,
+            "cost_usd": round(cost_usd, 6),
+            "llm_latency_ms": round((time.monotonic() - start) * 1000, 1),
+            "fallback_used": fallback_used,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+        }
 
     async def aclose(self) -> None:
-        await self._client.aclose()
+        return None
 
     async def __aenter__(self) -> LLMClient:
         return self
 
-    async def __aexit__(self, *args: Any) -> None:
+    async def __aexit__(self, *args: object) -> None:
         await self.aclose()

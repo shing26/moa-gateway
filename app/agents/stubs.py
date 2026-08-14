@@ -88,10 +88,19 @@ async def _execute_with_runtime_or_injected(
     extra_instructions: str,
     agent_name: str,
 ) -> str:
+    def capture_metrics(client: LLMClient) -> None:
+        metrics = getattr(client, "last_metrics", None)
+        if metrics:
+            envelope.agent_local_slot["llm_metrics"] = metrics
+
     if llm is not None:
-        return await _execute_with_tools(llm, envelope, role_tag, extra_instructions, agent_name)
+        output = await _execute_with_tools(llm, envelope, role_tag, extra_instructions, agent_name)
+        capture_metrics(llm)
+        return output
     async with _default_llm() as client:
-        return await _execute_with_tools(client, envelope, role_tag, extra_instructions, agent_name)
+        output = await _execute_with_tools(client, envelope, role_tag, extra_instructions, agent_name)
+        capture_metrics(client)
+        return output
 
 
 class CoderAgent:

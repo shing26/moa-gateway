@@ -1,11 +1,36 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
 from app.agents.contract import AgentEnvelope, get_agent
 from app.agents.provider import ChatResult, LLMClient, LLMConfig
+
+
+def _make_message(content: Any, tool_calls: list[dict[str, Any]] | None = None) -> SimpleNamespace:
+    return SimpleNamespace(content=content, tool_calls=tool_calls)
+
+
+def _make_response(
+    content: Any = "def fib(n): return n if n <= 1 else fib(n-1) + fib(n-2)",
+    tool_calls: list[dict[str, Any]] | None = None,
+) -> SimpleNamespace:
+    message = _make_message(content=content, tool_calls=tool_calls)
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason="tool_calls" if tool_calls else "stop")],
+        usage=SimpleNamespace(prompt_tokens=50, completion_tokens=20),
+    )
+
+
+def _patch_completion(monkeypatch: pytest.MonkeyPatch, mock_acompletion: AsyncMock) -> None:
+    fake_module = SimpleNamespace(
+        acompletion=mock_acompletion,
+        completion_cost=lambda **kwargs: 0.0,
+    )
+    monkeypatch.setattr("app.agents.provider._get_litellm", lambda: fake_module)
 
 
 @pytest.fixture
@@ -20,23 +45,11 @@ def envelope() -> AgentEnvelope:
 
 
 @pytest.fixture
-def fake_llm() -> LLMClient:
+def fake_llm(monkeypatch: pytest.MonkeyPatch) -> LLMClient:
     client = LLMClient(LLMConfig(api_key="test-key", base_url="http://localhost:0"))
-    mock_post = AsyncMock()
-    mock_post.return_value = MagicMock(
-        status_code=200,
-        json=lambda: {
-            "choices": [
-                {
-                    "message": {"role": "assistant", "content": "def fib(n): return n if n <= 1 else fib(n-1) + fib(n-2)"},
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": {"prompt_tokens": 50, "completion_tokens": 20},
-        },
-        raise_for_status=lambda: None,
-    )
-    client._client.post = mock_post
+    mock_acompletion = AsyncMock(return_value=_make_response())
+    _patch_completion(monkeypatch, mock_acompletion)
+    client._completion_mock = mock_acompletion
     return client
 
 
@@ -73,14 +86,14 @@ async def test_llm_client_chat_formats_request(fake_llm: LLMClient) -> None:
     result = await fake_llm.chat([{"role": "user", "content": "hello"}])
     assert isinstance(result, str)
     assert len(result) > 0
-    fake_llm._client.post.assert_called_once()
+    fake_llm._completion_mock.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_llm_client_handles_api_error() -> None:
+async def test_llm_client_handles_api_error(monkeypatch: pytest.MonkeyPatch) -> None:
     client = LLMClient(LLMConfig(api_key="bad-key", base_url="http://localhost:0"))
-    mock_post = AsyncMock(side_effect=Exception("API error"))
-    client._client.post = mock_post
+    mock_acompletion = AsyncMock(side_effect=Exception("API error"))
+    _patch_completion(monkeypatch, mock_acompletion)
 
     with pytest.raises(Exception, match="API error"):
         await client.chat([{"role": "user", "content": "hi"}])
@@ -109,8 +122,8 @@ async def test_llm_client_chat_with_tools_payload_and_plain_content(fake_llm: LL
     assert result.messages[-1]["content"] == result.content
     assert original == [{"role": "user", "content": "what time is it"}]
 
-    call_args = fake_llm._client.post.call_args
-    payload = call_args.kwargs["json"]
+    call_args = fake_llm._completion_mock.call_args
+    payload = call_args.kwargs
     assert payload["tools"] == tools
     assert payload["stream"] is False
     assert payload["model"] == "gpt-4o-mini"
@@ -119,7 +132,7 @@ async def test_llm_client_chat_with_tools_payload_and_plain_content(fake_llm: LL
 
 
 @pytest.mark.asyncio
-async def test_llm_client_chat_with_tools_returns_tool_calls() -> None:
+async def test_llm_client_chat_with_tools_returns_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     client = LLMClient(LLMConfig(api_key="test-key", base_url="http://localhost:0"))
     tool_calls = [
         {
@@ -128,36 +141,28 @@ async def test_llm_client_chat_with_tools_returns_tool_calls() -> None:
             "function": {"name": "current_time", "arguments": "{}"},
         }
     ]
-    assistant_message = {"role": "assistant", "content": None, "tool_calls": tool_calls}
-    mock_post = AsyncMock(
-        return_value=MagicMock(
-            status_code=200,
-            json=lambda: {
-                "choices": [{"message": assistant_message, "finish_reason": "tool_calls"}],
-                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-            },
-            raise_for_status=lambda: None,
-        )
-    )
-    client._client.post = mock_post
+    mock_acompletion = AsyncMock(return_value=_make_response(content=None, tool_calls=tool_calls))
+    _patch_completion(monkeypatch, mock_acompletion)
 
     result = await client.chat_with_tools([{"role": "user", "content": "what time is it"}], [])
     assert result.content == ""
     assert result.tool_calls == tool_calls
     assert len(result.messages) == 2
-    assert result.messages[-1] == assistant_message
-    payload = mock_post.call_args.kwargs["json"]
+    assert result.messages[-1]["content"] is None
+    payload = mock_acompletion.call_args.kwargs
     assert payload["tools"] == []
 
 
 @pytest.mark.asyncio
-async def test_llm_client_chat_with_tools_handles_api_error() -> None:
+async def test_llm_client_chat_with_tools_handles_api_error(monkeypatch: pytest.MonkeyPatch) -> None:
     client = LLMClient(LLMConfig(api_key="bad-key", base_url="http://localhost:0"))
-    mock_post = AsyncMock(side_effect=Exception("API error"))
-    client._client.post = mock_post
+    mock_acompletion = AsyncMock(side_effect=Exception("API error"))
+    _patch_completion(monkeypatch, mock_acompletion)
 
     with pytest.raises(Exception, match="API error"):
         await client.chat_with_tools([{"role": "user", "content": "hi"}], [])
+
+
 @pytest.mark.asyncio
 async def test_general_agent_uses_runtime_env(monkeypatch, envelope: AgentEnvelope) -> None:
     import os

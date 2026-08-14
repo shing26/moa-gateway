@@ -27,6 +27,10 @@ async def log_request(
     policy_hits: tuple[str, ...] = (),
     hitl_decision: str = "",
     hitl_duration_ms: float = 0.0,
+    llm_model: str = "",
+    cost_usd: float = 0.0,
+    llm_latency_ms: float = 0.0,
+    fallback_used: str = "",
 ) -> None:
     input_preview = input_text.strip()[:500]
     output_preview = output_text.strip()[:2000]
@@ -52,6 +56,10 @@ async def log_request(
             "policy_hits": policy_hits,
             "hitl_decision": hitl_decision,
             "hitl_duration_ms": hitl_duration_ms,
+            "llm_model": llm_model,
+            "cost_usd": cost_usd,
+            "llm_latency_ms": llm_latency_ms,
+            "fallback_used": fallback_used,
         },
     )
     await _wal.append(entry)
