@@ -28,9 +28,9 @@ class LLMConfig:
         base_url = os.getenv(f"{key}_BASE_URL", "https://api.openai.com/v1")
         api_key = os.getenv(f"{key}_API_KEY", "") or os.getenv("OMNIROUTE_API_KEY", "")
         model = os.getenv(f"{key}_MODEL", "gpt-4o-mini")
-        timeout = float(os.getenv(f"{key}_TIMEOUT", "120"))
-        max_tokens = int(os.getenv(f"{key}_MAX_TOKENS", "4096"))
-        temperature = float(os.getenv(f"{key}_TEMPERATURE", "0.7"))
+        timeout = float(os.getenv(f"{key}_TIMEOUT") or "120")
+        max_tokens = int(os.getenv(f"{key}_MAX_TOKENS") or "4096")
+        temperature = float(os.getenv(f"{key}_TEMPERATURE") or "0.7")
 
         if provider == "openrouter":
             base_url = os.getenv(f"{key}_BASE_URL", "https://openrouter.ai/api/v1")
