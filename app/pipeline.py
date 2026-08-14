@@ -89,7 +89,7 @@ class MoAPipeline:
             if parsed:
                 cmd_key, label = parsed
                 if cmd_key in ("help", ""):
-                    help_text = "可用指令:\n/coding - 编程模式\n/translate - 翻译模式\n/search - 搜索模式\n/analyze - 分析模式\n/default - 默认模式"
+                    help_text = "可用指令:\n/coding - 编程模式\n/translate - 翻译模式\n/search - 搜索模式\n/analyze - 分析模式\n/review - PR 审查\n/default - 默认模式"
                     if request is not None:
                         await log_request(
                             request, 200, (time.monotonic() - start) * 1000,

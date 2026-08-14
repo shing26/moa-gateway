@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from app.deps import logger, tracer
 from app.models.events import MoAEvent, PlatformEvent
+from apps.code_review_pipeline.reporting import build_notification, count_by_severity
 from apps.code_review_pipeline.agents.code_review_pipeline import CodeReviewPipeline
 from apps.code_review_pipeline.notifications.feishu_notifier import FeishuReviewNotifier
 from apps.code_review_pipeline.storage.review_store import ReviewStore, build_review_store
@@ -54,8 +55,8 @@ async def github_review_webhook(request: Request) -> JSONResponse:
 
         _review_store.save(_record_from_result(result))
 
-        findings_by_severity = _count_by_severity(result)
-        notification = _build_notification(result, findings_by_severity)
+        findings_by_severity = count_by_severity(result)
+        notification = build_notification(result, findings_by_severity)
         try:
             await _feishu_notifier.send_summary(notification)
         except Exception as exc:
@@ -74,32 +75,6 @@ async def github_review_webhook(request: Request) -> JSONResponse:
                 "summary": getattr(result.report, "summary", "") or "",
             }
         )
-
-
-def _count_by_severity(result: Any) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for attr in ("triage", "static_analysis", "semantic_review", "test_coverage", "report"):
-        section = getattr(result, attr, None)
-        if not section:
-            continue
-        for finding in getattr(section, "findings", ()) or ():
-            key = str(getattr(finding, "severity", "unknown")).lower()
-            counts[key] = counts.get(key, 0) + 1
-    return counts
-
-
-def _build_notification(result: Any, findings_by_severity: dict[str, int]) -> Any:
-    from apps.code_review_pipeline.notifications.feishu_notifier import ReviewNotification
-    return ReviewNotification(
-        trace_id=result.trace_id,
-        repo=result.pr.repo,
-        pr_number=result.pr.pr_number,
-        author=result.pr.author,
-        changed_files=len(result.pr.changed_files),
-        overall_need_human_review=result.overall_need_human_review,
-        findings_by_severity=findings_by_severity,
-        report=getattr(result, "report", None),
-    )
 
 
 def _record_from_result(result: Any) -> Any:

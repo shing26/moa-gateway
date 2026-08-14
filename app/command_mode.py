@@ -13,6 +13,7 @@ MODES = {
     "analyze": {"label": "分析", "intent": "analyze"},
     "analysis": {"label": "分析", "intent": "analyze"},
     "general": {"label": "通用", "intent": None},
+    "review": {"label": "PR 审查", "intent": "review"},
 }
 
 COMMANDS = {
@@ -31,6 +32,8 @@ COMMANDS = {
     "/default": "default",
     "/默认": "default",
     "/通用": "general",
+    "/review": "review",
+    "/审查": "review",
     "/help": None,
     "/帮助": None,
 }
