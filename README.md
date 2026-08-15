@@ -28,7 +28,14 @@ flowchart LR
 - 三级降级意图路由：正则命中直接返回，不调 LLM；只有低置信度才升级到微模型/路由模型。
 - LiteLLM 内核：`chat` / `chat_with_tools` 接口保持兼容，内置多模型 fallback，网络/429/5xx 自动切换。
 - 每次调用记录 `model_used`、`cost_usd`、`llm_latency_ms`、`fallback_used`，随审计日志落盘。
-- Eval 实测意图路由准确率：50/50，1.0。
+- Eval 实测（`evals/datasets/intent.jsonl`，50 条）：意图准确率 1.0，其中 **46 条（92%）由正则直接命中，0 次 LLM 调用**，只有 4 条落到模型兜底路径。
+
+| 路由层级 | 说明 | 50 条用例命中 |
+|---|---|---|
+| 正则 | 0 LLM 调用，毫秒级返回 | 46（92%） |
+| 微模型 / 路由 LLM | 正则未命中时升级 | 4（8%） |
+
+每次真实调用的成本都会写入审计日志 `cost_usd` 字段，可据此按周聚合实际节省金额。
 
 ### 2. 安全守卫 + HITL
 
@@ -53,8 +60,16 @@ uv run python evals/run_evals.py --offline
 | 维度 | 数据量 | 当前指标 |
 |---|---|---|
 | Intent 意图路由 | 50 条 | 准确率 1.0 |
-| Guard 守卫对抗 | 50 条 | deny 召回 1.0 / 精确率 1.0 |
+| Guard 守卫对抗 | 50 条 | deny 召回 1.0 / 精确率 1.0，review 召回 1.0 |
 | E2E 端到端 | 30 条 | offline 标记 skipped，CI 不依赖网络 |
+
+红队基线（`scripts/redteam/cases.json`，200 条）：
+
+| 维度 | 数据量 | 当前指标 |
+|---|---|---|
+| 越狱 / 注入 / 诱导 | 150 条 | 期望拦截 120 条全部命中，漏网 0 |
+| 正常对照 | 50 条 | 误拦截 0 |
+| 汇总 | 200 条 | 召回率 1.0 / 精确率 1.0 / 误拦截率 0.0 |
 
 报告写入 `evals/reports/latest.json`，包含 `git_sha`、混淆矩阵、拦截指标和 e2e 均分/延迟/成本；intent 准确率低于 0.9 或 guard deny 召回低于 0.95 时退出码非零。
 
@@ -117,4 +132,6 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 - `app/vectordb` 目前是中文 bigram 关键词检索，不是真向量库；语义 RAG 位于 PR 审查子应用。
 - Redis 不可用时回退内存存储，内存回退下的 Lua 幂等锁为降级语义。
 - 限流器为内存滑窗实现，适合单机开发；多实例需换 Redis 限流。
+- `app/memory.py` 的 `_SyncBridge` 同步桥是已知技术债：同步线程跑 asyncio loop，测试与运行时都不依赖它做时序保证。
+- `app/main.py` 仍使用 FastAPI `on_event` 启动/关闭钩子（deprecated），计划迁移到 lifespan；当前只记录不修改，避免引入启动行为回归。
 - 所有密钥通过环境变量注入，`.env`、`logs/`、`data/`、`evals/reports/` 不入库。

@@ -63,7 +63,7 @@ uv run bandit -r app -q
 | `app/pipeline.py` | `MoAPipeline.run()` 主管线 | 仅 cost 透传（Phase 1） |
 | `app/router/intent_router.py` | 三级降级路由 | 不动 |
 | `app/agents/provider.py` | 手写 httpx LLM 客户端（`LLMClient`） | **Phase 1 换 LiteLLM** |
-| `app/agents/stubs.py` | Coder/General 执行 + 工具循环（`_execute_with_tools`） | **不动**（接口保持） |
+| `app/agents/stubs.py` | Coder/General 执行 + 工具循环（`_execute_with_tools`） | **仅加指标透传**（`_execute_with_runtime_or_injected` 写 `llm_metrics`） |
 | `app/agents/tools.py` | 工具注册表（knowledge_search/current_time/execute_code） | 不动 |
 | `app/guard/guard_service.py` | `GuardService.evaluate/evaluate_output`（ALLOW/REVIEW/DENY） | 不动（Eval 用） |
 | `app/guard/policies.py` | 策略引擎（内网IP/密钥/价格承诺） | 不动（Eval 用） |

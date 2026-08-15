@@ -40,10 +40,10 @@
 | `app/deps.py` | 单例装配（engine/pipeline/memory/guard...） | 不动 |
 | `app/config.py` | 环境配置 | 不动 |
 | `app/engine.py` | FSM 推进 + HITL 存储（Redis 回退内存） | 不动 |
-| `app/pipeline.py` | MoAPipeline 主管线 | 不动（或仅加 cost 字段） |
+| `app/pipeline.py` | MoAPipeline 主管线 | 仅加 cost/指标透传 |
 | `app/router/intent_router.py` | 三级降级路由 | 微调 |
 | `app/agents/provider.py` | **手写 httpx LLM 客户端** | **换 LiteLLM（Phase 1）** |
-| `app/agents/stubs.py` | Coder/General 真实执行 + 工具循环 | 不动（接口保持） |
+| `app/agents/stubs.py` | Coder/General 真实执行 + 工具循环 | 仅加 LLM 指标透传到 envelope |
 | `app/agents/tools.py` | 工具注册表 | 不动 |
 | `app/guard/*` | 守卫服务 + 策略引擎 + RBAC | 不动（资产） |
 | `app/evaluator/evaluator.py` | AST 评估 | 不动 |
@@ -180,7 +180,7 @@ evals/
   "summary": "..."
 }
 ```
-- 支持 `--offline`（CI 用：只跑 intent+guard，e2e 标记 skipped）
+- 支持 `--offline`（CI 用：e2e 用 fake 跑通接线并标记 skipped，不依赖网络）
 
 ### 6.4 测试
 - `tests/unit/test_evals_runner.py`：用 3-5 条 fixture 数据验证 runner 解析、指标计算、报告输出
