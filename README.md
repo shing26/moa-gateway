@@ -139,8 +139,8 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 ## 已知边界
 
 - `app/vectordb` 目前是中文 bigram 关键词检索，不是真向量库；语义 RAG 位于 PR 审查子应用。
-- Redis 不可用时回退内存存储，内存回退下的 Lua 幂等锁为降级语义。
+- Redis 不可用时回退内存存储，内存回退也支持幂等锁脚本（acquire/release/extend + TTL），但只保证单进程内语义。
 - 限流器为内存滑窗实现，适合单机开发；多实例需换 Redis 限流。
 - `app/memory.py` 的 `_SyncBridge` 同步桥是已知技术债：同步线程跑 asyncio loop，测试与运行时都不依赖它做时序保证。
-- `app/main.py` 仍使用 FastAPI `on_event` 启动/关闭钩子（deprecated），计划迁移到 lifespan；当前只记录不修改，避免引入启动行为回归。
+- `app/main.py` 使用 FastAPI lifespan 管理启动/关闭钩子（`on_event` 已迁移）。
 - 所有密钥通过环境变量注入，`.env`、`logs/`、`data/`、`evals/reports/` 不入库。

@@ -242,9 +242,9 @@ evals/
 |---|---|---|---|
 | P0 | `LLM_MAX_TOKENS=''` 空值崩溃 | `app/agents/provider.py:32` | Phase 0 修 |
 | P0 | 未提交改动 + `data/` 未跟踪 | 工作区 | Phase 0 处理 |
-| P1 | 内存回退时 Lua 幂等锁失效（`MemoryStateStore.eval` 返回 False） | `app/redis_state/memory_fallback.py:67` | 记录在案，不修（文档注明降级语义） |
+| P1 | 内存回退时 Lua 幂等锁失效（`MemoryStateStore.eval` 返回 False） | `app/redis_state/memory_fallback.py:67` | 已修复：eval 支持 acquire/release/extend + TTL（单进程语义） |
 | P1 | `vectordb` 名为向量库实为关键词检索 | `app/vectordb/__init__.py` | README 如实描述；可选换真向量库（不推荐此时动） |
-| P2 | `on_event` deprecated | `app/main.py` | 可选迁移 lifespan |
+| P2 | `on_event` deprecated | `app/main.py` | 已迁移 lifespan |
 | P2 | venv 3.11 vs 声明 3.12 | 环境 | CI 用 3.12 验证即可 |
 | P2 | 同步桥 `_SyncBridge` 技术债 | `app/memory.py` | 记录在案，不动 |
 | P3 | 限流为内存实现 | `app/limit_providers/rate_limiter.py` | 文档注明开发降级 |

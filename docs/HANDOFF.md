@@ -70,7 +70,7 @@ uv run bandit -r app -q
 | `app/evaluator/evaluator.py` | `RuleEvaluator.score`（AST 静态） | 不动（Eval 用） |
 | `app/middleware/request_logger.py` | `log_request()` 写 WAL | Phase 1 加 cost 参数 |
 | `app/audit/models.py` | `AuditEntry` | Phase 1 加字段（走 extra） |
-| `app/redis_state/memory_fallback.py` | 内存回退 store | **不动**（已知 eval 缺陷，不修） |
+| `app/redis_state/memory_fallback.py` | 内存回退 store | **已修 eval**：支持幂等锁脚本 + TTL（单进程语义） |
 | `app/vectordb/__init__.py` | 关键词检索（中文 bigram） | 不动（README 如实描述） |
 | `app/command_mode.py` | `/coding` 等指令 | Phase 4 加 `/review` |
 | `app/routes/webhook.py` | `/webhook/{channel}` + `/webhook/callback` | 不动 |
@@ -152,7 +152,7 @@ uv run bandit -r app -q
 
 1. **Windows 路径**：仓库在 `D:\`，bash 里用 `/d/...`；Python 路径分隔符注意
 2. **CRLF**：仓库文件多为 CRLF（Windows），编辑时尽量保留原行尾，避免整文件 diff
-3. **`MemoryStateStore.eval()` 返回 False**（`app/redis_state/memory_fallback.py`）：内存回退时 Lua 锁不生效——**这是已知降级语义，不要"修复"它**，除非任务明确要求
+3. **`MemoryStateStore.eval()`**（`app/redis_state/memory_fallback.py`）：已修复，内存回退支持幂等锁脚本（acquire/release/extend + TTL）；但只保证单进程内存内语义，多实例仍需 Redis
 4. **同步桥 `_SyncBridge`**（`app/memory.py`）：同步线程跑 asyncio loop，别在测试里依赖它做时序断言
 5. **e2e eval 需要 LLM**：CI 里只跑 `--offline`；本地跑全量需要 `.env` 里的 API key，别把 key 写进测试
 6. **测试注入 fake LLM 的惯例**：`app/agents/stubs.py` 的 `_execute_with_runtime_or_injected(llm, ...)` 支持注入；`LLMClient` 换实现后保持该惯例
