@@ -28,6 +28,10 @@ class PipelineResult:
     need_human_review: bool = False
     fallback: str = ""
     policy_hits: tuple[str, ...] = ()
+    llm_model: str = ""
+    cost_usd: float = 0.0
+    llm_latency_ms: float = 0.0
+    fallback_used: str = ""
 
 
 def _merge_guard(verdict: GuardVerdict, output_verdict: GuardVerdict, policy_ids: tuple[str, ...]) -> GuardVerdict:
@@ -230,6 +234,8 @@ class MoAPipeline:
                 trace_id=event.trace_id, state="SUSPENDED", intent=intent,
                 text="Output requires human approval before delivery",
                 status="pending_review", need_human_review=True, policy_hits=policy_ids,
+                llm_model=llm_model, cost_usd=cost_usd,
+                llm_latency_ms=llm_latency_ms, fallback_used=fallback_used,
             )
 
         if verdict.action == GuardianAction.DENY:
@@ -246,6 +252,8 @@ class MoAPipeline:
             return PipelineResult(
                 trace_id=event.trace_id, state=state, intent=intent,
                 text=verdict.reason, status="blocked", policy_hits=policy_ids,
+                llm_model=llm_model, cost_usd=cost_usd,
+                llm_latency_ms=llm_latency_ms, fallback_used=fallback_used,
             )
 
         response = self.adapter.adapt(raw_output, channel=channel, target=target)
@@ -265,4 +273,6 @@ class MoAPipeline:
             text=response.text, status="ok",
             need_human_review=eval_result.need_human_review or verdict.action != GuardianAction.ALLOW,
             fallback=fallback, policy_hits=policy_ids,
+            llm_model=llm_model, cost_usd=cost_usd,
+            llm_latency_ms=llm_latency_ms, fallback_used=fallback_used,
         )

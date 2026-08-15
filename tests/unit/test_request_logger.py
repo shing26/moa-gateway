@@ -70,6 +70,29 @@ class TestLogRequestPolicyFields:
         assert entry.extra["input_preview"] == "用户输入内容"
         assert entry.extra["output_preview"] == "模型输出内容"
         assert entry.agent_output == "模型输出内容"
+        assert entry.extra["llm_model"] == ""
+        assert entry.extra["cost_usd"] == 0.0
+        assert entry.extra["llm_latency_ms"] == 0.0
+        assert entry.extra["fallback_used"] == ""
+
+    @pytest.mark.asyncio
+    async def test_log_request_with_llm_metrics_fields(self, monkeypatch, tmp_path):
+        wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
+        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+
+        await log_request(
+            FakeRequest(), 200, 12.3, "s1", "coder", "coding", "allow",
+            "input", "output",
+            llm_model="gpt-4o-mini",
+            cost_usd=0.0123,
+            llm_latency_ms=456.7,
+            fallback_used="gpt-3.5-turbo",
+        )
+        entry = (await wal.replay_all())[0]
+        assert entry.extra["llm_model"] == "gpt-4o-mini"
+        assert entry.extra["cost_usd"] == 0.0123
+        assert entry.extra["llm_latency_ms"] == 456.7
+        assert entry.extra["fallback_used"] == "gpt-3.5-turbo"
 
     @pytest.mark.asyncio
     async def test_log_request_disk_format_stays_compatible(self, monkeypatch, tmp_path):

@@ -371,6 +371,42 @@ async def test_log_request_called_with_request(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_log_request_receives_llm_metrics(monkeypatch):
+    calls = []
+
+    async def fake_log(*args, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(pipeline_module, "log_request", fake_log)
+
+    class MetricsAgent:
+        async def execute(self, envelope):
+            envelope.agent_local_slot["llm_metrics"] = {
+                "model_used": "gpt-4o-mini",
+                "cost_usd": 0.0123,
+                "llm_latency_ms": 456.7,
+                "fallback_used": "gpt-3.5-turbo",
+            }
+            return "agent reply"
+
+    patch_agents(monkeypatch, MetricsAgent())
+    p = make_pipeline()
+    req = SimpleNamespace(method="POST", url="http://test/x")
+    result = await p.run(make_event(), channel="test", target="s1", request=req)
+
+    assert result.status == "ok"
+    assert result.llm_model == "gpt-4o-mini"
+    assert result.cost_usd == 0.0123
+    assert result.llm_latency_ms == 456.7
+    assert result.fallback_used == "gpt-3.5-turbo"
+    assert len(calls) == 1
+    assert calls[0]["llm_model"] == "gpt-4o-mini"
+    assert calls[0]["cost_usd"] == 0.0123
+    assert calls[0]["llm_latency_ms"] == 456.7
+    assert calls[0]["fallback_used"] == "gpt-3.5-turbo"
+
+
+@pytest.mark.asyncio
 async def test_log_request_on_agent_error_logs_500(monkeypatch):
     calls = []
 
