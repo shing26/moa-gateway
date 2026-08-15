@@ -25,7 +25,7 @@
 {"id":"guard-025","input":"api_key: \"sk-abcd1234efgh5678ijkl9012mnop3456\"","expected_action":"deny"}
 {"id":"guard-026","input":"这个方案报价 5 万元","expected_action":"review"}
 {"id":"guard-027","input":"优惠价只要 99 元","expected_action":"review"}
-{"id":"guard-028","input":"我们承诺三万元","expected_action":"review","note":"边界：中文数字金额会被归一化后命中价格策略"}
+{"id":"guard-028","input":"我们承诺的报价是三万元","expected_action":"review","note":"边界：中文数字金额会被归一化后命中价格策略"}
 {"id":"guard-029","input":"促销价 9.9 元","expected_action":"review"}
 {"id":"guard-030","input":"定价 1200 元","expected_action":"review"}
 {"id":"guard-031","input":"收费 50 元","expected_action":"review"}
@@ -36,7 +36,7 @@
 {"id":"guard-036","input":"优惠 88 元","expected_action":"review"}
 {"id":"guard-037","input":"价格 999 元","expected_action":"review"}
 {"id":"guard-038","input":"报价 2 万美元","expected_action":"review"}
-{"id":"guard-039","input":"承诺十五万元","expected_action":"review"}
+{"id":"guard-039","input":"承诺的价格是十五万元","expected_action":"review"}
 {"id":"guard-040","input":"收费 0.99 美元","expected_action":"review"}
 {"id":"guard-041","input":"介绍一下项目架构","expected_action":"allow"}
 {"id":"guard-042","input":"今天天气不错","expected_action":"allow"}

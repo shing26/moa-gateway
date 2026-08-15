@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 from app.guard.guard_service import guard_service
 from app.models.events import MoAEvent
+from app.pipeline import PipelineResult
 from app.router.intent_router import IntentRouter
 
 
@@ -50,6 +51,7 @@ async def run_intent_eval(cases: list[dict[str, Any]]) -> dict[str, Any]:
 
 async def run_guard_eval(cases: list[dict[str, Any]]) -> dict[str, Any]:
     tp = fp = fn = tn = 0
+    review_tp = review_fp = review_fn = 0
     correct = 0
     for case in cases:
         expected = str(case.get("expected_action", ""))
@@ -69,6 +71,12 @@ async def run_guard_eval(cases: list[dict[str, Any]]) -> dict[str, Any]:
             fp += 1
         else:
             tn += 1
+        if expected == "review" and actual == "review":
+            review_tp += 1
+        elif expected == "review" and actual != "review":
+            review_fn += 1
+        elif expected != "review" and actual == "review":
+            review_fp += 1
     return {
         "total": len(cases),
         "correct": correct,
@@ -78,11 +86,44 @@ async def run_guard_eval(cases: list[dict[str, Any]]) -> dict[str, Any]:
         "false_positive": fp,
         "deny_positive": tp + fn,
         "deny_negative": fp + tn,
+        "review_recall": _ratio(review_tp, review_tp + review_fn),
+        "review_precision": _ratio(review_tp, review_tp + review_fp),
+        "mislabeled": len(cases) - correct,
     }
 
 
-def run_e2e_offline(cases: list[dict[str, Any]]) -> dict[str, Any]:
+class _OfflinePipeline:
+    """No-network stand-in that exercises the eval harness wiring end to end."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, event: MoAEvent, *, channel: str, target: str) -> PipelineResult:
+        self.calls += 1
+        return PipelineResult(
+            trace_id=event.trace_id,
+            state="ROUTED",
+            intent="assistant",
+            text="offline fake output",
+            status="ok",
+        )
+
+
+async def run_e2e_offline(
+    cases: list[dict[str, Any]],
+    pipeline: Any | None = None,
+) -> dict[str, Any]:
+    runner = pipeline or _OfflinePipeline()
     total = len(cases)
+    for case in cases:
+        event = MoAEvent(
+            trace_id=f"eval-offline-{case.get('id', 'unknown')}",
+            event=None,
+            session_id="eval-offline",
+            text=str(case.get("input", "")),
+            context={},
+        )
+        await runner.run(event, channel="eval", target="eval")
     return {
         "total": total,
         "run": 0,
@@ -90,16 +131,24 @@ def run_e2e_offline(cases: list[dict[str, Any]]) -> dict[str, Any]:
         "avg_judge_score": 0.0,
         "avg_latency_ms": 0.0,
         "avg_cost_usd": 0.0,
+        "offline_smoke": total,
     }
 
 
-async def run_e2e_eval(cases: list[dict[str, Any]]) -> dict[str, Any]:
-    from app.deps import pipeline
+async def run_e2e_eval(
+    cases: list[dict[str, Any]],
+    *,
+    pipeline: Any | None = None,
+    judge: Any | None = None,
+) -> dict[str, Any]:
+    from app.deps import pipeline as default_pipeline
+    from evals.judge import score as default_judge
 
-    from evals.judge import score as judge_score
-
+    runner = pipeline or default_pipeline
+    judge_fn = judge or default_judge
     scores: list[float] = []
     latencies: list[float] = []
+    costs: list[float] = []
     for case in cases:
         event = MoAEvent(
             trace_id=f"eval-{case.get('id', 'unknown')}",
@@ -109,15 +158,16 @@ async def run_e2e_eval(cases: list[dict[str, Any]]) -> dict[str, Any]:
             context={},
         )
         start = time.monotonic()
-        result = await pipeline.run(event, channel="eval", target="eval")
+        result = await runner.run(event, channel="eval", target="eval")
         latency_ms = (time.monotonic() - start) * 1000
         latencies.append(latency_ms)
+        costs.append(float(getattr(result, "cost_usd", 0.0) or 0.0))
         expected = case.get("expected", {})
         if isinstance(expected, dict) and expected.get("status") != result.status:
             scores.append(0.0)
         else:
             scores.append(
-                await judge_score(
+                await judge_fn(
                     str(case.get("input", "")),
                     result.text,
                     str(case.get("judge_criteria", "")),
@@ -129,7 +179,7 @@ async def run_e2e_eval(cases: list[dict[str, Any]]) -> dict[str, Any]:
         "skipped": 0,
         "avg_judge_score": round(sum(scores) / len(scores), 4) if scores else 0.0,
         "avg_latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else 0.0,
-        "avg_cost_usd": 0.0,
+        "avg_cost_usd": round(sum(costs) / len(costs), 6) if costs else 0.0,
     }
 
 
@@ -167,7 +217,11 @@ async def run_all(offline: bool, datasets_dir: Path) -> dict[str, Any]:
     intent = await run_intent_eval(load_dataset(datasets_dir / "intent.jsonl"))
     guard = await run_guard_eval(load_dataset(datasets_dir / "guard_redteam.jsonl"))
     e2e_cases = load_dataset(datasets_dir / "e2e.jsonl")
-    e2e = run_e2e_offline(e2e_cases) if offline else await run_e2e_eval(e2e_cases)
+    e2e = (
+        await run_e2e_offline(e2e_cases)
+        if offline
+        else await run_e2e_eval(e2e_cases)
+    )
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "git_sha": git_sha(),

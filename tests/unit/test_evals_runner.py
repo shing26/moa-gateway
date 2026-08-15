@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 import pytest
 
+from app.models.events import MoAEvent
+from app.pipeline import PipelineResult
 from evals.run_evals import (
     load_dataset,
     run_all,
     run_e2e_offline,
+    run_e2e_eval,
     run_guard_eval,
     run_intent_eval,
     write_report,
@@ -46,16 +50,62 @@ async def test_guard_eval_metrics() -> None:
     assert report["deny_recall"] == 1.0
     assert report["deny_precision"] == 1.0
     assert report["false_positive"] == 0
+    assert report["review_recall"] == 1.0
+    assert report["review_precision"] == 1.0
+    assert report["mislabeled"] == 0
 
 
-def test_offline_e2e_marks_all_skipped() -> None:
+class RecordingOfflinePipeline:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, event: MoAEvent, *, channel: str, target: str) -> PipelineResult:
+        self.calls += 1
+        return PipelineResult(
+            trace_id=event.trace_id, state="ROUTED", intent="assistant",
+            text="offline fake", status="ok",
+        )
+
+
+@pytest.mark.asyncio
+async def test_offline_e2e_exercises_fake_pipeline_and_marks_skipped() -> None:
     cases = [{"id": "e1"}, {"id": "e2"}]
+    runner = RecordingOfflinePipeline()
 
-    report = run_e2e_offline(cases)
+    report = await run_e2e_offline(cases, pipeline=runner)
 
     assert report["total"] == 2
     assert report["run"] == 0
     assert report["skipped"] == 2
+    assert report["offline_smoke"] == 2
+    assert runner.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_e2e_eval_aggregates_cost_and_judge_score() -> None:
+    cases = [
+        {"id": "e1", "input": "hi", "expected": {"status": "ok"}, "judge_criteria": "x"},
+        {"id": "e2", "input": "yo", "expected": {"status": "ok"}, "judge_criteria": "x"},
+    ]
+
+    class FakePipeline:
+        async def run(self, event, *, channel, target):
+            await asyncio.sleep(0.001)
+            return PipelineResult(
+                trace_id=event.trace_id, state="ROUTED", intent="assistant",
+                text="fake output", status="ok", cost_usd=0.01,
+            )
+
+    async def fake_judge(input_text, output_text, criteria) -> float:
+        return 0.8
+
+    report = await run_e2e_eval(cases, pipeline=FakePipeline(), judge=fake_judge)
+
+    assert report["run"] == 2
+    assert report["skipped"] == 0
+    assert report["avg_cost_usd"] == 0.01
+    assert report["avg_judge_score"] == 0.8
+    assert report["avg_latency_ms"] > 0
 
 
 def test_load_dataset_parses_jsonl(tmp_path: Path) -> None:
@@ -102,3 +152,4 @@ async def test_run_all_offline(tmp_path: Path) -> None:
     assert report["intent"]["accuracy"] == 1.0
     assert report["guard"]["deny_recall"] == 1.0
     assert report["e2e"]["skipped"] == 1
+    assert report["e2e"]["offline_smoke"] == 1
