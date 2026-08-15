@@ -51,9 +51,61 @@ class TestMemoryStateStore:
         assert await store.ping() is True
 
     @pytest.mark.asyncio
-    async def test_eval_returns_false(self):
+    async def test_eval_unsupported_script_returns_false(self):
         store = MemoryStateStore()
-        assert await store.eval("script", 1, "key", "val", "60") is False
+        assert await store.eval("unknown script", 1, "key", "val", "60") is False
+
+    @pytest.mark.asyncio
+    async def test_eval_acquire_release_and_extend_via_lock(self):
+        from app.redis_state.lock import IdempotencyLock
+
+        store = MemoryStateStore()
+        lock = IdempotencyLock(redis=store, key="moa:lock:test", value="v1", ttl=30)
+
+        assert await lock.acquire() is True
+        assert lock.held is True
+        assert await store.get("moa:lock:test") == "v1"
+        assert await lock.extend(ttl=120) is True
+        assert await lock.release() is True
+        assert await store.get("moa:lock:test") is None
+
+    @pytest.mark.asyncio
+    async def test_eval_blocks_different_lock_value(self):
+        from app.redis_state.lock import IdempotencyLock
+
+        store = MemoryStateStore()
+        lock_a = IdempotencyLock(redis=store, key="moa:lock:test", value="v1", ttl=30)
+        lock_b = IdempotencyLock(redis=store, key="moa:lock:test", value="v2", ttl=30)
+
+        assert await lock_a.acquire() is True
+        assert await lock_b.acquire() is False
+        assert lock_b.held is False
+
+    @pytest.mark.asyncio
+    async def test_eval_release_wrong_value_returns_zero(self):
+        from app.redis_state.lock import IdempotencyLock
+
+        store = MemoryStateStore()
+        lock = IdempotencyLock(redis=store, key="moa:lock:test", value="v1", ttl=30)
+        await lock.acquire()
+        await store.set("moa:lock:test", "v2")
+
+        assert await lock.release() is False
+        assert await store.get("moa:lock:test") == "v2"
+
+    @pytest.mark.asyncio
+    async def test_set_with_ex_zero_expires_immediately(self):
+        store = MemoryStateStore()
+        await store.set("k", "v", ex=0)
+        assert await store.get("k") is None
+        assert await store.exists("k") is False
+
+    @pytest.mark.asyncio
+    async def test_expire_removes_key_when_ttl_zero(self):
+        store = MemoryStateStore()
+        await store.set("k", "v")
+        await store.expire("k", 0)
+        assert await store.get("k") is None
 
     @pytest.mark.asyncio
     async def test_close_clears_data(self):

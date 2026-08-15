@@ -1,8 +1,11 @@
 ﻿from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
+
+from app.redis_state.lock import _ACQUIRE_LUA, _EXTEND_LUA, _RELEASE_LUA
 
 logger = logging.getLogger("moa.redis.memory")
 
@@ -12,6 +15,7 @@ class MemoryStateStore:
         self._data: dict[str, str] = {}
         self._lists: dict[str, list[str]] = {}
         self._hashes: dict[str, dict[str, str]] = {}
+        self._expires: dict[str, float] = {}
 
     async def connect(self) -> MemoryStateStore:
         logger.warning("using in-memory fallback store")
@@ -21,26 +25,33 @@ class MemoryStateStore:
         self._data.clear()
         self._lists.clear()
         self._hashes.clear()
+        self._expires.clear()
 
     async def ping(self) -> bool:
         return True
 
     async def get(self, key: str) -> str | None:
+        self._expire_if_needed(key)
         return self._data.get(key)
 
     async def set(self, key: str, value: str, ex: int | None = None) -> None:
         self._data[key] = value
+        self._update_expiry(key, ex)
 
     async def delete(self, key: str) -> None:
         self._data.pop(key, None)
         self._lists.pop(key, None)
         self._hashes.pop(key, None)
+        self._expires.pop(key, None)
 
     async def exists(self, key: str) -> bool:
+        self._expire_if_needed(key)
         return key in self._data or key in self._lists or key in self._hashes
 
     async def expire(self, key: str, ttl: int) -> None:
-        pass
+        self._expire_if_needed(key)
+        if key in self._data:
+            self._update_expiry(key, ttl)
 
     async def lpush(self, key: str, value: str) -> None:
         self._lists.setdefault(key, []).insert(0, value)
@@ -65,7 +76,45 @@ class MemoryStateStore:
         return self._hashes.get(key, {}).get(field)
 
     async def eval(self, script: str, numkeys: int, *args: str) -> Any:
+        if script == _ACQUIRE_LUA:
+            key, value, ttl = args[0], args[1], int(args[2])
+            self._expire_if_needed(key)
+            if key in self._data:
+                return False
+            self._data[key] = value
+            self._update_expiry(key, ttl)
+            return True
+        if script == _RELEASE_LUA:
+            key, value = args[0], args[1]
+            self._expire_if_needed(key)
+            if self._data.get(key) != value:
+                return 0
+            self._data.pop(key, None)
+            self._expires.pop(key, None)
+            return 1
+        if script == _EXTEND_LUA:
+            key, value, ttl = args[0], args[1], int(args[2])
+            self._expire_if_needed(key)
+            if self._data.get(key) != value:
+                return 0
+            self._update_expiry(key, ttl)
+            return 1
         return False
+
+    def _update_expiry(self, key: str, ttl: int | None) -> None:
+        if ttl is None:
+            self._expires.pop(key, None)
+        elif ttl <= 0:
+            self._data.pop(key, None)
+            self._expires.pop(key, None)
+        else:
+            self._expires[key] = time.monotonic() + ttl
+
+    def _expire_if_needed(self, key: str) -> None:
+        expires_at = self._expires.get(key)
+        if expires_at is not None and time.monotonic() >= expires_at:
+            self._data.pop(key, None)
+            self._expires.pop(key, None)
 
     @staticmethod
     def key(session_id: str, namespace: str = "moa") -> str:
