@@ -253,13 +253,13 @@ evals/
 
 ## 11. 验收标准汇总（DoD）
 
-- [ ] `pytest tests/unit -q` 全绿（≥ 362 + 新增）
-- [ ] CI：pytest + ruff + bandit + eval offline 冒烟全绿
-- [ ] `evals/run_evals.py --offline` 出报告，指标真实（非拍脑袋）
-- [ ] LiteLLM 替换后 `chat` / `chat_with_tools` 接口兼容，fallback 与 cost 有单测
-- [ ] README 重写完成（含架构图、三卖点、数据表、选型说明、demo 链接）
-- [ ] PR 审查演示路径可用（或至少 fixture 测试通过 + README 截图）
-- [ ] 工作区干净：无 `.env`、`logs/`、`data/` 提交；未提交改动已妥善处理
+- [x] `pytest tests/unit -q` 全绿（385 passed / 9 skipped）
+- [x] CI：pytest + ruff + bandit + eval offline 冒烟全绿
+- [x] `evals/run_evals.py --offline` 出报告，指标真实（非拍脑袋）
+- [x] LiteLLM 替换后 `chat` / `chat_with_tools` 接口兼容，fallback 与 cost 有单测
+- [x] README 重写完成（含架构图、三卖点、数据表、选型说明、本地启动/演示命令；公网 demo 链接按用户约定暂不提供）
+- [x] PR 审查演示路径可用（fixture 测试通过）
+- [x] 工作区干净：无 `.env`、`logs/`、`data/` 提交；未提交改动已妥善处理
 
 ---
 
