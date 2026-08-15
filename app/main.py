@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging, os, pathlib
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +21,29 @@ from app.routes.webhook import webhook_router
 from app.routes.knowledge import router as knowledge_router
 from apps.code_review_pipeline.routing.github_review_route import github_review_router
 
-app = FastAPI(title="Agent Gateway", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    global tracer
+    try:
+        cfg = TraceConfig(otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""))
+        setup_tracing(cfg)
+    except Exception:
+        logger.warning("opentelemetry tracing init failed")
+    init_feishu()
+    init_prompts()
+    await obsidian_sync.start()
+    tracer = trace.get_tracer("moa-gateway")
+    yield
+    logger.info("moa gateway shutting down")
+    if es_writer is not None:
+        await es_writer.aclose()
+    await obsidian_sync.close()
+    engine.session_store.clear_all()
+    _flag_client.invalidate()
+
+
+app = FastAPI(title="Agent Gateway", version="0.1.0", lifespan=lifespan)
 STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
 app.mount("/dashboard/static", StaticFiles(directory=STATIC_DIR), name="dashboard-static")
 app.include_router(dashboard_router)
@@ -44,24 +67,3 @@ async def _debug_exception_handler(request: Request, exc: Exception):
     logger.error("unhandled exception: %s", "".join(tb))
     return JSONResponse(status_code=500, content={"error": type(exc).__name__, "detail": str(exc)[:500]})
 
-@app.on_event("startup")
-async def _startup() -> None:
-    global tracer
-    try:
-        cfg = TraceConfig(otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""))
-        setup_tracing(cfg)
-    except Exception:
-        logger.warning("opentelemetry tracing init failed")
-    init_feishu()
-    init_prompts()
-    await obsidian_sync.start()
-    tracer = trace.get_tracer("moa-gateway")
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
-    logger.info("moa gateway shutting down")
-    if es_writer is not None:
-        await es_writer.aclose()
-    await obsidian_sync.close()
-    engine.session_store.clear_all()
-    _flag_client.invalidate()
