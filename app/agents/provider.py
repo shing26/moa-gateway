@@ -15,6 +15,39 @@ def _get_litellm() -> Any:
     return litellm
 
 
+_LITELLM_PROVIDERS = {
+    "openai": "openai",
+    "deepseek": "deepseek",
+    "anthropic": "anthropic",
+    "gemini": "gemini",
+    "mistral": "mistral",
+    "cohere": "cohere",
+    "openrouter": "openrouter",
+}
+
+_OPENAI_COMPATIBLE_PROVIDERS = {
+    "omniroute",
+    "vllm",
+    "hosted_vllm",
+    "lmstudio",
+    "openai_compatible",
+}
+
+
+def _qualify_model(model: str, provider: str) -> str:
+    """Prefix a bare model name with its LiteLLM provider when known."""
+    if not model or "/" in model or ":" in model:
+        return model
+    provider = provider.lower()
+    if provider in _LITELLM_PROVIDERS:
+        return f"{_LITELLM_PROVIDERS[provider]}/{model}"
+    if provider in _OPENAI_COMPATIBLE_PROVIDERS:
+        return f"openai/{model}"
+    if provider in ("local", "ollama"):
+        return f"local/{model}"
+    return model
+
+
 @dataclass
 class LLMConfig:
     api_key: str = ""
@@ -45,14 +78,13 @@ class LLMConfig:
 
         if provider == "openrouter":
             base_url = os.getenv(f"{key}_BASE_URL", "https://openrouter.ai/api/v1")
-            if api_key and not model.startswith("openrouter/"):
-                model = f"openrouter/{model}"
         elif provider == "omniroute":
             base_url = os.getenv(f"{key}_BASE_URL", "http://localhost:20129/v1")
         elif provider == "local":
             base_url = os.getenv(f"{key}_BASE_URL", "http://localhost:11434/v1")
-            if "/" not in model and ":" not in model:
-                model = f"local/{model}"
+
+        model = _qualify_model(model, provider)
+        fallback_models = [_qualify_model(item, provider) for item in fallback_models]
 
         return cls(
             api_key=api_key,
@@ -210,6 +242,10 @@ class LLMClient:
             "stream": False,
             "timeout": self.config.timeout,
         }
+        if "/" not in model and ":" not in model:
+            custom_provider = self._custom_provider_for(model)
+            if custom_provider:
+                kwargs["custom_llm_provider"] = custom_provider
         if self.config.api_key and self.config.api_key.strip():
             kwargs["api_key"] = self.config.api_key.strip()
         if self.config.base_url:
@@ -219,6 +255,30 @@ class LLMClient:
         if tools is not None:
             kwargs["tools"] = tools
         return kwargs
+
+    def _custom_provider_for(self, model: str) -> str:
+        """Pick a LiteLLM provider for bare model names."""
+        if "/" in model or ":" in model:
+            return ""
+        provider = (self.config.provider or "direct").lower()
+        if provider in _LITELLM_PROVIDERS:
+            return _LITELLM_PROVIDERS[provider]
+        if provider in _OPENAI_COMPATIBLE_PROVIDERS:
+            return "openai"
+        if provider in ("local", "ollama"):
+            return "ollama"
+        base_url = (self.config.base_url or "").lower()
+        if "deepseek" in base_url:
+            return "deepseek"
+        if "anthropic" in base_url:
+            return "anthropic"
+        if "openrouter" in base_url:
+            return "openrouter"
+        if any(host in base_url for host in ("localhost", "127.0.0.1", "0.0.0.0", "omniroute")):
+            return "openai"
+        if base_url and "api.openai.com" not in base_url:
+            return "openai"
+        return "openai"
 
     def _record_metrics(
         self,

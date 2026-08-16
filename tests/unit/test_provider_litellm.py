@@ -138,3 +138,56 @@ def test_from_env_parses_fallback_models(monkeypatch: pytest.MonkeyPatch) -> Non
     config = LLMConfig.from_env()
 
     assert config.fallback_models == ["model-b", "model-c"]
+
+
+@pytest.mark.asyncio
+async def test_bare_model_with_custom_base_url_gets_custom_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_acompletion = AsyncMock(return_value=_make_response())
+    _patch_litellm(monkeypatch, mock_acompletion)
+    client = LLMClient(LLMConfig(
+        api_key="key",
+        base_url="http://localhost:20128/v1",
+        model="high-availability",
+        provider="omniroute",
+    ))
+
+    await client.chat([{"role": "user", "content": "hi"}])
+
+    kwargs = mock_acompletion.call_args.kwargs
+    assert kwargs["model"] == "high-availability"
+    assert kwargs["custom_llm_provider"] == "openai"
+
+
+def test_from_env_qualifies_bare_model_by_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "deepseek")
+    monkeypatch.setenv("LLM_MODEL", "deepseek-chat")
+    monkeypatch.setenv("LLM_FALLBACK_MODELS", "deepseek-reasoner")
+
+    config = LLMConfig.from_env()
+
+    assert config.model == "deepseek/deepseek-chat"
+    assert config.fallback_models == ["deepseek/deepseek-reasoner"]
+
+
+def test_from_env_omniroute_uses_openai_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "omniroute")
+    monkeypatch.setenv("LLM_MODEL", "high-availability")
+
+    config = LLMConfig.from_env()
+
+    assert config.model == "openai/high-availability"
+
+
+@pytest.mark.asyncio
+async def test_bare_model_infers_provider_from_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_acompletion = AsyncMock(return_value=_make_response())
+    _patch_litellm(monkeypatch, mock_acompletion)
+    client = LLMClient(LLMConfig(
+        api_key="key",
+        base_url="https://api.deepseek.com/v1",
+        model="deepseek-chat",
+    ))
+
+    await client.chat([{"role": "user", "content": "hi"}])
+
+    assert mock_acompletion.call_args.kwargs["custom_llm_provider"] == "deepseek"
