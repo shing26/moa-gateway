@@ -140,6 +140,27 @@ def test_dashboard_ops_config_update():
                 os.environ[key] = value
 
 
+def test_dashboard_ops_config_empty_api_key_keeps_runtime_key():
+    saved = os.environ.get("OPENAI_API_KEY")
+    os.environ["OPENAI_API_KEY"] = "sk-keep-me"
+    try:
+        with TestClient(app) as client:
+            res = client.post(
+                "/dashboard/api/ops/config",
+                json={"model": "keep-model", "base_url": "http://localhost:9/v1", "api_key": ""},
+            )
+            assert res.status_code == 200
+            assert res.json()["llm"]["api_key_set"] is True
+            assert os.environ.get("OPENAI_API_KEY") == "sk-keep-me"
+            cfg = client.get("/dashboard/api/ops/config").json()
+            assert cfg["llm"]["api_key_set"] is True
+    finally:
+        if saved is None:
+            os.environ.pop("OPENAI_API_KEY", None)
+        else:
+            os.environ["OPENAI_API_KEY"] = saved
+
+
 def test_dashboard_flag_set_and_delete():
     with TestClient(app) as client:
         res = client.post("/dashboard/api/ops/flags/evaluator.enabled", json={"value": False})

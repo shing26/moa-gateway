@@ -754,7 +754,7 @@
     var body = {
       model: document.getElementById('ops-model').value.trim(),
       base_url: document.getElementById('ops-base-url').value.trim(),
-      api_key: document.getElementById('ops-api-key').value.trim()
+      api_key: document.getElementById('ops-api-key').value.trim() || null
     };
     setLoading(btn, true);
     fetchJSON('/dashboard/api/ops/config', {

@@ -850,7 +850,7 @@ async def dashboard_ops_config_update(body: OpsConfigUpdate) -> JSONResponse:
         os.environ["LLM_MODEL"] = body.model.strip()
     if body.base_url is not None:
         os.environ["OPENAI_BASE_URL"] = body.base_url.strip().rstrip("/")
-    if body.api_key is not None:
+    if body.api_key:
         os.environ["OPENAI_API_KEY"] = body.api_key.strip()
     return JSONResponse({
         "ok": True,
