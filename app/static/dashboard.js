@@ -647,15 +647,17 @@
       if (keyStatus) {
         keyStatus.textContent = data.llm.api_key_set ? '当前已配置 API Key' : '当前未配置 API Key';
       }
-      renderOpsStatus(data);
-      renderFlags(data.flags || []);
+      return fetchJSON('/healthz').then(function (health) {
+        renderOpsStatus(data, health);
+        renderFlags(data.flags || []);
+      });
     }).catch(function (err) {
       var status = document.getElementById('ops-status');
       if (status) status.innerHTML = emptyState(err.message);
     });
   }
 
-  function renderOpsStatus(data) {
+  function renderOpsStatus(data, health) {
     var box = document.getElementById('ops-status');
     if (!box) return;
     var obs = data.obsidian || {};
@@ -665,17 +667,41 @@
         ? 'Vault: ' + (obs.root || '') + ' · ' + (obs.docs || 0) + ' 篇'
         : 'Obsidian 未启用';
     }
+    var checks = health && health.checks || {};
+    var redisTone = String(checks.redis || '').indexOf('error') !== -1 ? 'danger'
+      : String(checks.redis || '').indexOf('fallback') !== -1 ? 'warn'
+      : checks.redis ? 'success' : 'neutral';
     var items = [
-      ['Redis', data.redis && data.redis.url ? data.redis.url : '未知'],
-      ['飞书卡片', data.feishu && data.feishu.configured ? '已配置' : '未配置'],
-      ['OTel 端点', (data.tracing && data.tracing.otlp_endpoint) || '未设置'],
-      ['全局限流', data.limiter && data.limiter.wired ? '已接入' : (data.limiter && data.limiter.note) || '未接入'],
-      ['Obsidian 同步', obs.enabled ? (obs.docs || 0) + ' 篇 · ' + ((obs.last_sync || '').slice(0, 19).replace('T', ' ') || '未同步') : '未启用']
+      {
+        label: 'Redis',
+        value: checks.redis || (data.redis && data.redis.url ? data.redis.url : '未知'),
+        tone: redisTone
+      },
+      {
+        label: '飞书卡片',
+        value: data.feishu && data.feishu.configured ? '已配置' : '未配置',
+        tone: data.feishu && data.feishu.configured ? 'success' : 'neutral'
+      },
+      {
+        label: 'OTel 端点',
+        value: (data.tracing && data.tracing.otlp_endpoint) || '未设置',
+        tone: (data.tracing && data.tracing.otlp_endpoint) ? 'success' : 'neutral'
+      },
+      {
+        label: '全局限流',
+        value: data.limiter && data.limiter.wired ? '已接入' : (data.limiter && data.limiter.note) || '未接入',
+        tone: data.limiter && data.limiter.wired ? 'success' : 'neutral'
+      },
+      {
+        label: 'Obsidian 同步',
+        value: obs.enabled ? (obs.docs || 0) + ' 篇 · ' + ((obs.last_sync || '').slice(0, 19).replace('T', ' ') || '未同步') : '未启用',
+        tone: obs.enabled ? 'success' : 'warn'
+      }
     ];
     box.innerHTML = items.map(function (item) {
-      return '<div class="check-item"><span class="status-dot status-neutral"></span>' +
-        '<span class="check-label">' + esc(item[0]) + '</span>' +
-        '<span class="check-value mono">' + esc(item[1]) + '</span></div>';
+      return '<div class="check-item"><span class="status-dot status-' + item.tone + '"></span>' +
+        '<span class="check-label">' + esc(item.label) + '</span>' +
+        '<span class="check-value mono">' + esc(item.value) + '</span></div>';
     }).join('');
   }
 

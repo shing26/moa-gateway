@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from app.guard.guard_service import guard_service
 from app.guard.rbac import GuardianAction, Role
 
@@ -56,3 +58,9 @@ class TestEvaluateOutput:
         verdict, policy_ids = guard_service.evaluate_output("优惠价只要 99 元", intent="assistant")
         assert verdict.action == GuardianAction.REVIEW
         assert policy_ids == ("policy.compliance.no_price_commitment",)
+
+
+def test_evaluate_does_not_log_warning_per_request(caplog) -> None:
+    with caplog.at_level(logging.WARNING, logger="moa.guard.service"):
+        guard_service.evaluate("coder", "coding", {"role": "operator"}, hitl_enabled=False)
+    assert not [r for r in caplog.records if "evaluate agent=" in r.getMessage()]

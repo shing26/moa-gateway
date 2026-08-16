@@ -26,3 +26,9 @@ def test_obsidian_sync_disabled_shows_clear_message() -> None:
     js = _dashboard_js()
     assert "data.enabled === false" in js
     assert "Obsidian 未启用，未执行同步" in js
+
+
+def test_ops_status_dots_use_real_state() -> None:
+    js = _dashboard_js()
+    assert "status-' + item.tone" in js
+    assert "checks.redis" in js
