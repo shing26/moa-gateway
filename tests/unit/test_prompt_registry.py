@@ -96,3 +96,12 @@ class TestCanary:
         entry, version = select_canary_version("test-session", registry, "coder", config)
         # 100% canary, but no canary prompt registered -> falls back to stable
         assert version == "stable"
+
+    def test_unknown_agent_falls_back_to_general_prompt(self):
+        registry = PromptRegistry()
+        registry.register(PromptEntry("general", "stable", "general prompt"))
+        registry.set_active("general", "stable")
+        config = CanaryConfig(enabled=False)
+        entry, version = select_canary_version("test-session", registry, "unknown-agent", config)
+        assert version == "stable"
+        assert entry.system_prompt == "general prompt"

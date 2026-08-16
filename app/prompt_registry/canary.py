@@ -48,8 +48,12 @@ def select_canary_version(
         except KeyError:
             logger.warning("canary version %s not found for %s, falling back to stable", cfg.canary_version, agent_name)
 
-    # Stable group.
-    entry = registry.get_or_default(agent_name, cfg.stable_version)
+    # Stable group. Unknown agents fall back to the general prompt so a missing
+    # agent prompt can never crash the pipeline.
+    try:
+        entry = registry.get_or_default(agent_name, cfg.stable_version)
+    except KeyError:
+        entry = registry.get_or_default("general", cfg.stable_version)
     logger.debug("stable session=%s agent=%s version=%s", session_id, agent_name, cfg.stable_version)
     return entry, cfg.stable_version
 

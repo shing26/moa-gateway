@@ -98,8 +98,17 @@ def init_prompts() -> None:
         system_prompt="You are a general-purpose assistant.",
         metadata={"author": "system"},
     ))
+    _prompt_registry.register(PromptEntry(
+        agent_name="review", version="stable",
+        system_prompt=(
+            "You coordinate GitHub pull request reviews. Given owner/repo#PR, "
+            "gather the PR diff and produce a concise review summary."
+        ),
+        metadata={"author": "system"},
+    ))
     _prompt_registry.set_active("coder", "stable")
     _prompt_registry.set_active("general", "stable")
+    _prompt_registry.set_active("review", "stable")
     _flag_client.seed(DEFAULT_FLAGS)
     logger.info("prompt registry initialized with defaults")
 

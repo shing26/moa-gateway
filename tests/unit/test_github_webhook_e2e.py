@@ -91,3 +91,45 @@ def test_github_review_webhook_returns_accepted() -> None:
     assert "changed_files" in body
     assert "findings_by_severity" in body
     assert "need_human_review" in body
+
+
+def test_github_review_webhook_degrades_without_token(monkeypatch) -> None:
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    client = TestClient(app)
+    payload = {
+        "action": "opened",
+        "number": 2,
+        "pull_request": {
+            "number": 2,
+            "title": "e2e: no token",
+            "state": "open",
+            "user": {"login": "shing26"},
+        },
+        "repository": {
+            "full_name": "shing26/moa-gateway",
+        },
+    }
+    response = client.post("/webhook/github/review", json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get("status") == "degraded"
+    assert "GITHUB_TOKEN" in body.get("message", "")
+
+
+def test_pr_message_in_review_mode_returns_graceful_not_500(monkeypatch) -> None:
+    from app.deps import command_mode
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    command_mode.set("h2-sess", "review")
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/webhook/feishu",
+                json={"session_id": "h2-sess", "chat_id": "h2-chat", "text": "octocat/Hello-World#1"},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body.get("status") == "ok"
+        assert "GITHUB_TOKEN" in body.get("text", "")
+    finally:
+        command_mode.clear("h2-sess")

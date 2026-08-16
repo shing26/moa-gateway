@@ -37,7 +37,15 @@ async def github_review_webhook(request: Request) -> JSONResponse:
             pipeline = CodeReviewPipeline.from_env()
         except Exception as exc:
             logger.error("github review pipeline init failed: %s", exc)
-            return JSONResponse({"error": "pipeline_init_failed", "detail": str(exc)[:500]}, status_code=500)
+            if "GITHUB_TOKEN" in str(exc):
+                message = "PR 审查未执行：GITHUB_TOKEN 未配置。"
+            else:
+                message = "PR 审查未执行：审查流水线未配置完成。"
+            return JSONResponse({
+                "trace_id": trace_id,
+                "status": "degraded",
+                "message": message,
+            }, status_code=200)
 
         event = MoAEvent(
             trace_id=trace_id,
@@ -51,7 +59,10 @@ async def github_review_webhook(request: Request) -> JSONResponse:
             pr, result = await pipeline.run(event)
         except Exception as exc:
             logger.exception("github review run failed")
-            return JSONResponse({"error": "pipeline_run_failed", "detail": str(exc)[:500]}, status_code=500)
+            return JSONResponse({
+                "error": "pipeline_run_failed",
+                "detail": "PR 审查执行失败，请稍后重试。",
+            }, status_code=500)
 
         _review_store.save(_record_from_result(result))
 
