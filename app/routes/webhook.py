@@ -96,6 +96,16 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
                 "text": result.text, "state": result.state, "intent": result.intent,
                 "status": "command",
             })
+        if result.status == "reset":
+            return JSONResponse({
+                "text": result.text, "state": result.state, "intent": result.intent,
+                "status": "reset",
+            })
+        if result.status == "suspended":
+            return JSONResponse({
+                "trace_id": result.trace_id, "state": result.state,
+                "intent": result.intent, "status": "suspended", "message": result.text,
+            })
         if result.status == "pending_review":
             return JSONResponse({
                 "trace_id": result.trace_id, "state": result.state, "intent": result.intent,

@@ -133,3 +133,27 @@ def test_pr_message_in_review_mode_returns_graceful_not_500(monkeypatch) -> None
         assert "GITHUB_TOKEN" in body.get("text", "")
     finally:
         command_mode.clear("h2-sess")
+
+
+def test_webhook_cancel_returns_reset() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/webhook/feishu",
+            json={"session_id": "ctrl-sess", "chat_id": "ctrl-chat", "text": "cancel"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get("status") == "reset"
+    assert body.get("state") == "INIT"
+
+
+def test_webhook_debug_returns_suspended() -> None:
+    with TestClient(app) as client:
+        response = client.post(
+            "/webhook/feishu",
+            json={"session_id": "debug-sess", "chat_id": "debug-chat", "text": "debug 错误"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get("status") == "suspended"
+    assert body.get("state") == "SUSPENDED"

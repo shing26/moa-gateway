@@ -30,13 +30,24 @@ class Event(str, Enum):
 
 TRANSITIONS: dict[tuple[State, Event], State] = {
     (State.INIT, Event.MESSAGE_RECEIVED): State.ROUTED,
+    (State.ROUTED, Event.MESSAGE_RECEIVED): State.ROUTED,
+    (State.EXECUTING, Event.MESSAGE_RECEIVED): State.ROUTED,
+    (State.RETRY, Event.MESSAGE_RECEIVED): State.ROUTED,
+    (State.OUTPUT_READY, Event.MESSAGE_RECEIVED): State.ROUTED,
+    (State.REJECTED, Event.MESSAGE_RECEIVED): State.ROUTED,
+    (State.COMPLETED, Event.MESSAGE_RECEIVED): State.ROUTED,
+    (State.SUSPENDED, Event.MESSAGE_RECEIVED): State.SUSPENDED,
     (State.INIT, Event.RESET): State.INIT,
     (State.ROUTED, Event.SENSITIVE_DETECTED): State.SUSPENDED,
     (State.INIT, Event.SENSITIVE_DETECTED): State.SUSPENDED,
     (State.SUSPENDED, Event.SENSITIVE_DETECTED): State.SUSPENDED,
     (State.EXECUTING, Event.SENSITIVE_DETECTED): State.SUSPENDED,
     (State.RETRY, Event.SENSITIVE_DETECTED): State.SUSPENDED,
+    (State.OUTPUT_READY, Event.SENSITIVE_DETECTED): State.SUSPENDED,
+    (State.REJECTED, Event.SENSITIVE_DETECTED): State.SUSPENDED,
+    (State.COMPLETED, Event.SENSITIVE_DETECTED): State.SUSPENDED,
     (State.ROUTED, Event.NEEDS_HUMAN): State.SUSPENDED,
+    (State.SUSPENDED, Event.NEEDS_HUMAN): State.SUSPENDED,
     (State.SUSPENDED, Event.HUMAN_APPROVED): State.EXECUTING,
     (State.SUSPENDED, Event.HUMAN_REJECTED): State.REJECTED,
     (State.EXECUTING, Event.TASK_SUCCESS): State.OUTPUT_READY,
@@ -45,6 +56,10 @@ TRANSITIONS: dict[tuple[State, Event], State] = {
     (State.RETRY, Event.TASK_FAILED): State.SUSPENDED,
     (State.OUTPUT_READY, Event.RESET): State.INIT,
 }
+
+for _state in State:
+    TRANSITIONS[(_state, Event.RESET)] = State.INIT
+    TRANSITIONS[(_state, Event.CANCEL)] = State.INIT
 
 
 @dataclass

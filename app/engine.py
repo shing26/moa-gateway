@@ -228,20 +228,33 @@ class Engine:
         self.router = router
         self.adapter = adapter or ResponseAdapter()
         self.session_store = session_store or SessionStore()
+        self._session_states: dict[str, StateContext] = {}
 
     async def handle_event(self, event: MoAEvent) -> SessionState:
-        ctx = StateContext(state=State.INIT, session_id=event.session_id, trace_id=event.trace_id, metadata=event.context)
+        previous = self._session_states.get(event.session_id)
+        metadata = dict(previous.metadata) if previous else dict(event.context)
+        ctx = StateContext(
+            state=previous.state if previous else State.INIT,
+            session_id=event.session_id,
+            trace_id=event.trace_id,
+            metadata=metadata,
+        )
         current = ctx.state
         logger.info("incoming=%s trace=%s text=%r", event.event.value, event.trace_id, event.text)
-        state_stack = list(event.context.get("state_stack", []))
+        state_stack = list(metadata.get("state_stack", []))
         try:
             current = next_state(current, event.event)
         except Exception as exc:
             logger.exception("invalid transition: %s", exc)
             raise
         ctx.state = current
+        if event.event in (Event.RESET, Event.CANCEL):
+            state_stack = []
+            ctx.metadata["hitl_pending"] = False
+            ctx.metadata["sensitive_pending"] = False
         if event.event == Event.SENSITIVE_DETECTED:
             state_stack = list(state_stack) + [current.value]
+            ctx.metadata["sensitive_pending"] = True
         elif event.event == Event.NEEDS_HUMAN:
             state_stack = list(state_stack) + [current.value]
             ctx.metadata["hitl_pending"] = True
@@ -254,7 +267,11 @@ class Engine:
             if state_stack:
                 state_stack = state_stack[:-1]
         ctx.metadata["state_stack"] = state_stack
+        self._session_states[event.session_id] = ctx
         return SessionState(session_id=event.session_id, context=ctx, state_stack=state_stack)
+
+    def reset_session(self, session_id: str) -> None:
+        self._session_states.pop(session_id, None)
 
     async def respond(self, session_state: SessionState, text: str, *, channel: str, target: str) -> OutboundResponse:
         return self.adapter.adapt(text, channel=channel, target=target)

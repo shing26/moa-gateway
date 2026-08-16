@@ -116,6 +116,10 @@ async def feishu_event(request: Request):
 
     if result.status == "pending_review":
         reply = "输出需要人工审批"
+    elif result.status == "suspended":
+        reply = "已检测到敏感内容，消息已挂起"
+    elif result.status == "reset":
+        reply = result.text
     elif result.status == "error":
         reply = "抱歉，处理消息时出错了"
     else:

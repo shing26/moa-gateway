@@ -11,6 +11,7 @@ from app.channels.feishu_cards import ApprovalCard
 from app.command_mode import MODES, parse_command
 from app.config import settings
 from app.engine import HitlRequest
+from app.fsm.state_machine import Event as FsmEvent
 from app.guard.guard_service import GuardianAction, GuardVerdict
 from app.guard.rbac import Role
 from app.middleware.request_logger import log_request
@@ -88,6 +89,30 @@ class MoAPipeline:
         state = session_state.context.state.value
 
         text = event.text.strip()
+        if event.event in (FsmEvent.RESET, FsmEvent.CANCEL):
+            self.engine.reset_session(event.session_id)
+            self.memory.clear(event.session_id)
+            self.command_mode.clear(event.session_id)
+            if request is not None:
+                await log_request(
+                    request, 200, (time.monotonic() - start) * 1000,
+                    event.session_id, "control", "control", "reset", event.text, "会话已重置",
+                )
+            return PipelineResult(
+                trace_id=event.trace_id, state="INIT", intent="control",
+                text="会话已重置", status="reset",
+            )
+        if event.event == FsmEvent.SENSITIVE_DETECTED:
+            if request is not None:
+                await log_request(
+                    request, 200, (time.monotonic() - start) * 1000,
+                    event.session_id, "guard", "suspended", "suspended", event.text,
+                    "检测到敏感内容，消息已挂起",
+                )
+            return PipelineResult(
+                trace_id=event.trace_id, state="SUSPENDED", intent="suspended",
+                text="检测到敏感内容，消息已挂起", status="suspended",
+            )
         if text.startswith("/"):
             parsed = parse_command(text)
             if parsed:
@@ -125,6 +150,19 @@ class MoAPipeline:
             return PipelineResult(
                 trace_id=event.trace_id, state="ROUTED", intent="help",
                 text=reply, status="command",
+            )
+
+        session_metadata = getattr(session_state.context, "metadata", {}) or {}
+        if session_metadata.get("sensitive_pending"):
+            if request is not None:
+                await log_request(
+                    request, 200, (time.monotonic() - start) * 1000,
+                    event.session_id, "guard", "suspended", "suspended", event.text,
+                    "会话处于挂起状态，请先处理审批或发送 reset",
+                )
+            return PipelineResult(
+                trace_id=event.trace_id, state="SUSPENDED", intent="suspended",
+                text="会话处于挂起状态，请先处理审批或发送 reset", status="suspended",
             )
 
         intent, fallback = await self.router.route(event.text)
@@ -214,6 +252,11 @@ class MoAPipeline:
                 created_at=time.time(),
             )
             self.engine.session_store.store_hitl(event.session_id, hitl_request)
+            await self.engine.handle_event(MoAEvent(
+                trace_id=event.trace_id, event=FsmEvent.NEEDS_HUMAN,
+                session_id=event.session_id, text=event.text,
+                context={"source": "pipeline_guard"},
+            ))
             if self.card_sender:
                 card = ApprovalCard(
                     session_id=event.session_id, trace_id=event.trace_id, agent_name=agent_name,

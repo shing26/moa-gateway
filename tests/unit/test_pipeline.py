@@ -36,12 +36,16 @@ class FakeEvaluator:
 class FakeMemory:
     def __init__(self):
         self.added = []
+        self.cleared = []
 
     def get_history(self, session_id):
         return []
 
     def add(self, session_id, user_msg, assistant_msg):
         self.added.append((session_id, user_msg, assistant_msg))
+
+    def clear(self, session_id):
+        self.cleared.append(session_id)
 
 
 class FakeRouter:
@@ -62,6 +66,9 @@ class FakeCommandMode:
 
     def get(self, session_id):
         return self.store.get(session_id)
+
+    def clear(self, session_id):
+        self.store.pop(session_id, None)
 
 
 class FakeGuard:
@@ -330,6 +337,59 @@ async def test_agent_error_returns_error_without_raising(monkeypatch):
     assert result.status == "error"
     assert result.text == "agent execution failed"
     assert result.intent == "coding"
+
+
+@pytest.mark.asyncio
+async def test_reset_event_resets_session(monkeypatch):
+    agent = RecordingAgent()
+    patch_agents(monkeypatch, agent)
+    memory = FakeMemory()
+    cmd = FakeCommandMode()
+    cmd.store["s1"] = "coder"
+    p = make_pipeline(memory=memory, command_mode=cmd)
+    event = MoAEvent(
+        trace_id=new_trace_id(), event=FsmEvent.RESET,
+        session_id="s1", text="cancel", context={"source": "test"},
+    )
+    result = await p.run(event, channel="test", target="s1")
+    assert result.status == "reset"
+    assert result.state == "INIT"
+    assert result.text == "会话已重置"
+    assert agent.envelopes == []
+    assert memory.cleared == ["s1"]
+    assert cmd.store == {}
+
+
+@pytest.mark.asyncio
+async def test_sensitive_event_suspends_without_executing(monkeypatch):
+    agent = RecordingAgent()
+    patch_agents(monkeypatch, agent)
+    p = make_pipeline()
+    event = MoAEvent(
+        trace_id=new_trace_id(), event=FsmEvent.SENSITIVE_DETECTED,
+        session_id="s2", text="debug 错误", context={"source": "test"},
+    )
+    result = await p.run(event, channel="test", target="s2")
+    assert result.status == "suspended"
+    assert result.state == "SUSPENDED"
+    assert result.text == "检测到敏感内容，消息已挂起"
+    assert agent.envelopes == []
+
+
+@pytest.mark.asyncio
+async def test_suspended_session_blocks_further_messages(monkeypatch):
+    agent = RecordingAgent()
+    patch_agents(monkeypatch, agent)
+    engine = Engine()
+    p = make_pipeline(engine=engine)
+    await engine.handle_event(MoAEvent(
+        trace_id=new_trace_id(), event=FsmEvent.SENSITIVE_DETECTED,
+        session_id="s3", text="debug", context={},
+    ))
+    result = await p.run(make_event(session_id="s3"), channel="test", target="s3")
+    assert result.status == "suspended"
+    assert result.state == "SUSPENDED"
+    assert agent.envelopes == []
 
 
 @pytest.mark.asyncio
