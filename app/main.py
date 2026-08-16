@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import logging, os, pathlib
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
@@ -65,5 +66,11 @@ async def _debug_exception_handler(request: Request, exc: Exception):
     import traceback
     tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
     logger.error("unhandled exception: %s", "".join(tb))
-    return JSONResponse(status_code=500, content={"error": type(exc).__name__, "detail": str(exc)[:500]})
+    return JSONResponse(status_code=500, content={"error": "internal_error", "detail": "内部服务错误"})
+
+
+@app.exception_handler(json.JSONDecodeError)
+async def _json_decode_exception_handler(request: Request, exc: json.JSONDecodeError):
+    logger.warning("invalid json body: %s", exc)
+    return JSONResponse(status_code=400, content={"error": "invalid_json", "detail": "请求体不是合法 JSON"})
 

@@ -18,7 +18,11 @@
   function fetchJSON(url, options) {
     return fetch(url, options).then(function (res) {
       if (!res.ok) {
-        throw new Error('请求失败: ' + res.status);
+        return res.json().catch(function () { return {}; }).then(function (data) {
+          var msg = data && (data.detail || data.error || data.message);
+          var label = '请求失败: ' + res.status;
+          throw new Error(msg ? label + ' - ' + msg : label);
+        });
       }
       return res.json();
     });
@@ -736,9 +740,8 @@
   function onFlagDelete(btn) {
     var name = btn.dataset.del;
     btn.disabled = true;
-    fetch('/dashboard/api/ops/flags/' + encodeURIComponent(name), { method: 'DELETE' })
-      .then(function (res) {
-        if (!res.ok) throw new Error('请求失败: ' + res.status);
+    fetchJSON('/dashboard/api/ops/flags/' + encodeURIComponent(name), { method: 'DELETE' })
+      .then(function () {
         toast('Flag 已还原：' + name);
         loadOpsConfig();
       })
