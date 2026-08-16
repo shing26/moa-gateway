@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app.agents import provider
 from app.deps import command_mode, knowledge_base, memory
 from app.main import app
+import app.routes.dashboard as dashboard_routes
 
 
 def test_dashboard_pages_render():
@@ -202,3 +203,27 @@ def test_dashboard_ops_test_message(monkeypatch):
         data = res.json()
         assert data["ok"] is True
         assert data["reply"] == "pong"
+
+
+def test_dashboard_obsidian_sync_disabled_returns_clear_message(monkeypatch):
+    class FakeObsidianSync:
+        enabled = False
+
+        def status(self):
+            return {
+                "enabled": False,
+                "root": "",
+                "subfolder": "",
+                "docs": 0,
+                "last_sync": "",
+                "last_error": "",
+            }
+
+    monkeypatch.setattr(dashboard_routes, "obsidian_sync", FakeObsidianSync())
+    with TestClient(app) as client:
+        res = client.post("/dashboard/api/ops/obsidian/sync")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["enabled"] is False
+    assert body["changed"] == 0
+    assert "未启用" in body["message"]

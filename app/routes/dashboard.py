@@ -909,6 +909,13 @@ async def dashboard_flag_delete(name: str) -> JSONResponse:
 
 @router.post("/dashboard/api/ops/obsidian/sync")
 async def dashboard_obsidian_sync() -> JSONResponse:
+    if not obsidian_sync.enabled:
+        return JSONResponse({
+            "ok": True,
+            "changed": 0,
+            "message": "Obsidian 未启用，未执行同步",
+            **obsidian_sync.status(),
+        })
     changed = await obsidian_sync.sync_once()
     return JSONResponse({"ok": True, "changed": changed, **obsidian_sync.status()})
 

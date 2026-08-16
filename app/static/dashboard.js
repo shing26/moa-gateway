@@ -175,6 +175,11 @@
   }
 
   function initKnowledge() {
+    var pending = sessionStorage.getItem('moaToast');
+    if (pending) {
+      sessionStorage.removeItem('moaToast');
+      toast(pending);
+    }
     var upload = document.getElementById('kb-upload');
     if (upload) upload.addEventListener('submit', onUpload);
     var fileBtn = document.getElementById('kb-file-btn');
@@ -349,7 +354,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ doc_id: id })
           }).then(function () {
-            toast('已删除文档');
+            sessionStorage.setItem('moaToast', '已删除文档');
             window.location.href = '/dashboard/knowledge';
           }).catch(function (err) {
             del.disabled = false;
@@ -679,7 +684,11 @@
     if (!btn) return;
     setLoading(btn, true);
     fetchJSON('/dashboard/api/ops/obsidian/sync', { method: 'POST' }).then(function (data) {
-      toast('Obsidian 同步完成：' + data.changed + ' 篇变更');
+      if (data.enabled === false) {
+        toast(data.message || 'Obsidian 未启用，未执行同步', 'warn');
+      } else {
+        toast('Obsidian 同步完成：' + data.changed + ' 篇变更');
+      }
       loadOpsConfig();
     }).catch(function (err) {
       toast(err.message, 'danger');
