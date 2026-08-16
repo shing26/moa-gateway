@@ -109,12 +109,17 @@
   }
 
   var overviewBusy = false;
+  var overviewInterval = 5000;
 
   function initOverview() {
     refreshOverview();
-    window.setInterval(function () {
-      if (!overviewBusy) refreshOverview();
-    }, 5000);
+    window.setTimeout(overviewTick, overviewInterval);
+  }
+
+  function overviewTick() {
+    if (overviewBusy) return;
+    refreshOverview();
+    window.setTimeout(overviewTick, overviewInterval);
   }
 
   function refreshOverview() {
@@ -126,6 +131,7 @@
       fetchJSON('/knowledge/list'),
       fetchJSON('/dashboard/api/logs')
     ]).then(function (results) {
+      overviewInterval = 5000;
       var health = results[0];
       var sessions = results[1];
       var kb = results[2];
@@ -150,6 +156,7 @@
 
       renderRecentLogs((logs.logs || []).slice(0, 5));
     }).catch(function (err) {
+      overviewInterval = Math.min(overviewInterval * 2, 30000);
       var detail = document.getElementById('health-detail');
       if (detail) detail.innerHTML = emptyState(err.message);
     }).finally(function () {
@@ -519,10 +526,21 @@
     document.getElementById('wh-status').textContent = '发送中…';
     document.getElementById('wh-body').textContent = '';
     setLoading(btn, true);
+    var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var timeoutId = null;
+    if (controller) {
+      timeoutId = window.setTimeout(function () {
+        controller.abort();
+        document.getElementById('wh-status').textContent = '请求超时（超过 25 秒）';
+        box.querySelector('.status-dot').className = 'status-dot status-danger';
+        document.getElementById('wh-body').textContent = '服务端响应超时，请检查模型配置或稍后重试';
+      }, 25000);
+    }
     fetch('/webhook/feishu', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: body
+      body: body,
+      signal: controller ? controller.signal : undefined
     }).then(function (res) {
       return res.text().then(function (raw) {
         return { res: res, raw: raw };
@@ -540,9 +558,11 @@
       }
       document.getElementById('wh-body').textContent = pretty;
     }).catch(function (err) {
+      if (err && err.name === 'AbortError') return;
       document.getElementById('wh-status').textContent = '请求失败';
       document.getElementById('wh-body').textContent = err.message;
     }).finally(function () {
+      window.clearTimeout(timeoutId);
       setLoading(btn, false);
     });
   }
@@ -826,6 +846,9 @@
     var dot = box.querySelector('.status-dot');
     dot.className = 'status-dot status-neutral';
     setLoading(btn, true);
+    var progressTimer = window.setTimeout(function () {
+      document.getElementById('ops-test-status').textContent = '仍在等待响应（正在尝试模型）';
+    }, 5000);
     fetchJSON('/dashboard/api/ops/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -840,6 +863,7 @@
       dot.className = 'status-dot status-danger';
       document.getElementById('ops-test-body').textContent = err.message;
     }).finally(function () {
+      window.clearTimeout(progressTimer);
       setLoading(btn, false);
     });
   }

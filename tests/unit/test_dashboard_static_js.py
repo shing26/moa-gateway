@@ -32,3 +32,20 @@ def test_ops_status_dots_use_real_state() -> None:
     js = _dashboard_js()
     assert "status-' + item.tone" in js
     assert "checks.redis" in js
+
+
+def test_overview_polling_backs_off_after_failure() -> None:
+    js = _dashboard_js()
+    assert "Math.min(overviewInterval * 2, 30000)" in js
+    assert "window.setTimeout(overviewTick" in js
+
+
+def test_test_bench_has_timeout_feedback() -> None:
+    js = _dashboard_js()
+    assert "controller.abort()" in js
+    assert "请求超时（超过 25 秒）" in js
+
+
+def test_ops_test_shows_progress_after_wait() -> None:
+    js = _dashboard_js()
+    assert "仍在等待响应（正在尝试模型）" in js

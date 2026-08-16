@@ -3,9 +3,13 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from app.deps import _retriever
 import logging
+import time
+from typing import Any
 
 logger = logging.getLogger("moa.routes.health")
 router = APIRouter()
+_healthz_cache: dict[str, Any] = {"at": 0.0, "result": None}
+_HEALTHZ_TTL = 5.0
 
 @router.get("/health")
 async def health() -> dict[str, str]:
@@ -13,6 +17,9 @@ async def health() -> dict[str, str]:
 
 @router.get("/healthz")
 async def healthz() -> dict[str, object]:
+    now = time.monotonic()
+    if _healthz_cache["result"] is not None and now - _healthz_cache["at"] < _HEALTHZ_TTL:
+        return dict(_healthz_cache["result"])
     checks = {}
     redis_check = "unknown"
     try:
@@ -28,7 +35,10 @@ async def healthz() -> dict[str, object]:
     checks["redis"] = redis_check
     healthy_values = {"connected", "ok", "healthy", "fallback_memory"}
     all_healthy = all(v in healthy_values for v in checks.values())
-    return {"status": "healthy" if all_healthy else "degraded", "checks": checks}
+    result = {"status": "healthy" if all_healthy else "degraded", "checks": checks}
+    _healthz_cache["at"] = now
+    _healthz_cache["result"] = result
+    return result
 
 @router.delete("/api/v1/privacy/user/{user_id}")
 async def privacy_erase(user_id: str) -> JSONResponse:
