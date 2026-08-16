@@ -53,13 +53,6 @@ async def _current_time_handler() -> str:
     return datetime.now().astimezone().isoformat()
 
 
-async def _execute_code_handler(code: str) -> str:
-    code_preview = code[:100]
-    lines = code.count("\n") + 1
-    logger.warning("execute_code requires approval: code=%s lines=%d", code_preview, lines)
-    return f"EXECUTION_REQUIRES_APPROVAL: code={code_preview} lines={lines}"
-
-
 tool_registry = ToolRegistry()
 tool_registry.register(
     AgentTool(
@@ -84,20 +77,6 @@ tool_registry.register(
         description="\u83b7\u53d6\u5f53\u524d\u672c\u5730\u65f6\u95f4\uff08ISO 8601 \u683c\u5f0f\uff09",
         parameters={"type": "object", "properties": {}},
         handler=_current_time_handler,
-    )
-)
-tool_registry.register(
-    AgentTool(
-        name="execute_code",
-        description="\u6267\u884c\u4e00\u6bb5\u4ee3\u7801\uff08\u9ad8\u5371\u64cd\u4f5c\uff0c\u9700\u4eba\u5de5\u5ba1\u6279\uff09",
-        parameters={
-            "type": "object",
-            "properties": {
-                "code": {"type": "string"},
-            },
-            "required": ["code"],
-        },
-        handler=_execute_code_handler,
     )
 )
 

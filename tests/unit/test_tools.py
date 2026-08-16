@@ -121,30 +121,5 @@ async def test_knowledge_search_handler_truncates_context(monkeypatch) -> None:
     assert not result.endswith("x" * 2001)
 
 
-def test_execute_code_registered_with_schema() -> None:
-    tool = tool_registry.get("execute_code")
-    assert tool is not None
-    assert tool.parameters == {
-        "type": "object",
-        "properties": {"code": {"type": "string"}},
-        "required": ["code"],
-    }
-
-
-@pytest.mark.asyncio
-async def test_execute_code_handler_returns_approval_marker() -> None:
-    tool = tool_registry.get("execute_code")
-    result = await tool.handler("print('hello')\nprint('world')")
-    assert result.startswith("EXECUTION_REQUIRES_APPROVAL:")
-    assert "code=print('hello')\nprint('world')" in result
-    assert "lines=2" in result
-
-
-@pytest.mark.asyncio
-async def test_execute_code_handler_truncates_code_preview() -> None:
-    tool = tool_registry.get("execute_code")
-    long_code = "x" * 500
-    result = await tool.handler(long_code)
-    assert f"code={'x' * 100}" in result
-    assert "x" * 101 not in result
-    assert "lines=1" in result
+def test_execute_code_tool_removed_from_registry() -> None:
+    assert tool_registry.get("execute_code") is None

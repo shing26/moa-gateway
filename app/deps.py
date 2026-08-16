@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging, os
 from opentelemetry import trace
+from app.agents.provider import LLMClient, LLMConfig
 from app.config import settings
 from app.engine import Engine, RedisHitlStorage, SessionStore
 from app.evaluator.evaluator import RuleEvaluator
@@ -10,6 +11,7 @@ from app.guard.guard_service import guard_service
 from app.outbound.adapter import ResponseAdapter
 from app.prompt_registry import PromptEntry, PromptRegistry
 from app.router.intent_router import IntentRouter
+from app.router.llm_classifier import LLMIntentClassifier
 from app.vectordb import VectorDBClient
 from app.vectordb.retriever import ContextRetriever
 from app.audit.es_writer import EsWriter, build_es_writer
@@ -33,7 +35,6 @@ _prompt_registry = PromptRegistry()
 _retriever = ContextRetriever(VectorDBClient())
 
 # Module-level singletons
-router = IntentRouter()
 es_writer: EsWriter | None = None
 memory = ConversationMemory(
     storage=RedisConversationStorage(
@@ -47,6 +48,40 @@ command_mode = CommandMode()
 adapter = ResponseAdapter()
 evaluator = RuleEvaluator()
 # permission_guard = FailClosedPermissionGuard()  # removed: unused legacy guard
+
+
+def _has_llm_credentials(prefix: str) -> bool:
+    return any(
+        os.environ.get(name)
+        for name in (f"{prefix}_API_KEY", "OPENAI_API_KEY", "OMNIROUTE_API_KEY")
+    )
+
+
+def _build_classifier(prefix: str, *, fallback_main: bool = False) -> LLMIntentClassifier | None:
+    if os.environ.get(f"{prefix}_MODEL") and _has_llm_credentials(prefix):
+        try:
+            config = LLMConfig.from_env(prefix)
+            if not config.api_key:
+                config.api_key = os.environ.get("OPENAI_API_KEY", "")
+            return LLMIntentClassifier(LLMClient(config))
+        except Exception:
+            return None
+    if fallback_main and os.environ.get("LLM_MODEL") and _has_llm_credentials("LLM"):
+        return LLMIntentClassifier(LLMClient(LLMConfig.from_env("LLM")))
+    return None
+
+
+def build_intent_router() -> IntentRouter:
+    return IntentRouter(
+        router_llm=_build_classifier("ROUTER_LLM", fallback_main=True),
+        micro_llm=_build_classifier("MICRO_LLM"),
+        router_timeout_ms=settings.router_llm_timeout_ms,
+        micro_timeout_ms=settings.micro_llm_timeout_ms,
+    )
+
+
+router = build_intent_router()
+
 engine = Engine(
     router=router,
     adapter=adapter,

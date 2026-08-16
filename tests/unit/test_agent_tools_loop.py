@@ -90,7 +90,7 @@ async def test_tool_loop_caps_at_three_rounds(envelope) -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_code_marker_passes_through_tool_loop(envelope) -> None:
+async def test_unknown_tool_returns_error_through_tool_loop(envelope) -> None:
     from app.agents.stubs import CoderAgent
 
     llm = FakeToolLLM(
@@ -100,8 +100,7 @@ async def test_execute_code_marker_passes_through_tool_loop(envelope) -> None:
         ]
     )
     result = await CoderAgent(llm=llm).execute(envelope)
-    assert "EXECUTION_REQUIRES_APPROVAL" in result
-    assert "lines=1" in result
+    assert "unknown tool" in result
     assert llm.calls == 2
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from typing import Protocol
@@ -56,9 +57,11 @@ class IntentRouter:
     async def _micro_llm_fallback(self, text: str) -> tuple[str, str]:
         if self.micro_llm is None:
             return self.default_intent, "none"
-        # Placeholder timeout guard omitted for scaffolding.
         try:
-            intent = await self.micro_llm.classify(text)
+            intent = await asyncio.wait_for(
+                self.micro_llm.classify(text),
+                timeout=self.micro_timeout_ms / 1000,
+            )
             if intent and intent != self.default_intent:
                 return intent, "micro_llm"
         except Exception:
@@ -69,7 +72,10 @@ class IntentRouter:
         if self.router_llm is None:
             return self.default_intent, "none"
         try:
-            intent = await self.router_llm.classify(text)
+            intent = await asyncio.wait_for(
+                self.router_llm.classify(text),
+                timeout=self.router_timeout_ms / 1000,
+            )
             return intent or self.default_intent, "router_llm"
         except Exception:
             return self.default_intent, "none"
