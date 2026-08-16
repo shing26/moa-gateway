@@ -52,6 +52,21 @@ class FeatureFlagClient:
         self._store[self.flag_key(name)] = str(value)
         self._cache.pop(name, None)
 
+    def validate_value(self, name: str, value: Any) -> Any:
+        """Reject values that do not match the flag's declared type."""
+        expected = DEFAULT_FLAGS.get(name)
+        if expected is None:
+            return value
+        if isinstance(expected, bool):
+            if not isinstance(value, bool):
+                raise ValueError(f"flag '{name}' requires a boolean value")
+            return value
+        if isinstance(expected, int):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"flag '{name}' requires an integer value")
+            return value
+        return value
+
     async def delete(self, name: str) -> None:
         self._store.pop(self.flag_key(name), None)
         self._cache.pop(name, None)

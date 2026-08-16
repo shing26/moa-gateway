@@ -227,3 +227,14 @@ def test_dashboard_obsidian_sync_disabled_returns_clear_message(monkeypatch):
     assert body["enabled"] is False
     assert body["changed"] == 0
     assert "未启用" in body["message"]
+
+
+def test_dashboard_flag_rejects_non_boolean_value():
+    with TestClient(app) as client:
+        res = client.post("/dashboard/api/ops/flags/canary.enabled", json={"value": 50})
+        assert res.status_code == 400
+        body = res.json()
+        assert body["error"] == "invalid_flag_value"
+        cfg = client.get("/dashboard/api/ops/config").json()
+        flag = next(f for f in cfg["flags"] if f["name"] == "canary.enabled")
+        assert flag["value"] is False

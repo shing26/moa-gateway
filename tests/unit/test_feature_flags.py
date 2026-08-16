@@ -84,3 +84,21 @@ async def test_cache_ttl_expires():
     await client.set("test.expire", "updated")
     value = await client.get("test.expire")
     assert value == "updated"
+
+
+def test_validate_value_boolean_rejects_non_bool():
+    client = FeatureFlagClient()
+    with pytest.raises(ValueError, match="boolean"):
+        client.validate_value("canary.enabled", 50)
+    with pytest.raises(ValueError, match="boolean"):
+        client.validate_value("canary.enabled", "true")
+    assert client.validate_value("canary.enabled", True) is True
+
+
+def test_validate_value_int_rejects_bool_or_string():
+    client = FeatureFlagClient()
+    with pytest.raises(ValueError, match="integer"):
+        client.validate_value("canary.traffic_pct", True)
+    with pytest.raises(ValueError, match="integer"):
+        client.validate_value("canary.traffic_pct", "50")
+    assert client.validate_value("canary.traffic_pct", 50) == 50

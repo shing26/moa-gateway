@@ -896,6 +896,13 @@ async def dashboard_ops_test(body: OpsTestRequest) -> JSONResponse:
 
 @router.post("/dashboard/api/ops/flags/{name}")
 async def dashboard_flag_set(name: str, body: FlagUpdate) -> JSONResponse:
+    try:
+        _flag_client.validate_value(name, body.value)
+    except ValueError as exc:
+        return JSONResponse(
+            {"ok": False, "error": "invalid_flag_value", "detail": str(exc)},
+            status_code=400,
+        )
     await _flag_client.set(name, body.value)
     value = await _flag_client.get(name)
     return JSONResponse({"ok": True, "name": name, "value": value})
