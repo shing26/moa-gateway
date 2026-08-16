@@ -161,6 +161,22 @@ def test_dashboard_ops_config_empty_api_key_keeps_runtime_key():
             os.environ["OPENAI_API_KEY"] = saved
 
 
+def test_dashboard_sidebar_reflects_auth_config():
+    saved = os.environ.get("DASHBOARD_PASSWORD")
+    os.environ["DASHBOARD_PASSWORD"] = "pw"
+    try:
+        with TestClient(app) as client:
+            page = client.get("/dashboard")
+            assert page.status_code == 200
+            assert "鉴权已启用" in page.text
+            assert "无鉴权" not in page.text
+    finally:
+        if saved is None:
+            os.environ.pop("DASHBOARD_PASSWORD", None)
+        else:
+            os.environ["DASHBOARD_PASSWORD"] = saved
+
+
 def test_dashboard_flag_set_and_delete():
     with TestClient(app) as client:
         res = client.post("/dashboard/api/ops/flags/evaluator.enabled", json={"value": False})

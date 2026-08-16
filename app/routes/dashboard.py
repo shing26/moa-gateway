@@ -92,7 +92,7 @@ HTML_SHELL = """<!DOCTYPE html>
       <div class="brand-text"><strong>Agent Gateway</strong><span>v0.1.0 · 管理后台</span></div>
     </div>
     <nav class="nav" aria-label="主导航">{{nav}}</nav>
-    <div class="sidebar-foot">本地模式 · 无鉴权 · 数据仅本机可见</div>
+    <div class="sidebar-foot">{{auth_foot}}</div>
   </aside>
   <div class="main">
     <header class="topbar">
@@ -368,12 +368,22 @@ def _shell(
             f'<a class="nav-item{active}" href="/dashboard/{key}">'
             f'<span class="nav-icon">{NAV_ICONS[key]}</span><span>{label}</span></a>'
         )
+    auth_enabled = bool(
+        os.environ.get("DASHBOARD_PASSWORD", "")
+        or os.environ.get("WEBHOOK_AUTH_TOKEN", "")
+    )
+    auth_foot = (
+        "本地模式 · 鉴权已启用 · 数据仅本机可见"
+        if auth_enabled
+        else "本地模式 · 无鉴权 · 数据仅本机可见"
+    )
     return HTMLResponse(
         HTML_SHELL
         .replace("{{title}}", title)
         .replace("{{page_key}}", page_key)
         .replace("{{subtitle}}", subtitle)
         .replace("{{nav}}", "\n".join(nav_items))
+        .replace("{{auth_foot}}", auth_foot)
         .replace("{{content}}", content)
     )
 
