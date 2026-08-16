@@ -274,7 +274,7 @@ class LLMClient:
             return "anthropic"
         if "openrouter" in base_url:
             return "openrouter"
-        if any(host in base_url for host in ("localhost", "127.0.0.1", "0.0.0.0", "omniroute")):
+        if any(host in base_url for host in ("localhost", "127.0.0.1", "omniroute")):
             return "openai"
         if base_url and "api.openai.com" not in base_url:
             return "openai"

@@ -898,7 +898,7 @@ async def dashboard_ops_test(body: OpsTestRequest) -> JSONResponse:
 async def dashboard_flag_set(name: str, body: FlagUpdate) -> JSONResponse:
     try:
         _flag_client.validate_value(name, body.value)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         return JSONResponse(
             {"ok": False, "error": "invalid_flag_value", "detail": str(exc)},
             status_code=400,

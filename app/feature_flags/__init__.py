@@ -59,11 +59,11 @@ class FeatureFlagClient:
             return value
         if isinstance(expected, bool):
             if not isinstance(value, bool):
-                raise ValueError(f"flag '{name}' requires a boolean value")
+                raise TypeError(f"flag '{name}' requires a boolean value")
             return value
         if isinstance(expected, int):
             if isinstance(value, bool) or not isinstance(value, int):
-                raise ValueError(f"flag '{name}' requires an integer value")
+                raise TypeError(f"flag '{name}' requires an integer value")
             return value
         return value
 
