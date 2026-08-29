@@ -5,13 +5,14 @@ import base64
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.middleware.auth import AuthMiddleware
+from app.middleware.auth import AuthMiddleware, insecure_mode_enabled
 
 
 def build_client(
     token: str = "",
     dashboard_password: str = "",
     feishu_verification_token: str = "",
+    allow_insecure: bool = False,
 ) -> TestClient:
     inner = FastAPI()
 
@@ -48,14 +49,57 @@ def build_client(
         token=token,
         dashboard_password=dashboard_password,
         feishu_verification_token=feishu_verification_token,
+        allow_insecure=allow_insecure,
     )
     return TestClient(inner)
 
 
-def test_fail_open_when_no_secrets():
+def test_fail_closed_when_no_secrets():
+    """密钥未配置时必须拒绝，而不是静默放行（原 fail-open 缺陷的回归护栏）。"""
     with build_client() as client:
+        webhook = client.post("/webhook/test")
+        assert webhook.status_code == 401
+        assert webhook.json() == {"error": "unauthorized", "reason": "auth_not_configured"}
+
+        dashboard = client.get("/dashboard")
+        assert dashboard.status_code == 401
+        assert dashboard.json() == {"error": "unauthorized", "reason": "auth_not_configured"}
+        assert dashboard.headers.get("WWW-Authenticate") == 'Basic realm="dashboard"'
+
+
+def test_fail_closed_ignores_caller_supplied_credentials():
+    """未配置密钥时，调用方自带任何令牌也不得放行，避免空令牌被猜中。"""
+    with build_client() as client:
+        assert client.post("/webhook/test", headers={"X-Gateway-Token": ""}).status_code == 401
+        assert client.post("/webhook/test", headers={"X-Gateway-Token": "anything"}).status_code == 401
+        assert client.get("/dashboard", auth=("admin", "")).status_code == 401
+
+
+def test_allow_insecure_restores_pass_through_for_local_debug():
+    """仅显式开启 GATEWAY_ALLOW_INSECURE 时才退回放行（本地调试逃生口）。"""
+    with build_client(allow_insecure=True) as client:
         assert client.post("/webhook/test").status_code == 200
         assert client.get("/dashboard").status_code == 200
+
+
+def test_allow_insecure_does_not_weaken_configured_secrets():
+    """逃生口只影响"未配置"分支；已配置密钥时仍须校验。"""
+    with build_client(token="secret", dashboard_password="pw", allow_insecure=True) as client:
+        assert client.post("/webhook/test").status_code == 401
+        assert client.post("/webhook/test", headers={"X-Gateway-Token": "secret"}).status_code == 200
+        assert client.get("/dashboard").status_code == 401
+        assert client.get("/dashboard", auth=("admin", "pw")).status_code == 200
+
+
+def test_insecure_mode_env_parsing():
+    assert insecure_mode_enabled("1") is True
+    assert insecure_mode_enabled("true") is True
+    assert insecure_mode_enabled(" YES ") is True
+    assert insecure_mode_enabled("on") is True
+    assert insecure_mode_enabled("0") is False
+    assert insecure_mode_enabled("") is False
+    assert insecure_mode_enabled(None) is False
+    assert insecure_mode_enabled("please") is False
 
 
 def test_webhook_requires_token_when_configured():

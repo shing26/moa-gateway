@@ -12,7 +12,7 @@ from app.outbound.adapter import ResponseAdapter
 from app.prompt_registry import PromptEntry, PromptRegistry
 from app.router.intent_router import IntentRouter
 from app.router.llm_classifier import LLMIntentClassifier
-from app.vectordb import VectorDBClient
+from app.vectordb import build_vector_client
 from app.vectordb.retriever import ContextRetriever
 from app.audit.es_writer import EsWriter, build_es_writer
 from app.channels.feishu import FeishuChannelAdapter, FeishuConfig
@@ -32,7 +32,9 @@ _feishu_config: FeishuConfig | None = None
 _card_sender: FeishuCardSender | None = None
 _flag_client = FeatureFlagClient()
 _prompt_registry = PromptRegistry()
-_retriever = ContextRetriever(VectorDBClient())
+# 后端由 VECTOR_DB_DSN 决定：为空即内存存储（现状），配置后由 PostgreSQL 接管。
+vector_client = build_vector_client()
+_retriever = ContextRetriever(vector_client)
 
 # Module-level singletons
 es_writer: EsWriter | None = None
@@ -42,7 +44,7 @@ memory = ConversationMemory(
         enable_fallback=settings.redis_enable_fallback,
     )
 )
-knowledge_base = KnowledgeBase(_retriever._client)
+knowledge_base = KnowledgeBase(vector_client)
 obsidian_sync = ObsidianVaultSync.from_env(knowledge_base=knowledge_base)
 command_mode = CommandMode()
 adapter = ResponseAdapter()

@@ -133,6 +133,11 @@ def test_from_env_tolerates_empty_values(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_from_env_parses_fallback_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Pin provider to `direct` so fallback models stay unqualified and this test
+    # asserts the pure parsing path. Without this pin, LLM_PROVIDER from .env
+    # (omniroute, an openai-compatible provider) leaks in via load_dotenv() at
+    # import time and _qualify_model() prepends "openai/", breaking the assertion.
+    monkeypatch.setenv("LLM_PROVIDER", "direct")
     monkeypatch.setenv("LLM_FALLBACK_MODELS", " model-b , model-c ,,")
 
     config = LLMConfig.from_env()

@@ -5,10 +5,10 @@ from typing import Any
 
 import json
 import pytest
-from fastapi.testclient import TestClient
 
 from app.main import app
 from apps.code_review_pipeline.routing.github_client import GitHubClient
+from tests.support import app_client
 
 
 class DummyLLM:
@@ -65,7 +65,7 @@ def _patch_github_and_llm(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_github_review_webhook_returns_accepted() -> None:
-    client = TestClient(app)
+    client = app_client(app)
     payload = {
         "action": "opened",
         "number": 1,
@@ -95,7 +95,7 @@ def test_github_review_webhook_returns_accepted() -> None:
 
 def test_github_review_webhook_degrades_without_token(monkeypatch) -> None:
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    client = TestClient(app)
+    client = app_client(app)
     payload = {
         "action": "opened",
         "number": 2,
@@ -122,7 +122,7 @@ def test_pr_message_in_review_mode_returns_graceful_not_500(monkeypatch) -> None
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     command_mode.set("h2-sess", "review")
     try:
-        with TestClient(app) as client:
+        with app_client(app) as client:
             response = client.post(
                 "/webhook/feishu",
                 json={"session_id": "h2-sess", "chat_id": "h2-chat", "text": "octocat/Hello-World#1"},
@@ -136,7 +136,7 @@ def test_pr_message_in_review_mode_returns_graceful_not_500(monkeypatch) -> None
 
 
 def test_webhook_cancel_returns_reset() -> None:
-    with TestClient(app) as client:
+    with app_client(app) as client:
         response = client.post(
             "/webhook/feishu",
             json={"session_id": "ctrl-sess", "chat_id": "ctrl-chat", "text": "cancel"},
@@ -148,7 +148,7 @@ def test_webhook_cancel_returns_reset() -> None:
 
 
 def test_webhook_debug_returns_suspended() -> None:
-    with TestClient(app) as client:
+    with app_client(app) as client:
         response = client.post(
             "/webhook/feishu",
             json={"session_id": "debug-sess", "chat_id": "debug-chat", "text": "debug 错误"},

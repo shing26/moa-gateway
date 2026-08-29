@@ -3,14 +3,14 @@ from __future__ import annotations
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from app.main import _debug_exception_handler, app
+from tests.support import app_client
 
 
 def test_malformed_json_returns_400_not_500() -> None:
-    with TestClient(app, raise_server_exceptions=False) as client:
+    with app_client(app, raise_server_exceptions=False) as client:
         response = client.post(
             "/webhook/feishu",
             data="{a}",

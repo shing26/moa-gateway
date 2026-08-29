@@ -4,7 +4,6 @@ import os
 from types import SimpleNamespace
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.deps import pipeline
 import app.pipeline as pipeline_module
@@ -12,6 +11,7 @@ from app.engine import Engine, HitlRequest
 from app.fsm.state_machine import Event, State, next_state
 from app.main import app
 from app.vectordb.retriever import RetrievalResult
+from tests.support import app_client
 
 
 @pytest.fixture
@@ -164,7 +164,7 @@ def test_webhook_execute_code_marker_triggers_review(monkeypatch) -> None:
     monkeypatch.setattr(pipeline.evaluator, "score", fake_score)
     monkeypatch.setattr(pipeline_module, "log_request", fake_log)
 
-    with TestClient(app) as client:
+    with app_client(app) as client:
         res = client.post(
             "/webhook/feishu",
             json={"session_id": "hitl-sess", "chat_id": "c1", "text": "帮我执行这段代码"},
@@ -199,7 +199,7 @@ def test_webhook_callback_resolves_hitl_by_trace_id(monkeypatch) -> None:
     store.store_hitl("cb-sess", req)
     monkeypatch.setattr(pipeline.engine, "handle_event", fake_handle)
     try:
-        with TestClient(app) as client:
+        with app_client(app) as client:
             res = client.post(
                 "/webhook/callback",
                 json={"action": {"value": {"session_id": "cb-sess", "trace_id": "cb-trace", "action": "approve"}}},

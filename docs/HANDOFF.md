@@ -169,7 +169,8 @@ uv run bandit -r app -q
 | `LLM_MAX_TOKENS` / `LLM_TIMEOUT` / `LLM_TEMPERATURE` | LLM 参数 | **空值会崩，Phase 0 修** |
 | `REDIS_URL` / `REDIS_ENABLE_FALLBACK` | 会话/HITL 存储 | 无 Redis 自动内存回退 |
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | 飞书 + HITL 卡片 | 可选 |
-| `WEBHOOK_AUTH_TOKEN` / `DASHBOARD_PASSWORD` | 鉴权（fail-open） | 留空=不鉴权 |
+| `WEBHOOK_AUTH_TOKEN` / `DASHBOARD_PASSWORD` | 鉴权（**fail-closed**） | 留空=对应端点一律 401（`reason=auth_not_configured`），不再放行 |
+| `GATEWAY_ALLOW_INSECURE` | 本地调试逃生口 | 设为 `1/true/yes/on` 才退回未鉴权放行；**禁止用于生产**，启动日志会告警 |
 | `HITL_ENABLED` | 是否启用审批 | 默认 false |
 | `GITHUB_TOKEN` | PR 审查（Phase 4） | 无则降级 |
 | `CODE_REVIEW_DATABASE_URL` | PR 审查存储（Postgres） | 无则内存存储 |

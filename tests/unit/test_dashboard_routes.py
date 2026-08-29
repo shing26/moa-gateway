@@ -2,16 +2,15 @@ import asyncio
 import json
 import os
 
-from fastapi.testclient import TestClient
-
 from app.agents import provider
 from app.deps import command_mode, knowledge_base, memory
 from app.main import app
 import app.routes.dashboard as dashboard_routes
+from tests.support import app_client
 
 
 def test_dashboard_pages_render():
-    with TestClient(app) as client:
+    with app_client(app) as client:
         for path in ("/dashboard", "/dashboard/overview", "/dashboard/knowledge",
                      "/dashboard/sessions", "/dashboard/test", "/dashboard/logs", "/dashboard/ops"):
             res = client.get(path)
@@ -20,14 +19,14 @@ def test_dashboard_pages_render():
 
 
 def test_dashboard_static_assets_served():
-    with TestClient(app) as client:
+    with app_client(app) as client:
         assert client.get("/dashboard/static/tokens.css").status_code == 200
         assert client.get("/dashboard/static/dashboard.css").status_code == 200
         assert client.get("/dashboard/static/dashboard.js").status_code == 200
 
 
 def test_dashboard_logs_api_returns_list():
-    with TestClient(app) as client:
+    with app_client(app) as client:
         res = client.get("/dashboard/api/logs")
         assert res.status_code == 200
         data = res.json()
@@ -35,7 +34,7 @@ def test_dashboard_logs_api_returns_list():
 
 
 def test_dashboard_upload_and_delete_document():
-    with TestClient(app) as client:
+    with app_client(app) as client:
         res = client.post("/dashboard/upload", json={"title": "dashboard test", "content": "hello world"})
         assert res.status_code == 200
         doc_id = res.json()["id"]
@@ -51,7 +50,7 @@ def test_dashboard_clear_session_clears_memory_and_mode():
     command_mode.set(sid, "coder")
     assert memory.get_history(sid)
     assert command_mode.get(sid) == "coder"
-    with TestClient(app) as client:
+    with app_client(app) as client:
         res = client.post(f"/dashboard/api/sessions/{sid}/clear")
         assert res.status_code == 200
         assert res.json()["ok"] is True
@@ -63,7 +62,7 @@ def test_dashboard_session_detail_and_mode():
     sid = "test-session-detail"
     memory.add(sid, "user q", "assistant a")
     try:
-        with TestClient(app) as client:
+        with app_client(app) as client:
             detail = client.get(f"/dashboard/api/sessions/{sid}")
             assert detail.status_code == 200
             data = detail.json()
@@ -82,7 +81,7 @@ def test_dashboard_session_detail_and_mode():
 
 
 def test_dashboard_knowledge_file_upload_detail_search():
-    with TestClient(app) as client:
+    with app_client(app) as client:
         res = client.post(
             "/dashboard/api/knowledge/upload_file",
             files={"file": ("demo.md", b"# demo\nredis config guide", "text/markdown")},
@@ -110,7 +109,7 @@ def test_dashboard_ops_config_update():
         os.environ.get("OPENAI_API_KEY"),
     )
     try:
-        with TestClient(app) as client:
+        with app_client(app) as client:
             res = client.post(
                 "/dashboard/api/ops/config",
                 json={
@@ -145,7 +144,7 @@ def test_dashboard_ops_config_empty_api_key_keeps_runtime_key():
     saved = os.environ.get("OPENAI_API_KEY")
     os.environ["OPENAI_API_KEY"] = "sk-keep-me"
     try:
-        with TestClient(app) as client:
+        with app_client(app) as client:
             res = client.post(
                 "/dashboard/api/ops/config",
                 json={"model": "keep-model", "base_url": "http://localhost:9/v1", "api_key": ""},
@@ -164,9 +163,12 @@ def test_dashboard_ops_config_empty_api_key_keeps_runtime_key():
 
 def test_dashboard_sidebar_reflects_auth_config():
     saved = os.environ.get("DASHBOARD_PASSWORD")
+    # 中间件的 dashboard 密码在 import app.main 时就已固化，客户端凭据必须用那份值；
+    # 因此先建好已鉴权客户端，再改环境变量——本用例只关心侧边栏渲染时读到的环境值。
+    client = app_client(app)
     os.environ["DASHBOARD_PASSWORD"] = "pw"
     try:
-        with TestClient(app) as client:
+        with client:
             page = client.get("/dashboard")
             assert page.status_code == 200
             assert "鉴权已启用" in page.text
@@ -179,7 +181,7 @@ def test_dashboard_sidebar_reflects_auth_config():
 
 
 def test_dashboard_flag_set_and_delete():
-    with TestClient(app) as client:
+    with app_client(app) as client:
         res = client.post("/dashboard/api/ops/flags/evaluator.enabled", json={"value": False})
         assert res.status_code == 200
         cfg = client.get("/dashboard/api/ops/config").json()
@@ -197,7 +199,7 @@ def test_dashboard_ops_test_message(monkeypatch):
         return "pong"
 
     monkeypatch.setattr(provider.LLMClient, "chat", fake_chat)
-    with TestClient(app) as client:
+    with app_client(app) as client:
         res = client.post("/dashboard/api/ops/test", json={"message": "hi"})
         assert res.status_code == 200
         data = res.json()
@@ -220,7 +222,7 @@ def test_dashboard_obsidian_sync_disabled_returns_clear_message(monkeypatch):
             }
 
     monkeypatch.setattr(dashboard_routes, "obsidian_sync", FakeObsidianSync())
-    with TestClient(app) as client:
+    with app_client(app) as client:
         res = client.post("/dashboard/api/ops/obsidian/sync")
     assert res.status_code == 200
     body = res.json()
@@ -230,7 +232,7 @@ def test_dashboard_obsidian_sync_disabled_returns_clear_message(monkeypatch):
 
 
 def test_dashboard_flag_rejects_non_boolean_value():
-    with TestClient(app) as client:
+    with app_client(app) as client:
         res = client.post("/dashboard/api/ops/flags/canary.enabled", json={"value": 50})
         assert res.status_code == 400
         body = res.json()

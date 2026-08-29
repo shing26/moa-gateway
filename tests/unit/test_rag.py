@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -123,7 +124,10 @@ def test_build_vector_store_raises_when_dsn_set_but_no_psycopg(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("CODE_REVIEW_DATABASE_URL", "postgres://localhost/test")
-    monkeypatch.setattr("apps.code_review_pipeline.rag.vector_store.psycopg", None, raising=False)
+    # Patch sys.modules, not the module attribute: build_vector_store() does a
+    # FUNCTION-LOCAL `import psycopg`, so it never reads vector_store.psycopg.
+    # A None entry in sys.modules makes the import itself raise ImportError.
+    monkeypatch.setitem(sys.modules, "psycopg", None)
     with pytest.raises(VectorStoreInitError):
         build_vector_store()
 

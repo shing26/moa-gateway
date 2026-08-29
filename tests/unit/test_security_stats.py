@@ -1,8 +1,6 @@
 import json
 from datetime import date, timedelta
 
-from fastapi.testclient import TestClient
-
 from app.main import app
 from app.routes.dashboard import (
     _hitl_latency_stats,
@@ -10,6 +8,7 @@ from app.routes.dashboard import (
     _top_risky_sessions,
     _trend_by_day,
 )
+from tests.support import app_client
 
 
 def _entry(**kw):
@@ -204,7 +203,7 @@ def test_load_audit_entries_missing_dir(tmp_path, monkeypatch):
 
 
 def test_dashboard_security_page_renders():
-    with TestClient(app) as client:
+    with app_client(app) as client:
         res = client.get("/dashboard/security")
         assert res.status_code == 200
         assert "安全合规" in res.text
@@ -215,7 +214,7 @@ def test_dashboard_security_page_renders():
 
 
 def test_dashboard_security_in_nav_of_other_pages():
-    with TestClient(app) as client:
+    with app_client(app) as client:
         res = client.get("/dashboard/overview")
         assert res.status_code == 200
         assert '/dashboard/security' in res.text

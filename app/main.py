@@ -9,10 +9,10 @@ from opentelemetry import trace
 import app.agents.loader
 from app.deps import (
     _card_sender, _feishu_config, _flag_client, engine, es_writer, logger,
-    init_feishu, init_prompts, obsidian_sync, tracer,
+    init_feishu, init_prompts, obsidian_sync, tracer, vector_client,
 )
 from app.observability.tracing import setup_tracing, TraceConfig
-from app.middleware.auth import AuthMiddleware
+from app.middleware.auth import AuthMiddleware, insecure_mode_enabled
 from app.middleware.flags import FeatureFlagMiddleware
 from app.config import settings
 from app.routes.dashboard import router as dashboard_router
@@ -33,6 +33,8 @@ async def lifespan(_: FastAPI):
         logger.warning("opentelemetry tracing init failed")
     init_feishu()
     init_prompts()
+    # 先开存储：obsidian_sync 会往知识库写入。DSN 未配置时这是空操作。
+    await vector_client.start()
     await obsidian_sync.start()
     tracer = trace.get_tracer("moa-gateway")
     yield
@@ -40,6 +42,7 @@ async def lifespan(_: FastAPI):
     if es_writer is not None:
         await es_writer.aclose()
     await obsidian_sync.close()
+    await vector_client.close()
     engine.session_store.clear_all()
     _flag_client.invalidate()
 
@@ -54,12 +57,32 @@ app.include_router(webhook_router)
 app.include_router(knowledge_router)
 app.include_router(github_review_router)
 app.add_middleware(FeatureFlagMiddleware, client=_flag_client)
+_WEBHOOK_TOKEN = os.environ.get("WEBHOOK_AUTH_TOKEN", "")
+_DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+_ALLOW_INSECURE = insecure_mode_enabled(os.environ.get("GATEWAY_ALLOW_INSECURE"))
 app.add_middleware(
     AuthMiddleware,
-    token=os.environ.get("WEBHOOK_AUTH_TOKEN", ""),
-    dashboard_password=os.environ.get("DASHBOARD_PASSWORD", ""),
+    token=_WEBHOOK_TOKEN,
+    dashboard_password=_DASHBOARD_PASSWORD,
     feishu_verification_token=settings.feishu_verification_token,
+    allow_insecure=_ALLOW_INSECURE,
 )
+_MISSING_SECRETS = [
+    name
+    for name, value in (("WEBHOOK_AUTH_TOKEN", _WEBHOOK_TOKEN), ("DASHBOARD_PASSWORD", _DASHBOARD_PASSWORD))
+    if not value
+]
+if _MISSING_SECRETS:
+    if _ALLOW_INSECURE:
+        logger.warning(
+            "GATEWAY_ALLOW_INSECURE 已开启且 %s 未配置：对应端点将无鉴权放行，禁止用于生产环境",
+            ", ".join(_MISSING_SECRETS),
+        )
+    else:
+        logger.warning(
+            "%s 未配置：对应受保护端点将统一返回 401（fail-closed）；仅本地调试可设 GATEWAY_ALLOW_INSECURE=1",
+            ", ".join(_MISSING_SECRETS),
+        )
 
 @app.exception_handler(Exception)
 async def _debug_exception_handler(request: Request, exc: Exception):

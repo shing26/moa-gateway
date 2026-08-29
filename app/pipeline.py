@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.agents.contract import AgentEnvelope, get_agent
+from app.agents.intent_map import INTENT_AGENT_MAP, resolve_agent_key
 import app.agents.loader
 from app.channels.feishu_cards import ApprovalCard
 from app.command_mode import MODES, parse_command
@@ -169,9 +170,12 @@ class MoAPipeline:
         forced = self.command_mode.get(event.session_id)
         if forced:
             intent = forced
-        agent = get_agent(intent) or get_agent("general")
-        agent_name = intent if agent else "general"
-        for name in ("coder", "general"):
+        # 修复根因 A：意图标签（coding/...）经同构映射表对齐到注册键（coder/...），
+        # 使 CoderAgent / ReviewAgent 能被正确选中，而非全部塌缩到 GeneralAgent。
+        mapped_key = resolve_agent_key(intent)
+        agent = get_agent(mapped_key) or get_agent("general")
+        agent_name = mapped_key if agent else "general"
+        for name in ("coder", "general", "review"):
             if get_agent(name) is agent:
                 agent_name = name
                 break

@@ -4,7 +4,6 @@ import time
 import os
 
 import pytest
-from fastapi.testclient import TestClient
 
 from app.deps import pipeline
 import app.pipeline as pipeline_module
@@ -13,6 +12,7 @@ from app.guard.rbac import GuardianAction, GuardVerdict
 from app.main import app
 from app.vectordb.retriever import RetrievalResult
 import app.routes.webhook as webhook_route
+from tests.support import app_client
 
 
 class FakeAgent:
@@ -85,7 +85,7 @@ def test_webhook_writes_request_log_for_agent_flow(monkeypatch) -> None:
     monkeypatch.setattr(pipeline.adapter, "adapt", fake_adapt)
     monkeypatch.setattr(pipeline_module, "log_request", fake_log)
 
-    with TestClient(app) as client:
+    with app_client(app) as client:
         res = client.post(
             "/webhook/feishu",
             json={"session_id": "s1", "chat_id": "c1", "text": "hello"},
@@ -111,7 +111,7 @@ def test_webhook_writes_request_log_on_agent_failure(monkeypatch) -> None:
     _patch_pipeline(monkeypatch, agent)
     monkeypatch.setattr(pipeline_module, "log_request", fake_log)
 
-    with TestClient(app, raise_server_exceptions=False) as client:
+    with app_client(app, raise_server_exceptions=False) as client:
         res = client.post(
             "/webhook/feishu",
             json={"session_id": "s1", "chat_id": "c1", "text": "hello"},
@@ -147,7 +147,7 @@ def test_webhook_debug_text_not_500(monkeypatch) -> None:
     )
     monkeypatch.setattr(pipeline_module, "log_request", fake_log)
 
-    with TestClient(app, raise_server_exceptions=False) as client:
+    with app_client(app, raise_server_exceptions=False) as client:
         res = client.post(
             "/webhook/test",
             json={"session_id": "s-debug", "chat_id": "c-debug", "text": "帮我 debug 这个报错"},
@@ -175,7 +175,7 @@ def test_webhook_callback_approve_logs_hitl_decision_and_duration(monkeypatch) -
     monkeypatch.setattr(pipeline.engine, "handle_event", fake_handle)
     monkeypatch.setattr(webhook_route, "log_request", fake_log)
     try:
-        with TestClient(app) as client:
+        with app_client(app) as client:
             res = client.post(
                 "/webhook/callback",
                 json={"action": {"value": {"session_id": "log-sess", "trace_id": "log-trace", "action": "approve"}}},
