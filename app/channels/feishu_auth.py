@@ -50,5 +50,5 @@ class FeishuTokenProvider:
         return self._token
 
     def invalidate(self) -> None:
-        self._token = ""
+        self._token = ""  # nosec B105
         self._expires = 0.0

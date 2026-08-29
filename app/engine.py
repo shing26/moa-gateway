@@ -102,7 +102,7 @@ class RedisHitlStorage:
             try:
                 self._bridge.call(self._client.aclose())
             except Exception:
-                pass
+                pass  # nosec B110
             self._client = None
         self._connected = False
         self._using_memory = True

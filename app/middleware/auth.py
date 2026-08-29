@@ -18,7 +18,7 @@ _DASHBOARD_USER = "admin"
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    def __init__(
+    def __init__(  # nosec B107
         self,
         app: Any,
         token: str = "",

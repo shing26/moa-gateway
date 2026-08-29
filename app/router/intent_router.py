@@ -65,7 +65,7 @@ class IntentRouter:
             if intent and intent != self.default_intent:
                 return intent, "micro_llm"
         except Exception:
-            pass
+            pass  # nosec B110
         return self.default_intent, "none"
 
     async def _router_llm_fallback(self, text: str) -> tuple[str, str]:

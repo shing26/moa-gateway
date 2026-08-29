@@ -115,7 +115,7 @@ class RedisConversationStorage:
             try:
                 self._bridge.call(self._client.aclose())
             except Exception:
-                pass
+                pass  # nosec B110
             self._client = None
         self._connected = False
         self._using_memory = True
@@ -238,7 +238,7 @@ class ConversationMemory:
             try:
                 history.append(json.loads(item))
             except Exception:
-                continue
+                continue  # nosec B112
         if history and session_id not in self._store:
             self._store[session_id] = list(history)
         return history

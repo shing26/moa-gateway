@@ -54,5 +54,5 @@ async def reset_stack(redis: Any, session_id: str) -> None:
             if ctx_key:
                 await redis.delete(ctx_key)
         except Exception:
-            pass
+            pass  # nosec B110
     await redis.delete(key)

@@ -62,7 +62,7 @@ class ObsidianVaultSync:
 
     @staticmethod
     def _doc_id(rel: str) -> str:
-        return "obs:" + hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
+        return "obs:" + hashlib.sha1(rel.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
     def _scan(self) -> dict[str, tuple[int, int]]:
         root = self.root
