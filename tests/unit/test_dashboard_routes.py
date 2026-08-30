@@ -105,8 +105,8 @@ def test_dashboard_knowledge_file_upload_detail_search():
 def test_dashboard_ops_config_update():
     saved = (
         os.environ.get("LLM_MODEL"),
-        os.environ.get("OPENAI_BASE_URL"),
-        os.environ.get("OPENAI_API_KEY"),
+        os.environ.get("LLM_BASE_URL"),
+        os.environ.get("LLM_API_KEY"),
     )
     try:
         with app_client(app) as client:
@@ -131,7 +131,7 @@ def test_dashboard_ops_config_update():
             assert "Provider" in page.text
     finally:
         for key, value in zip(
-            ("LLM_MODEL", "OPENAI_BASE_URL", "OPENAI_API_KEY"),
+            ("LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY"),
             saved,
         ):
             if value is None:
@@ -141,8 +141,12 @@ def test_dashboard_ops_config_update():
 
 
 def test_dashboard_ops_config_empty_api_key_keeps_runtime_key():
-    saved = os.environ.get("OPENAI_API_KEY")
-    os.environ["OPENAI_API_KEY"] = "sk-keep-me"
+    saved = (
+        os.environ.get("LLM_MODEL"),
+        os.environ.get("LLM_BASE_URL"),
+        os.environ.get("LLM_API_KEY"),
+    )
+    os.environ["LLM_API_KEY"] = "sk-keep-me"
     try:
         with app_client(app) as client:
             res = client.post(
@@ -151,14 +155,18 @@ def test_dashboard_ops_config_empty_api_key_keeps_runtime_key():
             )
             assert res.status_code == 200
             assert res.json()["llm"]["api_key_set"] is True
-            assert os.environ.get("OPENAI_API_KEY") == "sk-keep-me"
+            assert os.environ.get("LLM_API_KEY") == "sk-keep-me"
             cfg = client.get("/dashboard/api/ops/config").json()
             assert cfg["llm"]["api_key_set"] is True
     finally:
-        if saved is None:
-            os.environ.pop("OPENAI_API_KEY", None)
-        else:
-            os.environ["OPENAI_API_KEY"] = saved
+        for key, value in zip(
+            ("LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY"),
+            saved,
+        ):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_dashboard_sidebar_reflects_auth_config():

@@ -41,3 +41,14 @@
   `usedforsecurity=False`）
 - `python evals/run_evals.py --offline`：intent accuracy 1.0，guard deny recall 1.0，
   e2e 30 条离线跳过
+
+## 修订（2026-08-31）
+
+本地 Ollama 实测后修正 B1 的实现方式：`LLM_PROVIDER=local` 不再前缀
+`local/` 或使用 `custom_llm_provider=ollama`，而是统一走 OpenAI 兼容端点
+（`LLM_BASE_URL=http://localhost:11434/v1`，`custom_llm_provider=openai`），
+因为 LiteLLM 的 `ollama` provider 会访问原生 `/api/chat` 路径，与项目默认的
+`/v1` OpenAI 兼容端点不匹配。带 tag 的模型名（如 `qwen2.5:7b`）现在也会正常
+推导 provider；`app/agents/stubs.py` 的主 LLM 改用 `LLMConfig.from_env("LLM")`，
+Dashboard Ops 配置/测试连接统一读取 `LLM_*` 环境变量。端到端验证：webhook 请求
+通过 `qwen2.5:7b` 返回真实模型回复。

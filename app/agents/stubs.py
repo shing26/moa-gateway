@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any
 
 from app.agents.contract import AgentEnvelope, SubAgent, register_agent
@@ -15,11 +14,7 @@ MAX_TOOL_ROUNDS = 3
 
 
 def _default_llm() -> LLMClient:
-    return LLMClient(LLMConfig(
-        api_key=os.environ.get("OPENAI_API_KEY", ""),
-        base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        model=os.environ.get("LLM_MODEL", "gpt-4o-mini"),
-    ))
+    return LLMClient(LLMConfig.from_env("LLM"))
 
 
 def _build_envelope_context(envelope: AgentEnvelope, role_tag: str) -> str:

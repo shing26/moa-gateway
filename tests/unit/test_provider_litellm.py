@@ -196,3 +196,35 @@ async def test_bare_model_infers_provider_from_base_url(monkeypatch: pytest.Monk
     await client.chat([{"role": "user", "content": "hi"}])
 
     assert mock_acompletion.call_args.kwargs["custom_llm_provider"] == "deepseek"
+
+
+def test_from_env_local_uses_openai_compatible_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "local")
+    monkeypatch.setenv("LLM_MODEL", "qwen2.5:7b")
+    monkeypatch.setenv("LLM_API_KEY", "ollama-local")
+
+    config = LLMConfig.from_env()
+
+    assert config.provider == "local"
+    assert config.model == "qwen2.5:7b"
+    assert config.base_url == "http://localhost:11434/v1"
+    assert config.api_key == "ollama-local"
+
+
+@pytest.mark.asyncio
+async def test_colon_model_gets_openai_custom_provider_for_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_acompletion = AsyncMock(return_value=_make_response())
+    _patch_litellm(monkeypatch, mock_acompletion)
+    client = LLMClient(LLMConfig(
+        api_key="ollama-local",
+        base_url="http://localhost:11434/v1",
+        model="qwen2.5:7b",
+        provider="local",
+    ))
+
+    await client.chat([{"role": "user", "content": "hi"}])
+
+    kwargs = mock_acompletion.call_args.kwargs
+    assert kwargs["model"] == "qwen2.5:7b"
+    assert kwargs["custom_llm_provider"] == "openai"
+    assert kwargs["api_base"] == "http://localhost:11434/v1"

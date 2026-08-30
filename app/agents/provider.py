@@ -44,7 +44,7 @@ def _qualify_model(model: str, provider: str) -> str:
     if provider in _OPENAI_COMPATIBLE_PROVIDERS:
         return f"openai/{model}"
     if provider in ("local", "ollama"):
-        return f"local/{model}"
+        return f"openai/{model}"
     return model
 
 
@@ -242,7 +242,7 @@ class LLMClient:
             "stream": False,
             "timeout": self.config.timeout,
         }
-        if "/" not in model and ":" not in model:
+        if "/" not in model:
             custom_provider = self._custom_provider_for(model)
             if custom_provider:
                 kwargs["custom_llm_provider"] = custom_provider
@@ -258,7 +258,7 @@ class LLMClient:
 
     def _custom_provider_for(self, model: str) -> str:
         """Pick a LiteLLM provider for bare model names."""
-        if "/" in model or ":" in model:
+        if "/" in model:
             return ""
         provider = (self.config.provider or "direct").lower()
         if provider in _LITELLM_PROVIDERS:
@@ -266,7 +266,7 @@ class LLMClient:
         if provider in _OPENAI_COMPATIBLE_PROVIDERS:
             return "openai"
         if provider in ("local", "ollama"):
-            return "ollama"
+            return "openai"
         base_url = (self.config.base_url or "").lower()
         if "deepseek" in base_url:
             return "deepseek"

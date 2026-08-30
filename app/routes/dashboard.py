@@ -390,7 +390,7 @@ def _shell(
 
 def _overview() -> str:
     model = os.environ.get("LLM_MODEL", "").strip() or "未设置"
-    base_url = os.environ.get("OPENAI_BASE_URL", "").strip() or "未设置"
+    base_url = os.environ.get("LLM_BASE_URL", "").strip() or "未设置"
     feishu = "已配置" if os.environ.get("FEISHU_APP_ID", "") else "未配置"
     return f"""
 <section class="stat-band" aria-label="核心指标">
@@ -842,8 +842,8 @@ async def dashboard_ops_config() -> JSONResponse:
     return JSONResponse({
         "llm": {
             "model": os.environ.get("LLM_MODEL", ""),
-            "base_url": os.environ.get("OPENAI_BASE_URL", ""),
-            "api_key_set": bool(os.environ.get("OPENAI_API_KEY", "")),
+            "base_url": os.environ.get("LLM_BASE_URL", ""),
+            "api_key_set": bool(os.environ.get("LLM_API_KEY", "")),
         },
         "feishu": {"configured": bool(os.environ.get("FEISHU_APP_ID", ""))},
         "redis": {"url": settings.redis_url},
@@ -859,28 +859,30 @@ async def dashboard_ops_config_update(body: OpsConfigUpdate) -> JSONResponse:
     if body.model is not None:
         os.environ["LLM_MODEL"] = body.model.strip()
     if body.base_url is not None:
-        os.environ["OPENAI_BASE_URL"] = body.base_url.strip().rstrip("/")
+        os.environ["LLM_BASE_URL"] = body.base_url.strip().rstrip("/")
     if body.api_key:
-        os.environ["OPENAI_API_KEY"] = body.api_key.strip()
+        os.environ["LLM_API_KEY"] = body.api_key.strip()
     return JSONResponse({
         "ok": True,
         "llm": {
             "model": os.environ.get("LLM_MODEL", ""),
-            "base_url": os.environ.get("OPENAI_BASE_URL", ""),
-            "api_key_set": bool(os.environ.get("OPENAI_API_KEY", "")),
+            "base_url": os.environ.get("LLM_BASE_URL", ""),
+            "api_key_set": bool(os.environ.get("LLM_API_KEY", "")),
         },
     })
 
 
 @router.post("/dashboard/api/ops/test")
 async def dashboard_ops_test(body: OpsTestRequest) -> JSONResponse:
-    config = LLMConfig(
-        api_key=(body.api_key or os.environ.get("OPENAI_API_KEY", "")).strip(),
-        base_url=(body.base_url or os.environ.get("OPENAI_BASE_URL", "")).strip() or "https://api.openai.com/v1",
-        model=(body.model or os.environ.get("LLM_MODEL", "")).strip() or "gpt-4o-mini",
-        timeout=30.0,
-        max_tokens=64,
-    )
+    config = LLMConfig.from_env("LLM")
+    if body.model:
+        config.model = body.model.strip()
+    if body.base_url:
+        config.base_url = body.base_url.strip().rstrip("/")
+    if body.api_key:
+        config.api_key = body.api_key.strip()
+    config.timeout = 30.0
+    config.max_tokens = 64
     client = LLMClient(config)
     try:
         reply = await client.chat(
