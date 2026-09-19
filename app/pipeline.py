@@ -73,6 +73,7 @@ class MoAPipeline:
         command_mode: Any,
         card_sender: Any = None,
         long_term_memory: Any = None,
+        budget_guard: Any = None,
     ) -> None:
         self.engine = engine
         self.router = router
@@ -87,6 +88,8 @@ class MoAPipeline:
         self.card_sender = card_sender
         # 默认 None：未配置长期记忆时，行为与补齐前完全一致。
         self.long_term_memory = long_term_memory
+        # M6：per-session 预算 guard；None 或 limit<=0 时零行为差异。
+        self.budget_guard = budget_guard
 
     def set_card_sender(self, sender: Any) -> None:
         self.card_sender = sender
@@ -245,6 +248,28 @@ class MoAPipeline:
             },
         )
 
+        budget_blocked = (
+            self.budget_guard is not None
+            and not self.budget_guard.check(event.session_id)
+        )
+        if budget_blocked:
+            logger.warning(
+                "session budget exceeded session=%s limit=%s",
+                event.session_id, self.budget_guard.limit_usd,
+            )
+            if request is not None:
+                await log_request(
+                    request, 429, (time.monotonic() - start) * 1000,
+                    event.session_id, agent_name, intent, "budget_exceeded",
+                    event.text, "session budget exceeded",
+                )
+            return PipelineResult(
+                trace_id=event.trace_id, state=state, intent=intent,
+                text="该会话的预算额度已用完，请求被拒绝", status="blocked",
+                agent_name=agent_name,
+                error_code=ErrorCode.BUDGET_EXCEEDED.value,
+            )
+
         try:
             raw_output = await agent.execute(envelope)
         except Exception:
@@ -266,6 +291,9 @@ class MoAPipeline:
         cost_usd = float(llm_metrics.get("cost_usd", 0.0))
         llm_latency_ms = float(llm_metrics.get("llm_latency_ms", 0.0))
         fallback_used = str(llm_metrics.get("fallback_used", ""))
+        # M6：调用后累计真实成本（超限影响的是该会话的"下一次"请求）
+        if self.budget_guard is not None and cost_usd > 0:
+            self.budget_guard.record(event.session_id, cost_usd)
 
         eval_result = await self.evaluator.score(raw_output, intent)
 

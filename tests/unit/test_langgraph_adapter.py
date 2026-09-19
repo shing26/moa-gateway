@@ -361,6 +361,8 @@ MODELLED_COLLABORATORS = {
     # recall in ``retrieve`` + apply_ops in ``deliver`` — see the parity test
     # for long-term memory in test_engine_parity_golden.py.
     "long_term_memory",
+    # M6：execute 起点预检 + 执行后累计，与 FSM 管道共用同一 guard 实例
+    "budget_guard",
 }
 
 # Deliberately not modelled. See the module docstring of app/orchestration/graph.py.

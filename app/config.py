@@ -160,6 +160,13 @@ class Settings:
         # 裸 int()：端口写错属于启动失败级错误，语义与旧 __main__ 入口一致。
         self.gateway_port: int = int(os.getenv("GATEWAY_PORT") or os.getenv("APP_PORT") or "8081")
 
+        # ── 预算拦截（M6）─────────────────────────────────────────────────
+        # 0 = 只核算不拦截（默认，行为与未引入预算层完全一致）；
+        # >0 = per-session 累计成本达到限额后拒后续请求。
+        self.budget_session_limit_usd: float = _parse_float(
+            os.getenv("BUDGET_SESSION_LIMIT_USD"), 0.0, name="BUDGET_SESSION_LIMIT_USD"
+        )
+
         self.validate()
 
     def validate(self) -> None:
@@ -200,6 +207,10 @@ class Settings:
             )
         if not 1 <= self.gateway_port <= 65535:
             raise ValueError(f"GATEWAY_PORT 必须在 1-65535 之间，得到 {self.gateway_port}")
+        if self.budget_session_limit_usd < 0:
+            raise ValueError(
+                f"BUDGET_SESSION_LIMIT_USD 不能为负（0 表示只核算不拦截），得到 {self.budget_session_limit_usd}"
+            )
 
     def to_redis_config(self) -> dict[str, Any]:
         return {

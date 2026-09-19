@@ -54,8 +54,28 @@ class TaskAgent:
             envelope.trace_id, session_id, task[:80],
         )
 
+        # N3：任务链路的 LLM 成本收集器。LLMClient.last_metrics 每次 chat
+        # 都会覆盖，因此在 plan / 每轮 ReAct / summarize 后分阶段累加，
+        # 最终写回 envelope 供 pipeline / graph 记账与预算累计（与
+        # stubs.capture_metrics 消费同一条 llm_metrics 通道）。
+        spent = {"cost_usd": 0.0, "prompt_tokens": 0, "completion_tokens": 0.0, "llm_latency_ms": 0.0}
+        model_used = ""
+
+        def _collect() -> None:
+            nonlocal model_used
+            client = getattr(self._llm, "_client", None)
+            metrics = getattr(client, "last_metrics", None)
+            if not metrics:
+                return
+            spent["cost_usd"] += float(metrics.get("cost_usd", 0.0) or 0.0)
+            spent["prompt_tokens"] += int(metrics.get("prompt_tokens", 0) or 0)
+            spent["completion_tokens"] += int(metrics.get("completion_tokens", 0) or 0)
+            spent["llm_latency_ms"] += float(metrics.get("llm_latency_ms", 0.0) or 0.0)
+            model_used = str(metrics.get("model_used", "")) or model_used
+
         # 1. 规划
         plan = await self._llm.plan(task=task)
+        _collect()
         envelope.agent_local_slot["plan"] = list(plan)
         logger.info("task agent plan=%s", plan)
 
@@ -69,10 +89,12 @@ class TaskAgent:
                 session_id=session_id,
             )
             result = await loop.run(task=task, subtask=subtask)
+            _collect()
             results.append(result)
 
         # 3. 汇总
         answer = await self._llm.summarize(task=task, plan=plan, results=results)
+        _collect()
         envelope.agent_local_slot["task_results"] = [
             [
                 {
@@ -88,8 +110,18 @@ class TaskAgent:
         ]
         total_tools = sum(r.tool_calls for r in results)
         envelope.agent_local_slot["tool_calls_total"] = total_tools
+        # N3：把累计成本写回 llm_metrics 通道（此前 ReAct 成本从不进审计）
+        envelope.agent_local_slot["llm_metrics"] = {
+            "model_used": model_used,
+            "cost_usd": round(spent["cost_usd"], 6),
+            "llm_latency_ms": round(spent["llm_latency_ms"], 1),
+            "fallback_used": "",
+            "prompt_tokens": spent["prompt_tokens"],
+            "completion_tokens": int(spent["completion_tokens"]),
+        }
         logger.info(
-            "task agent done trace=%s tool_calls=%d", envelope.trace_id, total_tools,
+            "task agent done trace=%s tool_calls=%d cost_usd=%s",
+            envelope.trace_id, total_tools, spent["cost_usd"],
         )
         return answer
 

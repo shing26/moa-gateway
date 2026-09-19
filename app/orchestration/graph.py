@@ -154,6 +154,7 @@ class LangGraphOrchestrator:
         engine: Any = None,
         long_term_memory: Any = None,
         settings_obj: Any = None,
+        budget_guard: Any = None,
         checkpointer: Any = None,
     ) -> None:
         self._router = router
@@ -171,6 +172,8 @@ class LangGraphOrchestrator:
         self._engine = engine
         self._long_term_memory = long_term_memory
         self._settings = settings_obj
+        # M6：与 FSM 管道共用同一个预算 guard 实例（由 deps 注入）
+        self._budget_guard = budget_guard
         self._checkpointer = checkpointer or InMemorySaver()
         self._graph = self._build()
 
@@ -194,6 +197,7 @@ class LangGraphOrchestrator:
             engine=deps.engine,
             long_term_memory=deps.long_term_memory,
             settings_obj=deps.settings,
+            budget_guard=getattr(deps, "budget_guard", None),
             **kwargs,
         )
 
@@ -213,7 +217,12 @@ class LangGraphOrchestrator:
         graph.add_edge(START, "route")
         graph.add_edge("route", "retrieve")
         graph.add_edge("retrieve", "execute")
-        graph.add_edge("execute", "evaluate")
+        # M6：execute 起点做预算预检，超限短路到 blocked，不再进入评估
+        graph.add_conditional_edges(
+            "execute",
+            self._after_execute,
+            {"ok": "evaluate", "budget_blocked": "blocked"},
+        )
         graph.add_edge("evaluate", "guard")
         graph.add_conditional_edges(
             "guard",
@@ -232,6 +241,13 @@ class LangGraphOrchestrator:
         return graph.compile(checkpointer=self._checkpointer)
 
     # ── helpers ────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _after_execute(state: GraphState) -> str:
+        """M6：execute 后的分流——预算预检短路时直接去 blocked。"""
+        if state.get("error_code") == ErrorCode.BUDGET_EXCEEDED.value:
+            return "budget_blocked"
+        return "ok"
 
     @staticmethod
     def _advance(current: FsmState, event: FsmEvent) -> str:
@@ -303,6 +319,20 @@ class LangGraphOrchestrator:
         }
 
     async def _node_execute(self, state: GraphState) -> dict[str, Any]:
+        # M6：预算预检（limit<=0 的 guard.check 恒 True，零行为差异）
+        if self._budget_guard is not None and not self._budget_guard.check(state["session_id"]):
+            logger.warning(
+                "session budget exceeded session=%s (langgraph) limit=%s",
+                state["session_id"], self._budget_guard.limit_usd,
+            )
+            return {
+                "status": "blocked",
+                "guard_reason": "该会话的预算额度已用完，请求被拒绝",
+                "guard_action": "budget_exceeded",
+                "error_code": ErrorCode.BUDGET_EXCEEDED.value,
+                "node_path": ["execute"],
+            }
+
         agent = get_agent(state["agent_name"]) or get_agent("general")
         if agent is None:
             return {
@@ -338,6 +368,9 @@ class LangGraphOrchestrator:
             }
 
         metrics = envelope.agent_local_slot.get("llm_metrics") or {}
+        # M6：调用后累计真实成本（超限影响的是该会话的"下一次"请求）
+        if self._budget_guard is not None:
+            self._budget_guard.record(state["session_id"], float(metrics.get("cost_usd", 0.0) or 0.0))
         return {
             "raw_output": raw_output,
             "llm_model": str(metrics.get("model_used", "")),

@@ -90,6 +90,11 @@ class EsWriter:
                 "eval_issues": list(entry.eval_issues),
                 "guard_action": entry.guard_action,
                 "guard_reason": entry.guard_reason,
+                # N4：与 WAL 落盘字段对齐，成本核算在 ES 侧不再静默丢失
+                "llm_model": entry.extra.get("llm_model", ""),
+                "cost_usd": entry.extra.get("cost_usd", 0.0),
+                "llm_latency_ms": entry.extra.get("llm_latency_ms", 0.0),
+                "fallback_used": entry.extra.get("fallback_used", ""),
             }, ensure_ascii=False)
             lines.append(action)
             lines.append(doc)

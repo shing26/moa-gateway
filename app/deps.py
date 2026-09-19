@@ -16,6 +16,7 @@ from app.router.llm_classifier import LLMIntentClassifier
 from app.vectordb import build_vector_client
 from app.vectordb.retriever import ContextRetriever
 from app.audit.es_writer import EsWriter, build_es_writer
+from app.budget.guard import BudgetGuard
 from app.channels.feishu import FeishuChannelAdapter, FeishuConfig
 from app.channels.feishu_auth import FeishuAuthConfig, FeishuTokenProvider
 from app.channels.feishu_cards import FeishuCardSender
@@ -56,6 +57,8 @@ from app.knowledge_access import configure as _configure_knowledge_access
 _configure_knowledge_access(knowledge_base=knowledge_base, retriever=_retriever)
 obsidian_sync = ObsidianVaultSync.from_env(knowledge_base=knowledge_base)
 command_mode = CommandMode()
+# M6：per-session 成本预算；limit<=0 时只核算不拦截，请求路径零变化。
+budget_guard = BudgetGuard(settings.budget_session_limit_usd)
 adapter = ResponseAdapter()
 evaluator = RuleEvaluator()
 # permission_guard = FailClosedPermissionGuard()  # removed: unused legacy guard
