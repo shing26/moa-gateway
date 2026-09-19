@@ -86,6 +86,11 @@ class FeishuCardSender:
                     return False
                 logger.info("feishu approval card sent session=%s", card.session_id)
                 return True
+        except httpx.HTTPStatusError as exc:
+            # 飞书对畸形请求体/参数返回 HTTP 4xx，错误原因在响应体里，必须记下来才能定位
+            body = exc.response.text[:500] if exc.response is not None else ""
+            logger.error("feishu card send http error: %s body=%s", exc, body)
+            return False
         except Exception as exc:
             logger.exception("feishu card send error: %s", exc)
             return False

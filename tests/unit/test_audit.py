@@ -71,6 +71,10 @@ class TestAsyncWal:
         await log_request(
             FakeRequest(), 200, 12.3, "s1", "general", "search", "allow",
             "用户输入内容", "模型输出内容",
+            llm_model="qwen2.5:0.5b",
+            cost_usd=0.001,
+            llm_latency_ms=123.4,
+            fallback_used="",
         )
         entries = await wal.replay_all()
         assert len(entries) == 1
@@ -86,6 +90,9 @@ class TestAsyncWal:
         assert "模型输出内容" in line
         assert '"status": 200' in line
         assert '"duration_ms": 12.3' in line
+        assert '"llm_model": "qwen2.5:0.5b"' in line
+        assert '"cost_usd": 0.001' in line
+        assert '"llm_latency_ms": 123.4' in line
 
 
 class TestVectorDBClient:

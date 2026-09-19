@@ -106,6 +106,10 @@ class AsyncWal:
                 "output_preview": entry.extra.get("output_preview", ""),
                 "status": entry.extra.get("status"),
                 "duration_ms": entry.extra.get("duration_ms"),
+                "llm_model": entry.extra.get("llm_model", ""),
+                "cost_usd": entry.extra.get("cost_usd", 0.0),
+                "llm_latency_ms": entry.extra.get("llm_latency_ms", 0.0),
+                "fallback_used": entry.extra.get("fallback_used", ""),
             }, ensure_ascii=False)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
