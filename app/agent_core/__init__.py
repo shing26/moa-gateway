@@ -1,0 +1,1 @@
+# Agent Core — ReAct 循环引擎、Mock LLM 与自主任务 Agent

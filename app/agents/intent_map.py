@@ -18,10 +18,11 @@ INTENT_AGENT_MAP: dict[str, str] = {
     "assistant": "general",
     "default": "general",
     "review": "review",
+    "task": "task",
 }
 
 # 注册表实际存在的键（与 app/agents/loader.py 注册一致）。
-_AGENT_KEYS = frozenset({"coder", "general", "review"})
+_AGENT_KEYS = frozenset({"coder", "general", "review", "task"})
 
 
 def resolve_agent_key(intent: str) -> str:

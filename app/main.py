@@ -15,6 +15,7 @@ from app.observability.tracing import setup_tracing, TraceConfig
 from app.middleware.auth import AuthMiddleware, insecure_mode_enabled
 from app.middleware.flags import FeatureFlagMiddleware
 from app.config import settings
+from app.routes.chat import router as chat_router
 from app.routes.dashboard import router as dashboard_router
 from app.routes.feishu import router as feishu_router
 from app.routes.health import router as health_router
@@ -51,6 +52,7 @@ app = FastAPI(title="Agent Gateway", version="0.1.0", lifespan=lifespan)
 STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
 app.mount("/dashboard/static", StaticFiles(directory=STATIC_DIR), name="dashboard-static")
 app.include_router(dashboard_router)
+app.include_router(chat_router)
 app.include_router(feishu_router)
 app.include_router(health_router)
 app.include_router(webhook_router)

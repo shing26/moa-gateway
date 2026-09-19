@@ -33,6 +33,16 @@ class IntentRouter:
             (re.compile(r"(总结|摘要|summarize|概括|提炼)", re.IGNORECASE), "summarize"),
             (re.compile(r"(搜索|search|查找|查询|find)", re.IGNORECASE), "search"),
             (re.compile(r"(分析|analyze|统计|compare|对比|比较)", re.IGNORECASE), "analyze"),
+            # 自主任务 Agent 意图放在具体工具意图之后，避免“帮我搜索/分析”
+            # 被宽泛的“帮我”规则提前吞成 task。
+            (
+                re.compile(
+                    r"(任务|帮我|请帮我|规划|计划|执行|搞定|安排|整理以下|"
+                    r"办成|算|计算|记一下|记录|笔记|备忘|查看笔记|"
+                    r"时间|几点|日期|现在|列出|文档列表)"
+                ),
+                "task",
+            ),
         ]
         self.default_intent = "assistant"
 

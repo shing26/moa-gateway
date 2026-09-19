@@ -28,6 +28,7 @@ PAGES = [
     ("logs", "请求日志", "审计请求记录与详情"),
     ("security", "安全合规", "策略拦截、高风险会话与人工审批耗时"),
     ("ops", "运维", "Provider 配置、Feature Flag 与运行状态"),
+    ("chat", "对话", "自主任务 Agent 对话界面"),
 ]
 
 NAV_ICONS = {
@@ -73,6 +74,12 @@ NAV_ICONS = {
         '<path d="M21 20h-5"/><path d="M12 20H3"/><circle cx="14" cy="4" r="2"/>'
         '<circle cx="8" cy="12" r="2"/><circle cx="16" cy="20" r="2"/></svg>'
     ),
+    "chat": (
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+        'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'
+        '<path d="M9 9h6M9 12h4"/></svg>'
+    ),
 }
 
 HTML_SHELL = """<!DOCTYPE html>
@@ -110,6 +117,7 @@ HTML_SHELL = """<!DOCTYPE html>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script src="/dashboard/static/dashboard.js"></script>
+<script src="/dashboard/static/chat.js"></script>
 </body>
 </html>
 """
@@ -547,13 +555,26 @@ def _ops() -> str:
   <div class="panel-head"><h2>Provider 配置</h2><span class="muted">运行时生效，重启后恢复环境变量</span></div>
   <form id="ops-config-form" class="form-stack">
     <div class="form-grid-2">
-      <label>模型
-        <input id="ops-model" autocomplete="off" placeholder="例如 deepseek-chat / auto">
+      <label>Provider
+        <select id="ops-provider" class="input">
+          <option value="direct">自动识别</option>
+          <option value="openai">OpenAI</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="gemini">Google Gemini</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="nvidia_nim">NVIDIA NIM</option>
+          <option value="local">本地 Ollama</option>
+          <option value="openai_compatible">其他 OpenAI-compatible 云服务</option>
+        </select>
       </label>
-      <label>API 地址
-        <input id="ops-base-url" autocomplete="off" placeholder="https://api.deepseek.com/v1">
+      <label>模型
+        <input id="ops-model" autocomplete="off" placeholder="例如 nvidia/nemotron-3-super-120b-a12b">
       </label>
     </div>
+    <label>API 地址
+      <input id="ops-base-url" autocomplete="off" placeholder="https://integrate.api.nvidia.com/v1">
+    </label>
     <label>API Key
       <input id="ops-api-key" type="password" autocomplete="off" placeholder="留空则保持当前 Key">
     </label>
@@ -674,6 +695,29 @@ def _knowledge_detail(doc_id: str) -> str:
 """
 
 
+def _chat() -> str:
+    return """
+<section class="chat-root">
+  <div class="chat-sidebar">
+    <div class="chat-sid-label">会话 ID</div>
+    <div class="mono chat-sid-value" id="chat-sid">—</div>
+    <div class="chat-sid-label">用户 ID</div>
+    <input class="input input-sm" id="chat-uid" value="web-user" autocomplete="off" aria-label="用户 ID">
+    <button class="btn btn-ghost btn-sm" id="chat-reset-btn" type="button">重置会话</button>
+  </div>
+  <div class="chat-main">
+    <div class="chat-messages" id="chat-messages">
+      <div class="empty-state">还没有对话，输入任务开始吧<br>（例如：帮我算 3*7 并记下来）</div>
+    </div>
+    <form class="chat-form" id="chat-form">
+      <input id="chat-input" class="input chat-input" placeholder="输入任务…" autocomplete="off" autofocus>
+      <button class="btn btn-primary" id="chat-send-btn" type="submit">发送</button>
+    </form>
+  </div>
+</section>
+"""
+
+
 def _render(page_key: str) -> HTMLResponse:
     label, subtitle = {key: (label, subtitle) for key, label, subtitle in PAGES}[page_key]
     content = {
@@ -684,6 +728,7 @@ def _render(page_key: str) -> HTMLResponse:
         "logs": _logs,
         "security": _security,
         "ops": _ops,
+        "chat": _chat(),
     }[page_key]()
     return _shell(label, page_key, subtitle, content)
 
@@ -703,6 +748,7 @@ class SearchQuery(BaseModel):
 
 
 class OpsConfigUpdate(BaseModel):
+    provider: str | None = None
     model: str | None = None
     base_url: str | None = None
     api_key: str | None = None
@@ -710,6 +756,7 @@ class OpsConfigUpdate(BaseModel):
 
 class OpsTestRequest(BaseModel):
     message: str = "ping"
+    provider: str | None = None
     model: str | None = None
     base_url: str | None = None
     api_key: str | None = None
@@ -841,6 +888,7 @@ async def dashboard_ops_config() -> JSONResponse:
         flags.append({"name": name, "value": value})
     return JSONResponse({
         "llm": {
+            "provider": os.environ.get("LLM_PROVIDER", "direct"),
             "model": os.environ.get("LLM_MODEL", ""),
             "base_url": os.environ.get("LLM_BASE_URL", ""),
             "api_key_set": bool(os.environ.get("LLM_API_KEY", "")),
@@ -856,6 +904,8 @@ async def dashboard_ops_config() -> JSONResponse:
 
 @router.post("/dashboard/api/ops/config")
 async def dashboard_ops_config_update(body: OpsConfigUpdate) -> JSONResponse:
+    if body.provider is not None:
+        os.environ["LLM_PROVIDER"] = body.provider.strip().lower() or "direct"
     if body.model is not None:
         os.environ["LLM_MODEL"] = body.model.strip()
     if body.base_url is not None:
@@ -865,6 +915,7 @@ async def dashboard_ops_config_update(body: OpsConfigUpdate) -> JSONResponse:
     return JSONResponse({
         "ok": True,
         "llm": {
+            "provider": os.environ.get("LLM_PROVIDER", "direct"),
             "model": os.environ.get("LLM_MODEL", ""),
             "base_url": os.environ.get("LLM_BASE_URL", ""),
             "api_key_set": bool(os.environ.get("LLM_API_KEY", "")),
@@ -875,6 +926,8 @@ async def dashboard_ops_config_update(body: OpsConfigUpdate) -> JSONResponse:
 @router.post("/dashboard/api/ops/test")
 async def dashboard_ops_test(body: OpsTestRequest) -> JSONResponse:
     config = LLMConfig.from_env("LLM")
+    if body.provider is not None:
+        config.provider = body.provider.strip().lower() or "direct"
     if body.model:
         config.model = body.model.strip()
     if body.base_url:
@@ -988,4 +1041,13 @@ async def dashboard_knowledge_detail_page(doc_id: str) -> HTMLResponse:
         "文档内容与分块详情",
         _knowledge_detail(doc_id),
         active_key="knowledge",
+    )
+
+@router.get("/dashboard/chat", response_class=HTMLResponse)
+async def dashboard_chat_page() -> HTMLResponse:
+    return _shell(
+        "对话",
+        "chat",
+        "自主任务 Agent 对话界面",
+        _chat(),
     )

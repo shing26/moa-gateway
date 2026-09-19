@@ -9,3 +9,6 @@ if get_agent('coder') is None:
 # stubs.py registers coder/general at import time, so the conditional above is
 # not enough for review; register it unconditionally.
 register_agent('review', ReviewAgent())
+
+# 自主任务 Agent（ReAct 循环）：导入即注册，注册于 registry 内 "task" 键。
+from app.agent_core.task_agent import TaskAgent  # noqa: E402  (registers itself)

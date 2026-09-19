@@ -104,6 +104,7 @@ def test_dashboard_knowledge_file_upload_detail_search():
 
 def test_dashboard_ops_config_update():
     saved = (
+        os.environ.get("LLM_PROVIDER"),
         os.environ.get("LLM_MODEL"),
         os.environ.get("LLM_BASE_URL"),
         os.environ.get("LLM_API_KEY"),
@@ -113,6 +114,7 @@ def test_dashboard_ops_config_update():
             res = client.post(
                 "/dashboard/api/ops/config",
                 json={
+                    "provider": "openai_compatible",
                     "model": "test-model",
                     "base_url": "http://localhost:9/v1",
                     "api_key": "sk-test",
@@ -120,10 +122,12 @@ def test_dashboard_ops_config_update():
             )
             assert res.status_code == 200
             body = res.json()["llm"]
+            assert body["provider"] == "openai_compatible"
             assert body["model"] == "test-model"
             assert body["base_url"] == "http://localhost:9/v1"
             assert body["api_key_set"] is True
             cfg = client.get("/dashboard/api/ops/config").json()
+            assert cfg["llm"]["provider"] == "openai_compatible"
             assert cfg["llm"]["model"] == "test-model"
             assert "sk-test" not in json.dumps(cfg)
             page = client.get("/dashboard/ops")
@@ -131,7 +135,7 @@ def test_dashboard_ops_config_update():
             assert "Provider" in page.text
     finally:
         for key, value in zip(
-            ("LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY"),
+            ("LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY"),
             saved,
         ):
             if value is None:
@@ -142,6 +146,7 @@ def test_dashboard_ops_config_update():
 
 def test_dashboard_ops_config_empty_api_key_keeps_runtime_key():
     saved = (
+        os.environ.get("LLM_PROVIDER"),
         os.environ.get("LLM_MODEL"),
         os.environ.get("LLM_BASE_URL"),
         os.environ.get("LLM_API_KEY"),
@@ -160,7 +165,7 @@ def test_dashboard_ops_config_empty_api_key_keeps_runtime_key():
             assert cfg["llm"]["api_key_set"] is True
     finally:
         for key, value in zip(
-            ("LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY"),
+            ("LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY"),
             saved,
         ):
             if value is None:

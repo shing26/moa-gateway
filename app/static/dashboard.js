@@ -659,8 +659,10 @@
 
   function loadOpsConfig() {
     fetchJSON('/dashboard/api/ops/config').then(function (data) {
+      var provider = document.getElementById('ops-provider');
       var model = document.getElementById('ops-model');
       var baseUrl = document.getElementById('ops-base-url');
+      if (provider) provider.value = data.llm.provider || 'direct';
       if (model) model.value = data.llm.model || '';
       if (baseUrl) baseUrl.value = data.llm.base_url || '';
       var keyStatus = document.getElementById('ops-key-status');
@@ -810,6 +812,7 @@
     event.preventDefault();
     var btn = document.getElementById('ops-save-btn');
     var body = {
+      provider: document.getElementById('ops-provider').value || 'direct',
       model: document.getElementById('ops-model').value.trim(),
       base_url: document.getElementById('ops-base-url').value.trim(),
       api_key: document.getElementById('ops-api-key').value.trim() || null
@@ -835,6 +838,7 @@
     var message = (document.getElementById('ops-test-message').value || '').trim() || 'ping';
     var body = {
       message: message,
+      provider: document.getElementById('ops-provider').value || 'direct',
       model: document.getElementById('ops-model').value.trim() || null,
       base_url: document.getElementById('ops-base-url').value.trim() || null,
       api_key: document.getElementById('ops-api-key').value.trim() || null

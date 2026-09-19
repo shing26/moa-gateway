@@ -52,3 +52,14 @@ async def test_micro_timeout_falls_back_to_router_llm() -> None:
     assert intent == "search"
     assert fallback == "router_llm"
     assert router_llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_specific_tool_intents_win_over_broad_task_phrase() -> None:
+    router = IntentRouter()
+
+    search_intent, _ = await router.route("帮我搜索项目文档")
+    task_intent, _ = await router.route("帮我算 3*7")
+
+    assert search_intent == "search"
+    assert task_intent == "task"
