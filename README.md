@@ -193,6 +193,7 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 > - 自建 Eval 体系（150 条数据集 + LLM-as-judge），每次改动离线回归出 JSON 报告。
 > - 后端工程：鉴权中间件、Redis 状态栈/Lua 锁、审计 WAL、OTel 链路、Docker + CI。
 > - 支持 FSM / LangGraph 双引擎可切换（`ENGINE`），3 个 golden 场景逐字段等价验证进 CI。
+> - 统一错误契约（`ErrorCode` 枚举贯穿双引擎与路由层）+ per-session 预算拦截（`BUDGET_SESSION_LIMIT_USD`），配置层非法值启动即 fail-fast。
 > - 垂直应用：GitHub PR 多 Agent 代码审查（Triage → 静态分析 → 语义 RAG → 测试覆盖 → 报告）。
 
 ## 已知边界
@@ -206,6 +207,12 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   图的 checkpoint 是进程内的 `InMemorySaver`，与 FSM 的 `_session_states` 同级，都不承诺跨重启恢复。
 - FSM 会话状态保存在进程内（`Engine._session_states`）；`app/redis_state/stack.py` 与 `lock.py` 的 Redis 状态栈 / Lua
   锁目前只在单测中被调用，**未接入请求路径**，多实例部署前需要先接线。
+- 预算拦截（`BUDGET_SESSION_LIMIT_USD`）的累计器在**进程内**：单实例语义正确，多实例部署需要把累计器外部化
+  （如 Redis INCR）。`limit<=0` 时只核算不拦截，请求路径零变化。
+- 错误码语义（`app/models/errors.py`）在 webhook / chat / dashboard 三个路由统一为 `{"error": code, "message"}`；
+  **飞书事件回调例外**——平台契约要求一律 HTTP 200，错误只体现在回复文案与日志中。
 - `app/main.py` 使用 FastAPI lifespan 管理启动/关闭钩子（`on_event` 已迁移）。
+- 配置校验（`Settings.validate()`）只拦截"配置了但非法"的值（维度/端口/超时/池上下界/负预算），空值仍视为未配置；
+  `ENGINE` 的未知值保持告警回退 FSM，不做 fail-fast（降级语义见双引擎章节）。
 - 8 条飞书/HITL 集成用例仍会在没有真实测试应用凭据时条件跳过；它们不是失败。
 - 所有密钥通过环境变量注入，`.env`、`logs/`、`data/`、`evals/reports/` 不入库。
