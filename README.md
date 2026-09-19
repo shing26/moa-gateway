@@ -191,7 +191,7 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 > - 三级降级意图路由 + Provider fallback，微模型分流简单请求，Eval 实测 50 条用例中 46 条正则直出（0 LLM 调用），成本随审计日志逐次核算。
 > - 策略守卫 + RBAC + 飞书 HITL 审批闭环，红队 200 条对抗用例召回率/精确率 100%。
 > - 自建 Eval 体系（150 条数据集 + LLM-as-judge），每次改动离线回归出 JSON 报告。
-> - 后端工程：鉴权中间件、Redis 状态栈/Lua 锁、审计 WAL、OTel 链路、Docker + CI。
+> - 后端工程：鉴权中间件、Redis 会话存储（对话记忆 / HITL 审批状态 / 健康探活）、审计 WAL、OTel 链路、Docker + CI。
 > - 支持 FSM / LangGraph 双引擎可切换（`ENGINE`），3 个 golden 场景逐字段等价验证进 CI。
 > - 统一错误契约（`ErrorCode` 枚举贯穿双引擎与路由层）+ per-session 预算拦截（`BUDGET_SESSION_LIMIT_USD`），配置层非法值启动即 fail-fast。
 > - 垂直应用：GitHub PR 多 Agent 代码审查（Triage → 静态分析 → 语义 RAG → 测试覆盖 → 报告）。
