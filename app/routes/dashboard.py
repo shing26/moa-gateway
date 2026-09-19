@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.agents.provider import LLMClient, LLMConfig
+from app.agents.provider_registry import visible_options
 from app.command_mode import MODES
 from app.config import settings
 from app.deps import _flag_client, _retriever, command_mode, knowledge_base, memory, obsidian_sync
@@ -550,22 +551,18 @@ def _logs() -> str:
 
 
 def _ops() -> str:
-    return """
+    provider_options = "\n".join(
+        f'          <option value="{spec.value}">{spec.label}</option>'
+        for spec in visible_options()
+    )
+    return f"""
 <section class="panel">
   <div class="panel-head"><h2>Provider 配置</h2><span class="muted">运行时生效，重启后恢复环境变量</span></div>
   <form id="ops-config-form" class="form-stack">
     <div class="form-grid-2">
       <label>Provider
         <select id="ops-provider" class="input">
-          <option value="direct">自动识别</option>
-          <option value="openai">OpenAI</option>
-          <option value="deepseek">DeepSeek</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="gemini">Google Gemini</option>
-          <option value="openrouter">OpenRouter</option>
-          <option value="nvidia_nim">NVIDIA NIM</option>
-          <option value="local">本地 Ollama</option>
-          <option value="openai_compatible">其他 OpenAI-compatible 云服务</option>
+{provider_options}
         </select>
       </label>
       <label>模型

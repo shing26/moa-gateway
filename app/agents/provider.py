@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.agents.provider_registry import is_openai_compatible, litellm_prefix_for
+
 logger = logging.getLogger("moa.agents.provider")
 
 
@@ -15,37 +17,19 @@ def _get_litellm() -> Any:
     return litellm
 
 
-_LITELLM_PROVIDERS = {
-    "openai": "openai",
-    "deepseek": "deepseek",
-    "anthropic": "anthropic",
-    "gemini": "gemini",
-    "mistral": "mistral",
-    "cohere": "cohere",
-    "openrouter": "openrouter",
-}
-
-_OPENAI_COMPATIBLE_PROVIDERS = {
-    "omniroute",
-    "vllm",
-    "hosted_vllm",
-    "lmstudio",
-    "openai_compatible",
-    "nvidia",
-    "nvidia_nim",
-}
-
-
 def _qualify_model(model: str, provider: str) -> str:
-    """Prefix a bare model name with its LiteLLM provider when known."""
+    """Prefix a bare model name with its LiteLLM provider when known.
+
+    Provider semantics come from the single source of truth in
+    app/agents/provider_registry.py; unknown providers pass through unchanged.
+    """
     if not model or "/" in model or ":" in model:
         return model
     provider = provider.lower()
-    if provider in _LITELLM_PROVIDERS:
-        return f"{_LITELLM_PROVIDERS[provider]}/{model}"
-    if provider in _OPENAI_COMPATIBLE_PROVIDERS:
-        return f"openai/{model}"
-    if provider in ("local", "ollama"):
+    prefix = litellm_prefix_for(provider)
+    if prefix:
+        return f"{prefix}/{model}"
+    if is_openai_compatible(provider):
         return f"openai/{model}"
     return model
 
@@ -271,11 +255,10 @@ class LLMClient:
     def _custom_provider_for(self, model: str) -> str:
         """Pick a LiteLLM provider for bare model names."""
         provider = (self.config.provider or "direct").lower()
-        if provider in _LITELLM_PROVIDERS:
-            return _LITELLM_PROVIDERS[provider]
-        if provider in _OPENAI_COMPATIBLE_PROVIDERS:
-            return "openai"
-        if provider in ("local", "ollama"):
+        prefix = litellm_prefix_for(provider)
+        if prefix:
+            return prefix
+        if is_openai_compatible(provider):
             return "openai"
         base_url = (self.config.base_url or "").lower()
         # NVIDIA NIM exposes an OpenAI-compatible API, but LiteLLM does not

@@ -253,3 +253,15 @@ def test_dashboard_flag_rejects_non_boolean_value():
         cfg = client.get("/dashboard/api/ops/config").json()
         flag = next(f for f in cfg["flags"] if f["name"] == "canary.enabled")
         assert flag["value"] is False
+
+
+def test_ops_provider_options_come_from_registry():
+    """ops 表单的下拉选项必须由供应商注册表派生，防两处清单再次漂移。"""
+    from app.agents.provider_registry import visible_options
+
+    with app_client(app) as client:
+        res = client.get("/dashboard/ops")
+        assert res.status_code == 200
+        for spec in visible_options():
+            assert f'value="{spec.value}"' in res.text, spec.value
+            assert spec.label in res.text, spec.label
