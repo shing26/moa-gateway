@@ -29,6 +29,11 @@ for name in (
 ):
     os.environ[name] = ""
 
+# GATEWAY_PORT/APP_PORT 同理：开发机 .env 若写了非法端口，config.validate()
+# 会在 import 期 raise，把整个测试进程炸掉。置空 = 未配置 = 默认 8081。
+for name in ("GATEWAY_PORT", "APP_PORT"):
+    os.environ[name] = ""
+
 # 同理，单测不能继承开发者 .env 里的真实 LLM 凭据：意图路由的
 # router_llm 会在测试期间真的发起外网请求，超时取消后还会触发 litellm
 # 的 “coroutine was never awaited” 告警，让结果依赖网络。需要 LLM 配置

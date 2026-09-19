@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import sys
 
 
@@ -19,7 +18,9 @@ def power_on_self_test() -> dict[str, object]:
 
 
 def _gateway_port() -> int:
-    return int(os.getenv("GATEWAY_PORT") or os.getenv("APP_PORT") or "8081")
+    from app.config import settings
+
+    return settings.gateway_port
 
 
 def run_server(

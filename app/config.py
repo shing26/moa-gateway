@@ -1,11 +1,14 @@
 ﻿from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger("moa.config")
 
 
 def _parse_bool(value: str | None, default: bool) -> bool:
@@ -14,27 +17,34 @@ def _parse_bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() in {"1", "true"}
 
 
-def _parse_int(value: str | None, default: int) -> int:
+def _parse_int(value: str | None, default: int, *, name: str = "") -> int:
     """Parse an int, falling back to ``default`` on garbage.
 
     Deliberately forgiving: a malformed env var should not stop the gateway
     from booting. The timeout settings above parse with bare ``int()`` and will
-    raise on bad input; new settings use this instead.
+    raise on bad input; new settings use this instead. When ``name`` is given,
+    the fallback is announced via a warning so silent misconfiguration at
+    least leaves a trace in the log.
     """
     if value is None or not value.strip():
         return default
     try:
         return int(value.strip())
     except ValueError:
+        if name:
+            logger.warning("配置项 %s=%r 不是合法整数，回退默认值 %s", name, value, default)
         return default
 
 
-def _parse_float(value: str | None, default: float) -> float:
+def _parse_float(value: str | None, default: float, *, name: str = "") -> float:
+    """Parse a float, falling back to ``default`` on garbage (see _parse_int)."""
     if value is None or not value.strip():
         return default
     try:
         return float(value.strip())
     except ValueError:
+        if name:
+            logger.warning("配置项 %s=%r 不是合法数字，回退默认值 %s", name, value, default)
         return default
 
 
@@ -59,11 +69,13 @@ def _parse_sentinel_hosts(value: str | None) -> list[tuple[str, int]]:
             continue
         parts = item.split(":", 1)
         if len(parts) != 2:
+            logger.warning("REDIS_SENTINEL_HOSTS 条目 %r 缺少 host:port，已忽略", item)
             continue
         host, port = parts
         try:
             hosts.append((host.strip(), int(port)))
         except ValueError:
+            logger.warning("REDIS_SENTINEL_HOSTS 条目 %r 端口不是整数，已忽略", item)
             continue
     return hosts
 
@@ -102,10 +114,14 @@ class Settings:
             or os.getenv("CODE_REVIEW_EMBEDDING_DIM"),
             1536,
         )
-        self.vector_db_pool_min_size: int = _parse_int(os.getenv("VECTOR_DB_POOL_MIN_SIZE"), 1)
-        self.vector_db_pool_max_size: int = _parse_int(os.getenv("VECTOR_DB_POOL_MAX_SIZE"), 4)
+        self.vector_db_pool_min_size: int = _parse_int(
+            os.getenv("VECTOR_DB_POOL_MIN_SIZE"), 1, name="VECTOR_DB_POOL_MIN_SIZE"
+        )
+        self.vector_db_pool_max_size: int = _parse_int(
+            os.getenv("VECTOR_DB_POOL_MAX_SIZE"), 4, name="VECTOR_DB_POOL_MAX_SIZE"
+        )
         self.vector_db_keyword_scan_limit: int = _parse_int(
-            os.getenv("VECTOR_DB_KEYWORD_SCAN_LIMIT"), 2000
+            os.getenv("VECTOR_DB_KEYWORD_SCAN_LIMIT"), 2000, name="VECTOR_DB_KEYWORD_SCAN_LIMIT"
         )
         # strict=False：PG 不可用时降级并在 /healthz 暴露，不阻断启动。
         # 拿到稳定实例后建议置 1，让配置错误在启动阶段就暴露。
@@ -131,7 +147,59 @@ class Settings:
             or os.getenv("CODE_REVIEW_EMBEDDING_MODEL", "")
             or "text-embedding-3-small"
         )
-        self.embedding_timeout_s: float = _parse_float(os.getenv("EMBEDDING_TIMEOUT_S"), 10.0)
+        self.embedding_timeout_s: float = _parse_float(
+            os.getenv("EMBEDDING_TIMEOUT_S"), 10.0, name="EMBEDDING_TIMEOUT_S"
+        )
+
+        # ── 鉴权与端口（原 main.py / __main__.py 的旁路 env 读取，收编统一校验）──
+        self.webhook_auth_token: str = os.getenv("WEBHOOK_AUTH_TOKEN", "")
+        self.dashboard_password: str = os.getenv("DASHBOARD_PASSWORD", "")
+        # 保留原始字符串：真值集合（1/true/yes/on）由 auth.insecure_mode_enabled
+        # 判定，与 _parse_bool 的 {1,true} 刻意不同，不要"统一"两者。
+        self.gateway_allow_insecure: str = os.getenv("GATEWAY_ALLOW_INSECURE", "")
+        # 裸 int()：端口写错属于启动失败级错误，语义与旧 __main__ 入口一致。
+        self.gateway_port: int = int(os.getenv("GATEWAY_PORT") or os.getenv("APP_PORT") or "8081")
+
+        self.validate()
+
+    def validate(self) -> None:
+        """启动期 fail-fast 校验：只拦截"配置了但非法"的值。
+
+        约定：空串/未配置一律放行并回落默认——tests/conftest.py 依赖
+        "置空即屏蔽"的语义，本项目对缺失配置保持 forgiving。校验在
+        Settings.__init__ 尾部执行，因此 import 期即暴露错误配置
+        （deps 在 import 期就会用这些值构造单例，lifespan 里再校验太晚）。
+        """
+        def _raw(*names: str) -> str:
+            for name in names:
+                raw = (os.getenv(name) or "").strip()
+                if raw:
+                    return raw
+            return ""
+
+        dim_raw = _raw("VECTOR_DB_EMBEDDING_DIM", "CODE_REVIEW_EMBEDDING_DIM")
+        if dim_raw:
+            try:
+                dim = int(dim_raw)
+            except ValueError:
+                dim = -1
+            if dim <= 0:
+                raise ValueError(
+                    f"VECTOR_DB_EMBEDDING_DIM 必须是正整数（与 db schema 的 vector(N) 一致），得到 {dim_raw!r}"
+                )
+        for name, value in (
+            ("ROUTER_LLM_TIMEOUT_MS", self.router_llm_timeout_ms),
+            ("MICRO_LLM_TIMEOUT_MS", self.micro_llm_timeout_ms),
+        ):
+            if value <= 0:
+                raise ValueError(f"{name} 必须为正整数毫秒，得到 {value}")
+        if self.vector_db_pool_min_size > self.vector_db_pool_max_size:
+            raise ValueError(
+                "VECTOR_DB_POOL_MIN_SIZE 不能大于 VECTOR_DB_POOL_MAX_SIZE "
+                f"（min={self.vector_db_pool_min_size}, max={self.vector_db_pool_max_size}）"
+            )
+        if not 1 <= self.gateway_port <= 65535:
+            raise ValueError(f"GATEWAY_PORT 必须在 1-65535 之间，得到 {self.gateway_port}")
 
     def to_redis_config(self) -> dict[str, Any]:
         return {

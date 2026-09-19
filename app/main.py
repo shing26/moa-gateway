@@ -59,9 +59,9 @@ app.include_router(webhook_router)
 app.include_router(knowledge_router)
 app.include_router(github_review_router)
 app.add_middleware(FeatureFlagMiddleware, client=_flag_client)
-_WEBHOOK_TOKEN = os.environ.get("WEBHOOK_AUTH_TOKEN", "")
-_DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
-_ALLOW_INSECURE = insecure_mode_enabled(os.environ.get("GATEWAY_ALLOW_INSECURE"))
+_WEBHOOK_TOKEN = settings.webhook_auth_token
+_DASHBOARD_PASSWORD = settings.dashboard_password
+_ALLOW_INSECURE = insecure_mode_enabled(settings.gateway_allow_insecure)
 app.add_middleware(
     AuthMiddleware,
     token=_WEBHOOK_TOKEN,

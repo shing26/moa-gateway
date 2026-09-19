@@ -24,6 +24,13 @@ def _clean_env(monkeypatch):
         "CODE_REVIEW_EMBEDDING_BASE_URL",
         "EMBEDDING_MODEL",
         "CODE_REVIEW_EMBEDDING_MODEL",
+        "VECTOR_DB_POOL_MIN_SIZE",
+        "VECTOR_DB_POOL_MAX_SIZE",
+        "VECTOR_DB_KEYWORD_SCAN_LIMIT",
+        "EMBEDDING_TIMEOUT_S",
+        "GATEWAY_PORT",
+        "APP_PORT",
+        "GATEWAY_ALLOW_INSECURE",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -134,3 +141,101 @@ def test_vector_settings_accept_code_review_aliases(monkeypatch):
     assert s.embedding_api_key == "ollama-local"
     assert s.embedding_base_url == "http://localhost:11434/v1"
     assert s.embedding_model == "nomic-embed-text:latest"
+
+
+# ── fail-fast 校验（validate）与旁路收编字段 ────────────────────────────────
+
+
+def test_blank_embedding_dim_is_treated_as_unset(monkeypatch):
+    monkeypatch.setenv("VECTOR_DB_EMBEDDING_DIM", "  ")
+    monkeypatch.setenv("CODE_REVIEW_EMBEDDING_DIM", "")
+    s = Settings()
+    assert s.vector_db_embedding_dim == 1536
+
+
+def test_invalid_embedding_dim_raises_with_var_name(monkeypatch):
+    monkeypatch.setenv("VECTOR_DB_EMBEDDING_DIM", "seven-sixty-eight")
+    with pytest.raises(ValueError, match="VECTOR_DB_EMBEDDING_DIM"):
+        Settings()
+
+
+def test_nonpositive_embedding_dim_raises(monkeypatch):
+    monkeypatch.setenv("VECTOR_DB_EMBEDDING_DIM", "0")
+    with pytest.raises(ValueError, match="VECTOR_DB_EMBEDDING_DIM"):
+        Settings()
+    monkeypatch.setenv("VECTOR_DB_EMBEDDING_DIM", "-768")
+    with pytest.raises(ValueError, match="VECTOR_DB_EMBEDDING_DIM"):
+        Settings()
+
+
+def test_alias_dim_invalid_also_raises(monkeypatch):
+    monkeypatch.setenv("CODE_REVIEW_EMBEDDING_DIM", "0")
+    with pytest.raises(ValueError, match="VECTOR_DB_EMBEDDING_DIM"):
+        Settings()
+
+
+def test_zero_router_llm_timeout_raises(monkeypatch):
+    monkeypatch.setenv("ROUTER_LLM_TIMEOUT_MS", "0")
+    with pytest.raises(ValueError, match="ROUTER_LLM_TIMEOUT_MS"):
+        Settings()
+
+
+def test_zero_micro_llm_timeout_raises(monkeypatch):
+    monkeypatch.setenv("MICRO_LLM_TIMEOUT_MS", "0")
+    with pytest.raises(ValueError, match="MICRO_LLM_TIMEOUT_MS"):
+        Settings()
+
+
+def test_pool_min_greater_than_max_raises(monkeypatch):
+    monkeypatch.setenv("VECTOR_DB_POOL_MIN_SIZE", "8")
+    monkeypatch.setenv("VECTOR_DB_POOL_MAX_SIZE", "4")
+    with pytest.raises(ValueError, match="VECTOR_DB_POOL_MIN_SIZE"):
+        Settings()
+
+
+def test_gateway_port_out_of_range_raises(monkeypatch):
+    monkeypatch.setenv("GATEWAY_PORT", "70000")
+    with pytest.raises(ValueError, match="GATEWAY_PORT"):
+        Settings()
+    monkeypatch.setenv("GATEWAY_PORT", "0")
+    with pytest.raises(ValueError, match="GATEWAY_PORT"):
+        Settings()
+
+
+def test_gateway_port_blank_falls_back_to_default(monkeypatch):
+    monkeypatch.setenv("GATEWAY_PORT", "")
+    assert Settings().gateway_port == 8081
+
+
+def test_auth_fields_read_from_env(monkeypatch):
+    monkeypatch.setenv("WEBHOOK_AUTH_TOKEN", "tok-123")  # nosec B105
+    monkeypatch.setenv("DASHBOARD_PASSWORD", "pw-123")  # nosec B105
+    s = Settings()
+    assert s.webhook_auth_token == "tok-123"
+    assert s.dashboard_password == "pw-123"
+    assert s.gateway_allow_insecure == ""
+
+
+def test_warn_tier_numeric_garbage_falls_back_with_warning(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("EMBEDDING_TIMEOUT_S", "not-a-number")
+    monkeypatch.setenv("VECTOR_DB_KEYWORD_SCAN_LIMIT", "lots")
+    with caplog.at_level(logging.WARNING, logger="moa.config"):
+        s = Settings()
+    assert s.embedding_timeout_s == 10.0
+    assert s.vector_db_keyword_scan_limit == 2000
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("EMBEDDING_TIMEOUT_S" in r.getMessage() for r in warnings)
+    assert any("VECTOR_DB_KEYWORD_SCAN_LIMIT" in r.getMessage() for r in warnings)
+
+
+def test_sentinel_garbage_entries_warn_but_boot(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("REDIS_SENTINEL_HOSTS", "a:26379,bad-host,c:nope")
+    with caplog.at_level(logging.WARNING, logger="moa.config"):
+        s = Settings()
+    assert s.redis_sentinel_hosts == [("a", 26379)]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2
