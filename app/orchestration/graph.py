@@ -35,10 +35,10 @@ decision — so the list below cannot quietly go stale.
 * Feishu approval-card delivery (``card_sender``) stays in the route layer.
   This adapter persists the HITL request and exposes the interrupt payload; it
   does not send cards.
-* ``long_term_memory`` recall/apply stages are **not** modelled. They were added
-  to ``MoAPipeline`` after this adapter was written; the parity tests construct
-  the pipeline without them (they default to off), and the drift guard above
-  documents that boundary rather than letting it hide.
+* ``long_term_memory`` is modelled the same way the FSM pipeline does it:
+  recall context merges into ``retrieve``, apply_ops runs in ``deliver``.
+  It used to be unmodelled when first added to ``MoAPipeline``; the drift
+  guard above now pins it as a modelled collaborator.
 * Persistence is ``InMemorySaver`` by default. Swapping in a Redis/Postgres
   checkpointer is the interesting production question and is left to the
   caller via ``checkpointer=``.

@@ -1,4 +1,10 @@
-"""预算 guard（M6）：BudgetGuard 单元 + FSM/graph 集成 + 配置校验。"""
+"""预算 guard（M6）：BudgetGuard 单元 + FSM/graph 集成 + 配置校验。
+
+graph 路径的用例依赖可选 extra（``uv sync --extra langgraph``）：
+未安装时这些用例 skip 而不是让整个文件在收集期报错（对齐
+test_langgraph_adapter.py 的守门方式），纯 BudgetGuard 单元与 FSM
+集成用例始终可跑。
+"""
 
 from __future__ import annotations
 
@@ -13,9 +19,15 @@ from app.engine import Engine
 from app.fsm.state_machine import Event as FsmEvent
 from app.guard.rbac import GuardianAction, GuardVerdict
 from app.models.events import MoAEvent, new_trace_id
-from app.orchestration.graph import LangGraphOrchestrator
 from app.outbound.adapter import ResponseAdapter
 from app.pipeline import MoAPipeline
+
+
+def _import_graph():
+    pytest.importorskip("langgraph", reason="optional extra: uv sync --extra langgraph")
+    from app.orchestration.graph import LangGraphOrchestrator
+
+    return LangGraphOrchestrator
 
 
 # ── 单元 ────────────────────────────────────────────────────────────────────
@@ -216,6 +228,7 @@ async def test_pipeline_without_guard_or_limit_zero_keeps_old_behavior(monkeypat
 
 @pytest.mark.asyncio
 async def test_graph_execute_node_short_circuits_on_budget():
+    LangGraphOrchestrator = _import_graph()
     guard = BudgetGuard(limit_usd=0.01)
     guard.record("s1", 1.0)
 
@@ -232,6 +245,7 @@ async def test_graph_execute_node_short_circuits_on_budget():
 
 
 def test_after_execute_routes_budget_block_to_blocked_node():
+    LangGraphOrchestrator = _import_graph()
     assert LangGraphOrchestrator._after_execute({"error_code": "budget_exceeded"}) == "budget_blocked"
     assert LangGraphOrchestrator._after_execute({"error_code": ""}) == "ok"
     assert LangGraphOrchestrator._after_execute({}) == "ok"
@@ -240,6 +254,7 @@ def test_after_execute_routes_budget_block_to_blocked_node():
 @pytest.mark.asyncio
 async def test_graph_records_cost_after_execute(monkeypatch):
     """正常执行路径要累计成本（node 内 record），这里直接验证 record 调用点。"""
+    LangGraphOrchestrator = _import_graph()
     guard = BudgetGuard(limit_usd=1.0)
 
     class _Self:
