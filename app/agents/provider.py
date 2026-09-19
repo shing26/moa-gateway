@@ -31,6 +31,8 @@ _OPENAI_COMPATIBLE_PROVIDERS = {
     "hosted_vllm",
     "lmstudio",
     "openai_compatible",
+    "nvidia",
+    "nvidia_nim",
 }
 
 
@@ -48,6 +50,17 @@ def _qualify_model(model: str, provider: str) -> str:
     return model
 
 
+def _env_str(name: str, default: str) -> str:
+    """Read an env var, treating blank values as "unset" so defaults apply.
+
+    ``os.getenv(name, default)`` returns ``""`` for ``NAME=``, which would
+    silently produce an empty base_url/provider. Blank means unset here, the
+    same convention ``app.config`` uses for its numeric settings.
+    """
+    value = (os.getenv(name) or "").strip()
+    return value or default
+
+
 @dataclass
 class LLMConfig:
     api_key: str = ""
@@ -63,25 +76,25 @@ class LLMConfig:
     @classmethod
     def from_env(cls, prefix: str = "LLM") -> LLMConfig:
         key = prefix.upper()
-        provider = os.getenv(f"{key}_PROVIDER", "direct").lower()
-        base_url = os.getenv(f"{key}_BASE_URL", "https://api.openai.com/v1")
+        provider = _env_str(f"{key}_PROVIDER", "direct").lower()
+        base_url = _env_str(f"{key}_BASE_URL", "https://api.openai.com/v1")
         api_key = os.getenv(f"{key}_API_KEY", "") or os.getenv("OMNIROUTE_API_KEY", "")
-        model = os.getenv(f"{key}_MODEL", "gpt-4o-mini")
+        model = _env_str(f"{key}_MODEL", "gpt-4o-mini")
         timeout = float(os.getenv(f"{key}_TIMEOUT") or "120")
         max_tokens = int(os.getenv(f"{key}_MAX_TOKENS") or "4096")
         temperature = float(os.getenv(f"{key}_TEMPERATURE") or "0.7")
         fallback_models = [
             item.strip()
-            for item in os.getenv(f"{key}_FALLBACK_MODELS", "").split(",")
+            for item in _env_str(f"{key}_FALLBACK_MODELS", "").split(",")
             if item.strip()
         ]
 
         if provider == "openrouter":
-            base_url = os.getenv(f"{key}_BASE_URL", "https://openrouter.ai/api/v1")
+            base_url = _env_str(f"{key}_BASE_URL", "https://openrouter.ai/api/v1")
         elif provider == "omniroute":
-            base_url = os.getenv(f"{key}_BASE_URL", "http://localhost:20129/v1")
+            base_url = _env_str(f"{key}_BASE_URL", "http://localhost:20129/v1")
         elif provider == "local":
-            base_url = os.getenv(f"{key}_BASE_URL", "http://localhost:11434/v1")
+            base_url = _env_str(f"{key}_BASE_URL", "http://localhost:11434/v1")
 
         model = _qualify_model(model, provider)
         fallback_models = [_qualify_model(item, provider) for item in fallback_models]
@@ -242,10 +255,9 @@ class LLMClient:
             "stream": False,
             "timeout": self.config.timeout,
         }
-        if "/" not in model:
-            custom_provider = self._custom_provider_for(model)
-            if custom_provider:
-                kwargs["custom_llm_provider"] = custom_provider
+        custom_provider = self._custom_provider_for(model)
+        if custom_provider:
+            kwargs["custom_llm_provider"] = custom_provider
         if self.config.api_key and self.config.api_key.strip():
             kwargs["api_key"] = self.config.api_key.strip()
         if self.config.base_url:
@@ -258,8 +270,6 @@ class LLMClient:
 
     def _custom_provider_for(self, model: str) -> str:
         """Pick a LiteLLM provider for bare model names."""
-        if "/" in model:
-            return ""
         provider = (self.config.provider or "direct").lower()
         if provider in _LITELLM_PROVIDERS:
             return _LITELLM_PROVIDERS[provider]
@@ -268,6 +278,12 @@ class LLMClient:
         if provider in ("local", "ollama"):
             return "openai"
         base_url = (self.config.base_url or "").lower()
+        # NVIDIA NIM exposes an OpenAI-compatible API, but LiteLLM does not
+        # recognize the model's "nvidia/" prefix as a provider.
+        if "nvidia" in base_url:
+            return "openai"
+        if "/" in model:
+            return ""
         if "deepseek" in base_url:
             return "deepseek"
         if "anthropic" in base_url:

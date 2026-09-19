@@ -7,6 +7,7 @@ import json
 import pytest
 
 from app.main import app
+from apps.code_review_pipeline.rag.embeddings import EmbeddingError
 from apps.code_review_pipeline.routing.github_client import GitHubClient
 from tests.support import app_client
 
@@ -53,11 +54,21 @@ def _patch_github_and_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(GitHubClient, "get_pr_files", _mock_get_pr_files)
     monkeypatch.setattr(GitHubClient, "get_pr", _mock_get_pr)
     monkeypatch.setattr("apps.code_review_pipeline.routing.llm_factory.build_code_review_llm", lambda: DummyLLM())
+
+    # 代码审查的 RAG 检索会调用外部 embedding 接口；单测里固定走“没有
+    # embedding provider”的降级分支，避免测试依赖开发机的云端配置。
+    async def _embeddings_disabled(texts: list[str], **_kwargs: Any) -> Any:
+        raise EmbeddingError("test: embedding provider disabled")
+
+    monkeypatch.setattr(
+        "apps.code_review_pipeline.rag.retriever.generate_embeddings",
+        _embeddings_disabled,
+    )
     for module in (
         "apps.code_review_pipeline.agents.triage_agent",
         "apps.code_review_pipeline.agents.static_analysis_agent",
         "apps.code_review_pipeline.agents.semantic_review_agent",
-        "apps.code_review_pipeline.agents.test_coverage_agent",
+        "apps.code_review_pipeline.agents.coverage_agent",
         "apps.code_review_pipeline.agents.report_agent",
     ):
         monkeypatch.setattr(f"{module}.build_code_review_llm", lambda: DummyLLM())

@@ -7,7 +7,7 @@ from app.models.events import MoAEvent
 from apps.code_review_pipeline.agents.report_agent import ReportAgent
 from apps.code_review_pipeline.agents.semantic_review_agent import SemanticReviewAgent
 from apps.code_review_pipeline.agents.static_analysis_agent import StaticAnalysisAgent
-from apps.code_review_pipeline.agents.test_coverage_agent import TestCoverageAgent
+from apps.code_review_pipeline.agents.coverage_agent import TestCoverageAgent
 from apps.code_review_pipeline.agents.triage_agent import TriageAgent
 from apps.code_review_pipeline.rag.retriever import retrieve_team_patterns
 from apps.code_review_pipeline.routing.github_client import GitHubClient, GitHubRepo

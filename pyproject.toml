@@ -24,6 +24,9 @@ dev = ["pytest>=8.2", "pytest-asyncio>=0.23", "ruff>=0.6", "bandit>=1.7"]
 dev = ["pytest>=8.2", "pytest-asyncio>=0.23", "ruff>=0.6", "bandit>=1.7"]
 
 [tool.pytest.ini_options]
+# 只收集 tests/：根目录的临时探测脚本和 apps/ 下的生产模块
+# （apps/code_review_pipeline/agents/coverage_agent.py）不再被当成测试收集。
+testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.ruff]

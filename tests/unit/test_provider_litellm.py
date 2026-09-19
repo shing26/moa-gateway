@@ -211,6 +211,19 @@ def test_from_env_local_uses_openai_compatible_endpoint(monkeypatch: pytest.Monk
     assert config.api_key == "ollama-local"
 
 
+def test_from_env_blank_values_fall_back_to_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``NAME=``（.env 里留空的变量）要按“未配置”处理，取默认值。"""
+    for name in ("LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_FALLBACK_MODELS"):
+        monkeypatch.setenv(name, "")
+
+    config = LLMConfig.from_env()
+
+    assert config.provider == "direct"
+    assert config.model == "gpt-4o-mini"
+    assert config.base_url == "https://api.openai.com/v1"
+    assert config.fallback_models == []
+
+
 @pytest.mark.asyncio
 async def test_colon_model_gets_openai_custom_provider_for_local(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_acompletion = AsyncMock(return_value=_make_response())
@@ -228,3 +241,41 @@ async def test_colon_model_gets_openai_custom_provider_for_local(monkeypatch: py
     assert kwargs["model"] == "qwen2.5:7b"
     assert kwargs["custom_llm_provider"] == "openai"
     assert kwargs["api_base"] == "http://localhost:11434/v1"
+
+
+@pytest.mark.asyncio
+async def test_nvidia_nim_uses_openai_compatible_custom_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_acompletion = AsyncMock(return_value=_make_response())
+    _patch_litellm(monkeypatch, mock_acompletion)
+    client = LLMClient(LLMConfig(
+        api_key="nvidia-key",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="nvidia/nemotron-3-super-120b-a12b",
+        provider="nvidia_nim",
+    ))
+
+    await client.chat([{"role": "user", "content": "hi"}])
+
+    kwargs = mock_acompletion.call_args.kwargs
+    assert kwargs["model"] == "nvidia/nemotron-3-super-120b-a12b"
+    assert kwargs["custom_llm_provider"] == "openai"
+    assert kwargs["api_base"] == "https://integrate.api.nvidia.com/v1"
+
+
+@pytest.mark.asyncio
+async def test_nvidia_base_url_infers_openai_compatible_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_acompletion = AsyncMock(return_value=_make_response())
+    _patch_litellm(monkeypatch, mock_acompletion)
+    client = LLMClient(LLMConfig(
+        api_key="nvidia-key",
+        base_url="https://integrate.api.nvidia.com/v1",
+        model="nvidia/nemotron-3-super-120b-a12b",
+    ))
+
+    await client.chat([{"role": "user", "content": "hi"}])
+
+    assert mock_acompletion.call_args.kwargs["custom_llm_provider"] == "openai"

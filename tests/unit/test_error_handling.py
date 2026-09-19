@@ -13,7 +13,8 @@ def test_malformed_json_returns_400_not_500() -> None:
     with app_client(app, raise_server_exceptions=False) as client:
         response = client.post(
             "/webhook/feishu",
-            data="{a}",
+            # content= 传原始 body；data=<str> 已被 httpx 标记为弃用
+            content="{a}",
             headers={"Content-Type": "application/json"},
         )
     assert response.status_code == 400

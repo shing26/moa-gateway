@@ -1,3 +1,5 @@
+"""代码审查流水线里的“测试覆盖率”分析 agent。"""
+
 from __future__ import annotations
 
 import json
