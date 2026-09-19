@@ -14,6 +14,7 @@ from app.channels.feishu_event import parse_feishu_event
 from app.channels.feishu_signature import verify_verification_token
 from app.config import settings
 from app.deps import pipeline
+from app.models.errors import ErrorCode
 from app.fsm.state_machine import Event as FsmEvent
 from app.models.events import MoAEvent, new_trace_id
 from app.pipeline import PipelineResult
@@ -112,8 +113,14 @@ async def feishu_event(request: Request):
         import traceback
         traceback.print_exc()
         logger.exception("pipeline.run failed for trace_id=%s", moa_event.trace_id)
-        result = PipelineResult(trace_id=moa_event.trace_id, state="", intent="", text="抱歉，处理消息时出错了", status="error")
-    logger.info("pipeline.run result trace_id=%s status=%s intent=%s text=%s", result.trace_id, result.status, result.intent, result.text)
+        result = PipelineResult(
+            trace_id=moa_event.trace_id, state="", intent="", text="抱歉，处理消息时出错了",
+            status="error", error_code=ErrorCode.INTERNAL_ERROR.value,
+        )
+    logger.info(
+        "pipeline.run result trace_id=%s status=%s code=%s intent=%s text=%s",
+        result.trace_id, result.status, result.error_code or "-", result.intent, result.text,
+    )
 
     if result.status == "pending_review":
         reply = "输出需要人工审批"

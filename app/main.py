@@ -11,6 +11,8 @@ from app.deps import (
     _card_sender, _feishu_config, _flag_client, engine, es_writer, logger,
     init_feishu, init_prompts, obsidian_sync, tracer, vector_client,
 )
+from app.fsm.state_machine import InvalidStateTransitionException
+from app.models.errors import ErrorCode, MoaError, http_status_for
 from app.observability.tracing import setup_tracing, TraceConfig
 from app.middleware.auth import AuthMiddleware, insecure_mode_enabled
 from app.middleware.flags import FeatureFlagMiddleware
@@ -89,13 +91,31 @@ if _MISSING_SECRETS:
 @app.exception_handler(Exception)
 async def _debug_exception_handler(request: Request, exc: Exception):
     import traceback
+    if isinstance(exc, MoaError):
+        # 业务错误携带自己的码与状态，不再淹没在 500 里
+        return JSONResponse(
+            status_code=http_status_for(exc.code),
+            content={"error": exc.code.value, "message": exc.message},
+        )
+    if isinstance(exc, InvalidStateTransitionException):
+        logger.error("invalid state transition: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": ErrorCode.INVALID_STATE_TRANSITION.value,
+                "message": "内部状态迁移错误",
+            },
+        )
     tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
     logger.error("unhandled exception: %s", "".join(tb))
-    return JSONResponse(status_code=500, content={"error": "internal_error", "detail": "内部服务错误"})
+    return JSONResponse(
+        status_code=500,
+        content={"error": ErrorCode.INTERNAL_ERROR.value, "detail": "内部服务错误", "message": "内部服务错误"},
+    )
 
 
 @app.exception_handler(json.JSONDecodeError)
 async def _json_decode_exception_handler(request: Request, exc: json.JSONDecodeError):
     logger.warning("invalid json body: %s", exc)
-    return JSONResponse(status_code=400, content={"error": "invalid_json", "detail": "请求体不是合法 JSON"})
+    return JSONResponse(status_code=400, content={"error": ErrorCode.INVALID_JSON.value, "message": "请求体不是合法 JSON"})
 

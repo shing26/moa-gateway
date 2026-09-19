@@ -20,8 +20,32 @@ def test_chat_requires_text_and_session() -> None:
     with app_client(app) as client:
         res = client.post("/dashboard/api/chat", json={"session_id": "s", "text": "  "})
         assert res.status_code == 400
+        assert res.json()["error"] == "validation_error"
         res = client.post("/dashboard/api/chat", json={"session_id": "", "text": "hi"})
         assert res.status_code == 400
+
+
+def test_chat_pipeline_error_returns_structured_500(monkeypatch) -> None:
+    """status=error 不再伪装成 200：结构化 500 携带 M1 错误码（N2 修复）。"""
+    from app.pipeline import PipelineResult
+
+    class _FailingPipeline:
+        async def run(self, event, **kwargs):
+            return PipelineResult(
+                trace_id="trace-x", state="", intent="",
+                text="model exploded", status="error",
+                error_code="agent_failed",
+            )
+
+    monkeypatch.setattr("app.routes.chat.pipeline", _FailingPipeline())
+    with app_client(app) as client:
+        res = client.post("/dashboard/api/chat", json={"session_id": "s-err", "text": "hi"})
+    assert res.status_code == 500
+    data = res.json()
+    assert data["error"] == "agent_failed"
+    assert data["message"] == "model exploded"
+    assert data["session_id"] == "web:s-err"
+    assert data["trace_id"] == "trace-x"
 
 
 def test_chat_routes_task_to_task_agent() -> None:

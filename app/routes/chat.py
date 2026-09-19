@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from app.deps import memory, pipeline
 from app.fsm.state_machine import Event as FsmEvent
+from app.models.errors import ErrorCode
 from app.models.events import MoAEvent, new_trace_id
 
 logger = logging.getLogger("moa.routes.chat")
@@ -38,10 +39,10 @@ class ChatHistoryRequest(BaseModel):
 async def dashboard_chat(body: ChatRequest, request: Request) -> JSONResponse:
     text = body.text.strip()
     if not text:
-        return JSONResponse({"error": "text required"}, status_code=400)
+        return JSONResponse({"error": ErrorCode.VALIDATION_ERROR.value, "message": "text required"}, status_code=400)
     sid = web_session_id(body.session_id)
     if not sid:
-        return JSONResponse({"error": "session_id required"}, status_code=400)
+        return JSONResponse({"error": ErrorCode.VALIDATION_ERROR.value, "message": "session_id required"}, status_code=400)
 
     moa_event = MoAEvent(
         trace_id=new_trace_id(),
@@ -64,6 +65,16 @@ async def dashboard_chat(body: ChatRequest, request: Request) -> JSONResponse:
 
     # 工具调用痕迹由 TaskAgent 内嵌在汇总文本中（Mock 的 summarize 自带步骤），
     # 此处透传 status/intent 供前端区分命令 / 重置 / 挂起等分支。
+    # status=error 不再伪装成 200（旧实现前端只能显示"（空回复）"）：
+    # 结构化 500 携带错误码与消息，chat.js 对非 2xx 有现成的降级展示。
+    if result.status == "error":
+        return JSONResponse({
+            "error": result.error_code or ErrorCode.AGENT_FAILED.value,
+            "message": result.text or "处理消息时出错了",
+            "session_id": sid,
+            "trace_id": result.trace_id,
+            "status": result.status,
+        }, status_code=500)
     return JSONResponse({
         "session_id": sid,
         "trace_id": result.trace_id,
@@ -77,7 +88,7 @@ async def dashboard_chat(body: ChatRequest, request: Request) -> JSONResponse:
 async def dashboard_chat_history(body: ChatHistoryRequest) -> JSONResponse:
     sid = web_session_id(body.session_id)
     if not sid:
-        return JSONResponse({"error": "session_id required"}, status_code=400)
+        return JSONResponse({"error": ErrorCode.VALIDATION_ERROR.value, "message": "session_id required"}, status_code=400)
     history = memory.get_history(sid, limit=50)
     return JSONResponse({
         "session_id": sid,

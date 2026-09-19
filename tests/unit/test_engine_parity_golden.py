@@ -40,6 +40,8 @@ COMPARED_FIELDS = (
     "text",
     "agent_name",
     "guard_action",
+    # 错误契约（M1）：两条引擎对同一输入必须给出同一个错误码
+    "error_code",
 )
 
 

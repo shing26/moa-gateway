@@ -16,6 +16,7 @@ from app.engine import HitlRequest
 from app.fsm.state_machine import Event as FsmEvent
 from app.guard.guard_service import GuardianAction, GuardVerdict
 from app.guard.rbac import Role
+from app.models.errors import ErrorCode
 from app.long_term_memory import extract_memory_ops
 from app.middleware.request_logger import log_request
 from app.models.events import MoAEvent
@@ -42,6 +43,9 @@ class PipelineResult:
     # 不必为两条引擎各写一份 log_request。
     agent_name: str = ""
     guard_action: str = ""
+    # 错误契约（M1）：status="error" 时必填 ErrorCode 字面量，路由层据此
+    # 产出结构化响应；FSM 与 LangGraph 两条引擎都必须填（parity 测试钉住）。
+    error_code: str = ""
 
 
 def _merge_guard(verdict: GuardVerdict, output_verdict: GuardVerdict, policy_ids: tuple[str, ...]) -> GuardVerdict:
@@ -254,6 +258,7 @@ class MoAPipeline:
                 trace_id=event.trace_id, state=state, intent=intent,
                 text="agent execution failed", status="error",
                 agent_name=agent_name,
+                error_code=ErrorCode.AGENT_FAILED.value,
             )
 
         llm_metrics = envelope.agent_local_slot.get("llm_metrics") or {}

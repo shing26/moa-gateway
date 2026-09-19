@@ -9,6 +9,7 @@ from app.deps import adapter, engine, logger, pipeline, tracer
 from app.fsm.state_machine import Event as FsmEvent
 from app.limit_providers.rate_limiter import rate_limiter
 from app.middleware.request_logger import log_request
+from app.models.errors import ErrorCode
 from app.models.events import MoAEvent, PlatformEvent, new_trace_id
 
 webhook_router = APIRouter()
@@ -19,14 +20,14 @@ async def webhook_callback(request: Request) -> JSONResponse:
     parsed = parse_card_callback(body)
     if parsed is None:
         logger.warning("unparseable card callback: %s", body)
-        return JSONResponse({"error": "invalid_callback_payload"}, status_code=400)
+        return JSONResponse({"error": ErrorCode.INVALID_CALLBACK_PAYLOAD.value}, status_code=400)
     session_id, trace_id, action = parsed
     logger.info("card callback session=%s trace=%s action=%s", session_id, trace_id, action)
     hitl_id = trace_id or session_id
     hitl = engine.session_store.get_hitl(hitl_id)
     if hitl is None:
         logger.warning("hitl request not found hitl_id=%s session=%s", hitl_id, session_id)
-        return JSONResponse({"error": "hitl_request_not_found"}, status_code=404)
+        return JSONResponse({"error": ErrorCode.HITL_REQUEST_NOT_FOUND.value}, status_code=404)
     if action == "approve":
         fsm_event = FsmEvent.HUMAN_APPROVED
     elif action == "reject":
@@ -74,7 +75,7 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
         allowed, remaining = await rate_limiter.check(rate_key)
         if not allowed:
             await log_request(request, 429, 0, rate_key, "", "", "denied")
-            return JSONResponse({"error": "rate_limited", "message": "Too many requests. Try again later."}, status_code=429)
+            return JSONResponse({"error": ErrorCode.RATE_LIMITED.value, "message": "Too many requests. Try again later."}, status_code=429)
         trace_id = new_trace_id()
         root_span.set_attribute("moa.channel", channel)
         root_span.set_attribute("moa.trace_id", trace_id)
@@ -119,7 +120,8 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
             })
         if result.status == "error":
             return JSONResponse({
-                "error": "agent_failed", "message": result.text, "status": "error",
+                "error": result.error_code or ErrorCode.AGENT_FAILED.value,
+                "message": result.text, "status": "error",
             }, status_code=500)
         return JSONResponse({
             "trace_id": result.trace_id, "state": result.state,

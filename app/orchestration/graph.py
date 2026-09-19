@@ -84,6 +84,7 @@ from app.engine import HitlRequest
 from app.guard.guard_service import GuardianAction, GuardVerdict
 from app.guard.rbac import Role
 from app.long_term_memory import extract_memory_ops
+from app.models.errors import ErrorCode
 from app.models.events import MoAEvent
 from app.fsm.state_machine import Event as FsmEvent
 from app.fsm.state_machine import State as FsmState
@@ -127,6 +128,9 @@ class GraphState(TypedDict, total=False):
     llm_latency_ms: float
     fallback_used: str
     error: str
+    # 错误契约（M1）：error 存人类可读细节，error_code 存 ErrorCode 字面量；
+    # 两者都经 _to_result 进入 PipelineResult，路由层据此产出结构化响应。
+    error_code: str
     # Reducer demo: LangGraph appends instead of overwriting, which is how you
     # get an execution trace for free without bolting on a tracer.
     node_path: Annotated[list[str], operator.add]
@@ -303,6 +307,7 @@ class LangGraphOrchestrator:
         if agent is None:
             return {
                 "error": "no agent registered",
+                "error_code": ErrorCode.AGENT_NOT_REGISTERED.value,
                 "status": "error",
                 "node_path": ["execute"],
             }
@@ -325,7 +330,12 @@ class LangGraphOrchestrator:
             raw_output = await agent.execute(envelope)
         except Exception as exc:  # noqa: BLE001 - mirrored from MoAPipeline
             logger.exception("langgraph orchestrator: agent execution failed")
-            return {"error": str(exc), "status": "error", "node_path": ["execute"]}
+            return {
+                "error": str(exc),
+                "error_code": ErrorCode.AGENT_FAILED.value,
+                "status": "error",
+                "node_path": ["execute"],
+            }
 
         metrics = envelope.agent_local_slot.get("llm_metrics") or {}
         return {
@@ -529,6 +539,10 @@ class LangGraphOrchestrator:
         interrupted = "__interrupt__" in state
         status = "pending_review" if interrupted else state.get("status", "ok")
         text = state.get("delivered_text", "")
+        if status == "error":
+            # 此前 error 字段在此处被丢弃（PipelineResult 无处安放），
+            # status="error" 时 text=""——路由层的 500 从此有了细节可用。
+            text = state.get("error") or text
         if status == "pending_review":
             # Mirrors MoAPipeline's suspension message so the two runtimes are
             # field-for-field interchangeable; the parity test locks this.
@@ -548,6 +562,7 @@ class LangGraphOrchestrator:
             fallback_used=state.get("fallback_used", ""),
             agent_name=state.get("agent_name", ""),
             guard_action=state.get("guard_action", ""),
+            error_code=state.get("error_code", ""),
         )
 
     async def run(
