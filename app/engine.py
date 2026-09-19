@@ -273,5 +273,14 @@ class Engine:
     def reset_session(self, session_id: str) -> None:
         self._session_states.pop(session_id, None)
 
+    def peek(self, session_id: str) -> StateContext | None:
+        """Read-only view of a session's FSM context.
+
+        Exists so callers that only need to *inspect* a session (the engine
+        dispatcher deciding which engine handles a request) do not have to call
+        ``handle_event``, which advances the state machine as a side effect.
+        """
+        return self._session_states.get(session_id)
+
     async def respond(self, session_state: SessionState, text: str, *, channel: str, target: str) -> OutboundResponse:
         return self.adapter.adapt(text, channel=channel, target=target)

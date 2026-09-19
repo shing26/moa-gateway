@@ -1,7 +1,8 @@
 ﻿from __future__ import annotations
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
-from app.deps import _retriever, vector_client
+from app.config import settings
+from app.deps import _retriever, pipeline, vector_client
 import logging
 import time
 from typing import Any
@@ -24,7 +25,7 @@ async def healthz() -> dict[str, object]:
     redis_check = "unknown"
     try:
         from app.redis_state.store import RedisConfig, RedisStateStore
-        store = RedisStateStore(RedisConfig(url="redis://localhost:6379/0"))
+        store = RedisStateStore(RedisConfig(url=settings.redis_url))
         client = await store.connect()
         pong = await client.ping()
         if pong:
@@ -44,7 +45,15 @@ async def healthz() -> dict[str, object]:
     # 只有 "degraded: ..." 才代表配置与实际不符，需要告警。
     healthy_values = {"connected", "ok", "healthy", "fallback_memory", "memory", "postgres"}
     all_healthy = all(v in healthy_values for v in checks.values())
-    result = {"status": "healthy" if all_healthy else "degraded", "checks": checks}
+    # 引擎不是健康项（没有"坏值"），所以放在 checks 之外，避免污染
+    # all_healthy 的取值集合。
+    describe = getattr(pipeline, "describe", None)
+    engine_name = str(describe().get("engine", "fsm")) if callable(describe) else "fsm"
+    result = {
+        "status": "healthy" if all_healthy else "degraded",
+        "checks": checks,
+        "engine": engine_name,
+    }
     _healthz_cache["at"] = now
     _healthz_cache["result"] = result
     return result

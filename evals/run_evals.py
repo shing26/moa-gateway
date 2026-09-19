@@ -119,7 +119,7 @@ async def run_e2e_offline(
         event = MoAEvent(
             trace_id=f"eval-offline-{case.get('id', 'unknown')}",
             event=None,
-            session_id="eval-offline",
+            session_id=f"eval-offline-{case.get('id', 'unknown')}",
             text=str(case.get("input", "")),
             context={},
         )
@@ -141,9 +141,14 @@ async def run_e2e_eval(
     pipeline: Any | None = None,
     judge: Any | None = None,
 ) -> dict[str, Any]:
+    from app.deps import init_prompts
     from app.deps import pipeline as default_pipeline
     from evals.judge import score as default_judge
 
+    from app.fsm.state_machine import Event
+
+    # 服务进程在 FastAPI lifespan 里初始化 prompt 注册表；eval 进程没有 lifespan，需手动注册
+    init_prompts()
     runner = pipeline or default_pipeline
     judge_fn = judge or default_judge
     scores: list[float] = []
@@ -152,8 +157,8 @@ async def run_e2e_eval(
     for case in cases:
         event = MoAEvent(
             trace_id=f"eval-{case.get('id', 'unknown')}",
-            event=None,
-            session_id="eval",
+            event=Event.MESSAGE_RECEIVED,
+            session_id=f"eval-{case.get('id', 'unknown')}",
             text=str(case.get("input", "")),
             context={},
         )
@@ -213,18 +218,44 @@ def build_summary(report: dict[str, Any]) -> str:
     )
 
 
-async def run_all(offline: bool, datasets_dir: Path) -> dict[str, Any]:
+def resolve_engine(engine: str | None) -> Any | None:
+    """Map ``--engine`` to an e2e runner.
+
+    ``None`` keeps ``run_e2e_eval``'s default, which is whatever ``ENGINE``
+    selected in ``app.deps``. Naming an engine explicitly overrides that, so the
+    same dataset can be run against both runtimes.
+    """
+    if engine is None:
+        return None
+    if engine == "fsm":
+        from app.deps import fsm_pipeline
+
+        return fsm_pipeline
+    if engine == "langgraph":
+        from app.orchestration.graph import LangGraphOrchestrator
+
+        return LangGraphOrchestrator.from_deps()
+    raise ValueError(f"unknown engine: {engine}")
+
+
+async def run_all(
+    offline: bool,
+    datasets_dir: Path,
+    *,
+    engine: str | None = None,
+) -> dict[str, Any]:
     intent = await run_intent_eval(load_dataset(datasets_dir / "intent.jsonl"))
     guard = await run_guard_eval(load_dataset(datasets_dir / "guard_redteam.jsonl"))
     e2e_cases = load_dataset(datasets_dir / "e2e.jsonl")
     e2e = (
         await run_e2e_offline(e2e_cases)
         if offline
-        else await run_e2e_eval(e2e_cases)
+        else await run_e2e_eval(e2e_cases, pipeline=resolve_engine(engine))
     )
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "git_sha": git_sha(),
+        "engine": engine or "default",
         "intent": intent,
         "guard": guard,
         "e2e": e2e,
@@ -237,11 +268,17 @@ async def run_all(offline: bool, datasets_dir: Path) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run agent-gateway evaluation harness")
     parser.add_argument("--offline", action="store_true", help="skip e2e and mark as skipped")
+    parser.add_argument(
+        "--engine",
+        choices=["fsm", "langgraph"],
+        default=None,
+        help="override the e2e runner engine (default: whatever ENGINE selects)",
+    )
     parser.add_argument("--datasets-dir", type=Path, default=ROOT / "evals" / "datasets")
     parser.add_argument("--report-path", type=Path, default=ROOT / "evals" / "reports" / "latest.json")
     args = parser.parse_args(argv)
 
-    report = asyncio.run(run_all(args.offline, args.datasets_dir))
+    report = asyncio.run(run_all(args.offline, args.datasets_dir, engine=args.engine))
     write_report(report, args.report_path)
     print(report["summary"])
     print(f"report written: {args.report_path}")

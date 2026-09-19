@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging, os
+from typing import Any
 from opentelemetry import trace
 from app.agents.provider import LLMClient, LLMConfig
 from app.config import settings
@@ -19,6 +20,7 @@ from app.channels.feishu import FeishuChannelAdapter, FeishuConfig
 from app.channels.feishu_auth import FeishuAuthConfig, FeishuTokenProvider
 from app.channels.feishu_cards import FeishuCardSender
 from app.memory import ConversationMemory, RedisConversationStorage
+from app.long_term_memory import LongTermMemory
 from app.command_mode import CommandMode, parse_command
 from app.knowledge import KnowledgeBase
 from app.obsidian_sync import ObsidianVaultSync
@@ -35,6 +37,8 @@ _prompt_registry = PromptRegistry()
 # 后端由 VECTOR_DB_DSN 决定：为空即内存存储（现状），配置后由 PostgreSQL 接管。
 vector_client = build_vector_client()
 _retriever = ContextRetriever(vector_client)
+# 长期记忆与知识库共用同一个向量后端；无 DSN 时退化为进程内存存储。
+long_term_memory = LongTermMemory(vector_client)
 
 # Module-level singletons
 es_writer: EsWriter | None = None
@@ -95,7 +99,7 @@ engine = Engine(
     ),
 )
 
-pipeline = MoAPipeline(
+fsm_pipeline = MoAPipeline(
     engine=engine,
     router=router,
     memory=memory,
@@ -107,7 +111,34 @@ pipeline = MoAPipeline(
     guard_service=guard_service,
     command_mode=command_mode,
     card_sender=None,
+    long_term_memory=long_term_memory,
 )
+
+
+def _select_orchestrator(fsm: Any) -> Any:
+    """Pick the request-path orchestrator from ``ENGINE``.
+
+    ``langgraph`` is an optional extra, so this fails safe: any import problem
+    logs and keeps the FSM pipeline, which is also what the Docker image gets
+    (it syncs without extras).
+    """
+    if settings.engine != "langgraph":
+        if settings.engine not in ("", "fsm"):
+            logger.warning("未知 ENGINE=%r，按 fsm 处理", settings.engine)
+        return fsm
+    try:
+        from app.orchestration.dispatch import EngineDispatcher
+        from app.orchestration.graph import LangGraphOrchestrator
+    except Exception as exc:  # noqa: BLE001 - missing optional extra must not stop boot
+        logger.warning("ENGINE=langgraph 但 langgraph 不可用，回退 fsm: %s", exc)
+        return fsm
+    graph = LangGraphOrchestrator.from_deps()
+    logger.info("编排引擎: langgraph（未建模路径回落 fsm）")
+    return EngineDispatcher(fsm, graph)
+
+
+# 重绑定为 dispatcher：路由只在启动时 import 一次，之后读到的是最终对象。
+pipeline = _select_orchestrator(fsm_pipeline)
 
 
 def init_feishu() -> None:
