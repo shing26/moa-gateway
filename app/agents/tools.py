@@ -41,9 +41,10 @@ class ToolRegistry:
 
 
 async def _knowledge_search_handler(query: str) -> str:
-    from app.deps import _retriever
+    # M4：经中立 port 取检索器，不再反向依赖组合根 app.deps
+    from app.knowledge_access import get_retriever
 
-    result = await _retriever.retrieve_knowledge(query)
+    result = await get_retriever().retrieve_knowledge(query)
     context = result.context[:2000]
     logger.debug("knowledge_search: query=%s docs=%d", query[:50], result.doc_count)
     return f"\u6765\u6e90\u6587\u6863\u6570: {result.doc_count}\n\n{context}"

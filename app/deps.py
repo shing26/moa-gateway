@@ -49,6 +49,11 @@ memory = ConversationMemory(
     )
 )
 knowledge_base = KnowledgeBase(vector_client)
+# M4：领域层（agents/agent_core 的工具 handler）经由中立 port 取用知识能力，
+# 不再反向 import 本组合根。
+from app.knowledge_access import configure as _configure_knowledge_access
+
+_configure_knowledge_access(knowledge_base=knowledge_base, retriever=_retriever)
 obsidian_sync = ObsidianVaultSync.from_env(knowledge_base=knowledge_base)
 command_mode = CommandMode()
 adapter = ResponseAdapter()

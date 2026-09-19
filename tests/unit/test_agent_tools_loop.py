@@ -54,7 +54,7 @@ async def test_agent_executes_tool_and_returns_final_text(envelope, monkeypatch)
     fake_retriever.retrieve_knowledge = AsyncMock(
         return_value=RetrievalResult(chunks=["doc a"], context="doc a", doc_count=1)
     )
-    monkeypatch.setattr("app.deps._retriever", fake_retriever)
+    monkeypatch.setattr("app.knowledge_access.get_retriever", lambda: fake_retriever)
 
     from app.agents.stubs import CoderAgent
 
@@ -110,7 +110,7 @@ async def test_tool_loop_handles_bad_arguments(envelope, monkeypatch) -> None:
     fake_retriever.retrieve_knowledge = AsyncMock(
         return_value=RetrievalResult(chunks=["ok"], context="ok", doc_count=1)
     )
-    monkeypatch.setattr("app.deps._retriever", fake_retriever)
+    monkeypatch.setattr("app.knowledge_access.get_retriever", lambda: fake_retriever)
 
     from app.agents.stubs import GeneralAgent
 

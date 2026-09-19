@@ -61,10 +61,11 @@ async def _calculator_handler(expression: str) -> str:
 
 
 async def _list_documents_handler() -> str:
-    from app.deps import knowledge_base
+    # M4：经中立 port 取知识库，不再反向依赖组合根 app.deps
+    from app.knowledge_access import get_knowledge_base
 
     try:
-        docs = await knowledge_base.list_docs()
+        docs = await get_knowledge_base().list_docs()
     except Exception as exc:
         return f"获取文档列表失败: {exc}"
     if not docs:

@@ -97,7 +97,7 @@ async def test_knowledge_search_handler_with_mock_retriever(monkeypatch) -> None
             doc_count=2,
         )
     )
-    monkeypatch.setattr("app.deps._retriever", fake_retriever)
+    monkeypatch.setattr("app.knowledge_access.get_retriever", lambda: fake_retriever)
 
     tool = tool_registry.get("knowledge_search")
     result = await tool.handler("redis config")
@@ -113,7 +113,7 @@ async def test_knowledge_search_handler_truncates_context(monkeypatch) -> None:
     fake_retriever.retrieve_knowledge = AsyncMock(
         return_value=RetrievalResult(chunks=["x" * 5000], context="x" * 5000, doc_count=1)
     )
-    monkeypatch.setattr("app.deps._retriever", fake_retriever)
+    monkeypatch.setattr("app.knowledge_access.get_retriever", lambda: fake_retriever)
 
     tool = tool_registry.get("knowledge_search")
     result = await tool.handler("long context")
