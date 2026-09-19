@@ -14,6 +14,16 @@ def _clean_env(monkeypatch):
         "ROUTER_LLM_TIMEOUT_MS",
         "MICRO_LLM_TIMEOUT_MS",
         "HITL_ENABLED",
+        "VECTOR_DB_DSN",
+        "CODE_REVIEW_DATABASE_URL",
+        "VECTOR_DB_EMBEDDING_DIM",
+        "CODE_REVIEW_EMBEDDING_DIM",
+        "EMBEDDING_API_KEY",
+        "CODE_REVIEW_EMBEDDING_API_KEY",
+        "EMBEDDING_BASE_URL",
+        "CODE_REVIEW_EMBEDDING_BASE_URL",
+        "EMBEDDING_MODEL",
+        "CODE_REVIEW_EMBEDDING_MODEL",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -102,3 +112,25 @@ def test_to_redis_config():
 
 def test_settings_singleton():
     assert isinstance(settings, Settings)
+
+
+def test_vector_settings_accept_code_review_aliases(monkeypatch):
+    monkeypatch.setenv(
+        "CODE_REVIEW_DATABASE_URL",
+        "postgresql://gateway:gateway@localhost:5433/gateway",
+    )
+    monkeypatch.setenv("CODE_REVIEW_EMBEDDING_DIM", "768")
+    monkeypatch.setenv("CODE_REVIEW_EMBEDDING_API_KEY", "ollama-local")
+    monkeypatch.setenv(
+        "CODE_REVIEW_EMBEDDING_BASE_URL",
+        "http://localhost:11434/v1",
+    )
+    monkeypatch.setenv("CODE_REVIEW_EMBEDDING_MODEL", "nomic-embed-text:latest")
+
+    s = Settings()
+
+    assert s.vector_db_dsn == "postgresql://gateway:gateway@localhost:5433/gateway"
+    assert s.vector_db_embedding_dim == 768
+    assert s.embedding_api_key == "ollama-local"
+    assert s.embedding_base_url == "http://localhost:11434/v1"
+    assert s.embedding_model == "nomic-embed-text:latest"

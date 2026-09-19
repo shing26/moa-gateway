@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS code_review_findings (
 
 CREATE TABLE IF NOT EXISTS code_review_vectors (
     id SERIAL PRIMARY KEY,
-    trace_id TEXT NOT NULL REFERENCES code_review_prs(trace_id),
+    trace_id TEXT NOT NULL,
     source_type TEXT NOT NULL,
     source_id TEXT NOT NULL,
     content TEXT NOT NULL,
@@ -50,6 +50,20 @@ CREATE TABLE IF NOT EXISTS code_review_vectors (
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Knowledge-base vectors use a non-PR trace_id such as "knowledge-base".
+-- Drop the legacy FK for databases created by earlier schema versions.
+ALTER TABLE code_review_vectors
+    DROP CONSTRAINT IF EXISTS code_review_vectors_trace_id_fkey;
+
+DELETE FROM code_review_vectors older
+USING code_review_vectors newer
+WHERE older.id > newer.id
+  AND older.trace_id = newer.trace_id
+  AND older.source_id = newer.source_id;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_code_review_vectors_trace_source
+    ON code_review_vectors (trace_id, source_id);
 
 CREATE INDEX IF NOT EXISTS idx_code_review_prs_repo ON code_review_prs (repo);
 CREATE INDEX IF NOT EXISTS idx_code_review_prs_author ON code_review_prs (author);

@@ -1,30 +1,86 @@
 services:
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["${REDIS_PORT:-6380}:6379"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports: ["${POSTGRES_PORT:-5433}:5432"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gateway}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gateway}
+      POSTGRES_DB: ${POSTGRES_DB:-gateway}
+    volumes:
+      - gateway_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-gateway} -d ${POSTGRES_DB:-gateway}",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   gateway:
     build: .
-    ports: ["8080:8080"]
+    ports: ["${GATEWAY_PORT:-8081}:8080"]
     environment:
-      - REDIS_URL=redis://redis:6379/0
       - ENV=dev
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-nvapi-}
-      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://integrate.api.nvidia.com/v1}
-      - LLM_MODEL=${LLM_MODEL:-meta/llama-3.1-70b-instruct}
+      - MOA_ENV=dev
+      - REDIS_URL=redis://redis:6379/0
+      - VECTOR_DB_DSN=postgresql://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
+      - CODE_REVIEW_DATABASE_URL=postgresql://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
+      - VECTOR_DB_EMBEDDING_DIM=${VECTOR_DB_EMBEDDING_DIM:-768}
+      - CODE_REVIEW_EMBEDDING_DIM=${CODE_REVIEW_EMBEDDING_DIM:-768}
+      - LLM_PROVIDER=${LLM_PROVIDER:-local}
+      - LLM_BASE_URL=${DOCKER_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
+      - LLM_API_KEY=${LLM_API_KEY:-ollama-local}
+      - LLM_FALLBACK_MODELS=${LLM_FALLBACK_MODELS:-qwen2.5:3b}
+      - LITELLM_LOCAL_MODEL_COST_MAP=true
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-ollama-local}
+      - EMBEDDING_BASE_URL=${DOCKER_EMBEDDING_BASE_URL:-http://host.docker.internal:11434/v1}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-nomic-embed-text:latest}
+      - CODE_REVIEW_EMBEDDING_API_KEY=${CODE_REVIEW_EMBEDDING_API_KEY:-ollama-local}
+      - CODE_REVIEW_EMBEDDING_BASE_URL=${DOCKER_EMBEDDING_BASE_URL:-http://host.docker.internal:11434/v1}
+      - CODE_REVIEW_EMBEDDING_MODEL=${CODE_REVIEW_EMBEDDING_MODEL:-nomic-embed-text:latest}
+      - WEBHOOK_AUTH_TOKEN=${WEBHOOK_AUTH_TOKEN:-}
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
+      - GATEWAY_ALLOW_INSECURE=${GATEWAY_ALLOW_INSECURE:-0}
+      - HITL_ENABLED=${HITL_ENABLED:-false}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
 
   omniroute:
     image: diegosouzapw/omniroute:latest
     profiles: ["base"]
     ports:
-      - "20128:20128"
-      - "20129:20129"
+      - "${OMNIROUTE_PORT:-20128}:20128"
+      - "${OMNIROUTE_API_PORT:-20129}:20129"
     environment:
       - PORT=20128
       - API_PORT=20129
       - REDIS_URL=redis://redis:6379
       - API_KEY_SECRET=${OMNIROUTE_API_KEY:-omniroute-dev-key}
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  redis_data:
+  gateway_pgdata:

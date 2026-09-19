@@ -34,12 +34,34 @@ def _build_dsn() -> str | None:
     )
 
 
+def _embedding_dim() -> int:
+    raw = (
+        os.getenv("CODE_REVIEW_EMBEDDING_DIM")
+        or os.getenv("VECTOR_DB_EMBEDDING_DIM")
+        or "1536"
+    )
+    try:
+        dim = int(raw)
+    except ValueError as exc:
+        raise StorageInitError(f"invalid embedding dimension: {raw!r}") from exc
+    if dim <= 0:
+        raise StorageInitError(f"embedding dimension must be positive: {dim}")
+    return dim
+
+
+def render_schema(schema_sql: str, dim: int) -> str:
+    """Bind the configured embedding dimension into the review pgvector DDL."""
+    if dim <= 0:
+        raise ValueError(f"embedding dimension must be positive: {dim}")
+    return schema_sql.replace("vector(1536)", f"vector({dim})")
+
+
 def _ensure_schema(dsn: str) -> None:
     import psycopg  # type: ignore[import-untyped]
 
     schema_path = os.path.join(os.path.dirname(__file__), "schema.sql")
     with open(schema_path, "r", encoding="utf-8") as fh:
-        schema_sql = fh.read()
+        schema_sql = render_schema(fh.read(), _embedding_dim())
 
     try:
         with psycopg.connect(dsn) as conn:

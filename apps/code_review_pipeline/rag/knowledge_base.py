@@ -6,7 +6,12 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from apps.code_review_pipeline.rag.embeddings import generate_embeddings, EmbeddingResult, EmbeddingError
+from apps.code_review_pipeline.rag.embeddings import (
+    EmbeddingError,
+    EmbeddingResult,
+    embedding_dimension,
+    generate_embeddings,
+)
 from apps.code_review_pipeline.rag.vector_store import build_vector_store
 
 logger = logging.getLogger("moa.code_review.rag")
@@ -62,7 +67,7 @@ class KnowledgeBase:
 
     async def list_docs(self) -> list[dict[str, Any]]:
         try:
-            results = self._store.search(tuple([0.0] * 1536), limit=1000)
+            results = self._store.search(tuple([0.0] * embedding_dimension()), limit=1000)
             return [
                 {
                     "source_id": item.get("source_id", ""),

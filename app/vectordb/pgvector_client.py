@@ -114,6 +114,13 @@ def split_statements(raw_sql: str) -> list[str]:
     return [chunk.strip() for chunk in "\n".join(lines).split(";") if chunk.strip()]
 
 
+def render_schema(raw_sql: str, dim: int) -> str:
+    """Bind the configured embedding dimension into the pgvector DDL."""
+    if int(dim) <= 0:
+        raise ValueError(f"embedding dimension must be positive: {dim!r}")
+    return raw_sql.replace("vector(1536)", f"vector({int(dim)})")
+
+
 class PgVectorClient:
     """Async PostgreSQL vector store backed by a psycopg connection pool."""
 
@@ -238,7 +245,8 @@ class PgVectorClient:
         if not _SCHEMA_PATH.exists():
             logger.warning("vectordb: 未找到 schema 文件 %s，跳过自动建表", _SCHEMA_PATH)
             return
-        for statement in split_statements(_SCHEMA_PATH.read_text(encoding="utf-8")):
+        schema_sql = render_schema(_SCHEMA_PATH.read_text(encoding="utf-8"), self._dim)
+        for statement in split_statements(schema_sql):
             try:
                 await self._run(statement, None, fetch=False)
             except Exception as exc:  # noqa: BLE001
@@ -515,5 +523,6 @@ __all__ = [
     "PgVectorClient",
     "VectorStoreUnavailable",
     "fuse",
+    "render_schema",
     "split_statements",
 ]

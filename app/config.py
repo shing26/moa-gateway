@@ -71,6 +71,9 @@ def _parse_sentinel_hosts(value: str | None) -> list[tuple[str, int]]:
 class Settings:
     def __init__(self) -> None:
         self.env: str = os.getenv("MOA_ENV", "dev")
+        # 编排引擎选择：fsm（默认，自研状态机）| langgraph（可选第二引擎）。
+        # langgraph 需要 optional extra，未安装时 deps 会告警并回退 fsm。
+        self.engine: str = (os.getenv("ENGINE", "fsm") or "fsm").strip().lower()
         self.redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
         self.redis_sentinel_hosts: list[tuple[str, int]] = _parse_sentinel_hosts(
             os.getenv("REDIS_SENTINEL_HOSTS")
@@ -88,10 +91,17 @@ class Settings:
         # ── 检索存储 (P4 / P5) ─────────────────────────────────────────────
         # 空 DSN = 内存存储，即当前行为，零变化；配置 DSN 后由 PostgreSQL +
         # pgvector 接管，上层消费者无需改动。
-        self.vector_db_dsn: str = os.getenv("VECTOR_DB_DSN", "")
+        self.vector_db_dsn: str = (
+            os.getenv("VECTOR_DB_DSN", "")
+            or os.getenv("CODE_REVIEW_DATABASE_URL", "")
+        )
         self.vector_db_table: str = os.getenv("VECTOR_DB_TABLE", "gateway_documents")
         # 维度必须与 db/gateway_schema.sql 中的 vector(N) 一致。
-        self.vector_db_embedding_dim: int = _parse_int(os.getenv("VECTOR_DB_EMBEDDING_DIM"), 1536)
+        self.vector_db_embedding_dim: int = _parse_int(
+            os.getenv("VECTOR_DB_EMBEDDING_DIM")
+            or os.getenv("CODE_REVIEW_EMBEDDING_DIM"),
+            1536,
+        )
         self.vector_db_pool_min_size: int = _parse_int(os.getenv("VECTOR_DB_POOL_MIN_SIZE"), 1)
         self.vector_db_pool_max_size: int = _parse_int(os.getenv("VECTOR_DB_POOL_MAX_SIZE"), 4)
         self.vector_db_keyword_scan_limit: int = _parse_int(
@@ -105,15 +115,22 @@ class Settings:
         # ── Embedding ─────────────────────────────────────────────────────
         # 未配置则整条语义检索关闭，走 BD-01 关键词回退。仅在配置了
         # VECTOR_DB_DSN 时才会真正发起调用，因此不会影响现有的内存存储路径。
-        self.embedding_api_key: str = os.getenv("EMBEDDING_API_KEY", "") or os.getenv(
-            "OPENAI_API_KEY", ""
+        self.embedding_api_key: str = (
+            os.getenv("EMBEDDING_API_KEY", "")
+            or os.getenv("CODE_REVIEW_EMBEDDING_API_KEY", "")
+            or os.getenv("OPENAI_API_KEY", "")
         )
         self.embedding_base_url: str = (
             os.getenv("EMBEDDING_BASE_URL", "")
+            or os.getenv("CODE_REVIEW_EMBEDDING_BASE_URL", "")
             or os.getenv("OPENAI_BASE_URL", "")
             or "https://api.openai.com/v1"
         )
-        self.embedding_model: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        self.embedding_model: str = (
+            os.getenv("EMBEDDING_MODEL", "")
+            or os.getenv("CODE_REVIEW_EMBEDDING_MODEL", "")
+            or "text-embedding-3-small"
+        )
         self.embedding_timeout_s: float = _parse_float(os.getenv("EMBEDDING_TIMEOUT_S"), 10.0)
 
     def to_redis_config(self) -> dict[str, Any]:

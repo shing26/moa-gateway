@@ -31,6 +31,7 @@ from app.vectordb.pgvector_client import (
     _vector_literal,
     fuse,
     split_statements,
+    render_schema,
 )
 
 
@@ -192,6 +193,16 @@ class TestSplitStatements:
         assert all(statement and ";" not in statement for statement in statements)
         assert any(s.startswith("CREATE EXTENSION") for s in statements)
         assert any(s.startswith("CREATE TABLE") for s in statements)
+
+
+class TestRenderSchema:
+    def test_binds_configured_embedding_dimension(self):
+        rendered = render_schema("embedding vector(1536)", 768)
+        assert rendered == "embedding vector(768)"
+
+    def test_rejects_non_positive_dimension(self):
+        with pytest.raises(ValueError, match="positive"):
+            render_schema("embedding vector(1536)", 0)
 
 
 class TestFuse:

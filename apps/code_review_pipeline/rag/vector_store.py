@@ -46,6 +46,12 @@ class PgVectorStore:
                         """
                         INSERT INTO code_review_vectors (trace_id, source_type, source_id, content, embedding, metadata)
                         VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (trace_id, source_id) DO UPDATE SET
+                            source_type = EXCLUDED.source_type,
+                            content = EXCLUDED.content,
+                            embedding = EXCLUDED.embedding,
+                            metadata = EXCLUDED.metadata,
+                            created_at = NOW()
                         """,
                         (
                             trace_id,
@@ -188,6 +194,14 @@ class InMemoryVectorStore:
                 "metadata": item.metadata or {},
                 "score": 0.0,
             }
+            self._items = [
+                existing
+                for existing in self._items
+                if not (
+                    existing.get("trace_id") == trace_id
+                    and existing.get("source_id") == item.source_id
+                )
+            ]
             self._items.append(record)
             self._upsert_to_sqlite(record)
 
