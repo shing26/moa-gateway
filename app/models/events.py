@@ -26,6 +26,9 @@ class MoAEvent:
     text: str
     context: dict[str, Any] = field(default_factory=dict)
     occurred_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # 追加在末尾而非插在中间：已有调用方按位置传参，插队会静默错位。
+    # 长期记忆按 user_id 隔离；为空表示不启用跨会话记忆。
+    user_id: str = ""
 
 
 @dataclass(frozen=True)

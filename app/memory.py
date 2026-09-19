@@ -14,6 +14,15 @@ logger = logging.getLogger("moa.memory")
 
 
 class _SyncBridge:
+    """Run Redis async calls from legacy synchronous storage methods.
+
+    ``ConversationMemory`` and a few compatibility call sites still use the
+    synchronous ``RedisConversationStorage`` API. The bridge keeps those calls
+    working without forcing every caller to become async. It is not a timing
+    primitive: async pipeline ordering is handled by awaiting Redis directly,
+    so tests must not depend on this thread for sequencing guarantees.
+    """
+
     def __init__(self, timeout: float = 1.0) -> None:
         self._timeout = timeout
         self._loop: asyncio.AbstractEventLoop | None = None

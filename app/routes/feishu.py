@@ -104,6 +104,7 @@ async def feishu_event(request: Request):
         trace_id=new_trace_id(), event=FsmEvent.MESSAGE_RECEIVED,
         session_id=sid, text=parsed["text"],
         context={"source": "feishu_event"},
+        user_id=parsed.get("sender_id", ""),
     )
     try:
         result = await pipeline.run(moa_event, channel="feishu", target=sid, request=request)

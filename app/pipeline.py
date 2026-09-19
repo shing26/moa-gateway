@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -15,9 +16,12 @@ from app.engine import HitlRequest
 from app.fsm.state_machine import Event as FsmEvent
 from app.guard.guard_service import GuardianAction, GuardVerdict
 from app.guard.rbac import Role
+from app.long_term_memory import extract_memory_ops
 from app.middleware.request_logger import log_request
 from app.models.events import MoAEvent
 from app.prompt_registry.canary import CanaryConfig, select_canary_version
+
+logger = logging.getLogger("moa.pipeline")
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,10 @@ class PipelineResult:
     cost_usd: float = 0.0
     llm_latency_ms: float = 0.0
     fallback_used: str = ""
+    # 供跨引擎的统一审计使用：图路径也算得出同样的两个值，dispatcher 因此
+    # 不必为两条引擎各写一份 log_request。
+    agent_name: str = ""
+    guard_action: str = ""
 
 
 def _merge_guard(verdict: GuardVerdict, output_verdict: GuardVerdict, policy_ids: tuple[str, ...]) -> GuardVerdict:
@@ -60,6 +68,7 @@ class MoAPipeline:
         guard_service: Any,
         command_mode: Any,
         card_sender: Any = None,
+        long_term_memory: Any = None,
     ) -> None:
         self.engine = engine
         self.router = router
@@ -72,9 +81,20 @@ class MoAPipeline:
         self.guard_service = guard_service
         self.command_mode = command_mode
         self.card_sender = card_sender
+        # 默认 None：未配置长期记忆时，行为与补齐前完全一致。
+        self.long_term_memory = long_term_memory
 
     def set_card_sender(self, sender: Any) -> None:
         self.card_sender = sender
+
+    @staticmethod
+    def _resolve_user_id(event: MoAEvent) -> str:
+        raw = getattr(event, "user_id", "") or event.context.get("user_id", "")
+        return str(raw or "").strip()
+
+    def describe(self) -> dict[str, str]:
+        """This object's engine identity, surfaced by ``/healthz``."""
+        return {"engine": "fsm"}
 
     async def run(
         self,
@@ -180,7 +200,24 @@ class MoAPipeline:
                 agent_name = name
                 break
 
+        user_id = self._resolve_user_id(event)
+        # 显式遗忘请求不应先把自己要删的记忆召回并塞进上下文。
+        memory_ops = (
+            extract_memory_ops(event.text) if (self.long_term_memory and user_id) else []
+        )
+        recall_allowed = not any(op.action.startswith("forget") for op in memory_ops)
+
         retrieval = await self.retriever.retrieve(event.text, session_id=event.session_id)
+
+        memory_context = ""
+        if self.long_term_memory is not None and user_id and recall_allowed:
+            try:
+                memory_context = await self.long_term_memory.recall_context(event.text, user_id)
+            except Exception:
+                logger.warning("长期记忆召回失败 user=%s", user_id, exc_info=True)
+        global_summary = "\n\n---\n\n".join(
+            part for part in (memory_context, retrieval.context) if part
+        )
 
         canary_enabled = await self.flag_client.get("canary.enabled", False)
         canary_pct = await self.flag_client.get("canary.traffic_pct", 10)
@@ -194,7 +231,7 @@ class MoAPipeline:
             trace_id=event.trace_id,
             session_id=event.session_id,
             user_raw_input=event.text,
-            global_summary=retrieval.context,
+            global_summary=global_summary,
             history=tuple(conversation_history),
             agent_local_slot={
                 "intent": intent,
@@ -216,6 +253,7 @@ class MoAPipeline:
             return PipelineResult(
                 trace_id=event.trace_id, state=state, intent=intent,
                 text="agent execution failed", status="error",
+                agent_name=agent_name,
             )
 
         llm_metrics = envelope.agent_local_slot.get("llm_metrics") or {}
@@ -283,6 +321,7 @@ class MoAPipeline:
                 status="pending_review", need_human_review=True, policy_hits=policy_ids,
                 llm_model=llm_model, cost_usd=cost_usd,
                 llm_latency_ms=llm_latency_ms, fallback_used=fallback_used,
+                agent_name=agent_name, guard_action=verdict.action.value,
             )
 
         if verdict.action == GuardianAction.DENY:
@@ -301,10 +340,21 @@ class MoAPipeline:
                 text=verdict.reason, status="blocked", policy_hits=policy_ids,
                 llm_model=llm_model, cost_usd=cost_usd,
                 llm_latency_ms=llm_latency_ms, fallback_used=fallback_used,
+                agent_name=agent_name, guard_action=verdict.action.value,
             )
 
         response = self.adapter.adapt(raw_output, channel=channel, target=target)
         self.memory.add(event.session_id, event.text, response.text)
+        # 记忆写入放在成功路径之后：被 guard 拦截或需要审批的输出不入长期记忆。
+        if self.long_term_memory is not None and user_id:
+            try:
+                applied = await self.long_term_memory.apply_ops(
+                    user_id, memory_ops, session_id=event.session_id
+                )
+                if applied:
+                    logger.info("长期记忆更新 user=%s ops=%s", user_id, applied)
+            except Exception:
+                logger.warning("长期记忆写入失败 user=%s", user_id, exc_info=True)
         if request is not None:
             await log_request(
                 request, 200, (time.monotonic() - start) * 1000,
@@ -322,4 +372,5 @@ class MoAPipeline:
             fallback=fallback, policy_hits=policy_ids,
             llm_model=llm_model, cost_usd=cost_usd,
             llm_latency_ms=llm_latency_ms, fallback_used=fallback_used,
+            agent_name=agent_name, guard_action=verdict.action.value,
         )

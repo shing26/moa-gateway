@@ -85,6 +85,7 @@ async def webhook(channel: str, request: Request) -> JSONResponse:
             session_id=platform_event.session_id,
             text=platform_event.payload.get("text", ""),
             context={"source": "webhook", "channel": channel},
+            user_id=platform_event.user_id,
         )
 
         result = await pipeline.run(
