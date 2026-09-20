@@ -260,6 +260,9 @@ async def test_graph_records_cost_after_execute(monkeypatch):
     class _Self:
         _budget_guard = guard
         _memory = SimpleNamespace(get_history=lambda sid: [])
+        # 真实 orchestrator 必有 _settings（上下文预算从这里读）；stub 给空对象
+        # 即预算全 0（禁用），与既有断言互不影响。
+        _settings = SimpleNamespace()
 
     async def fake_execute(env):
         env.agent_local_slot["llm_metrics"] = {"cost_usd": 0.3}

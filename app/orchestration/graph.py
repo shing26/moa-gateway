@@ -80,6 +80,7 @@ from langgraph.types import Command, interrupt
 import app.agents.loader  # noqa: F401  (import for agent registration side effects)
 from app.agents.contract import AgentEnvelope, get_agent
 from app.agents.intent_map import resolve_agent_key
+from app.context_budget import compact_history, estimate_tokens, fit_text
 from app.engine import HitlRequest
 from app.guard.guard_service import GuardianAction, GuardVerdict
 from app.guard.rbac import Role
@@ -343,12 +344,26 @@ class LangGraphOrchestrator:
             }
 
         history = self._memory.get_history(state["session_id"])
+        # 上下文预算：与 MoAPipeline 同一套 helper 与优先级（历史裁剪 + 旧对话
+        # 省略摘要 + 摘要截断），保证两条引擎送给 agent 的上下文等价。
+        budget = compact_history(history, getattr(self._settings, "context_history_budget", 0) or 0)
+        summary = state.get("retrieved_context", "")
+        if budget.elision:
+            summary = f"{summary}\n\n---\n\n{budget.elision}" if summary else budget.elision
+        summary, summary_truncated = fit_text(
+            summary, getattr(self._settings, "context_summary_budget", 0) or 0
+        )
+        logger.info(
+            "context budget (langgraph): history %d→%d dropped=%d elided=%s summary_tokens≈%d truncated=%s",
+            len(history), budget.kept_messages, budget.dropped_messages,
+            budget.elided, estimate_tokens(summary), summary_truncated,
+        )
         envelope = AgentEnvelope(
             trace_id=state["trace_id"],
             session_id=state["session_id"],
             user_raw_input=state["text"],
-            global_summary=state.get("retrieved_context", ""),
-            history=tuple(history),
+            global_summary=summary,
+            history=tuple(budget.history),
             agent_local_slot={
                 "intent": state.get("intent", ""),
                 "resource": state.get("intent", ""),

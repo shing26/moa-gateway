@@ -12,6 +12,7 @@ import app.agents.loader
 from app.channels.feishu_cards import ApprovalCard
 from app.command_mode import MODES, parse_command
 from app.config import settings
+from app.context_budget import compact_history, estimate_tokens, fit_text
 from app.engine import HitlRequest
 from app.fsm.state_machine import Event as FsmEvent
 from app.guard.guard_service import GuardianAction, GuardVerdict
@@ -234,12 +235,30 @@ class MoAPipeline:
         )
 
         conversation_history = self.memory.get_history(event.session_id)
+
+        # 上下文预算（上下文工程）：历史按预算从最新往回保留，被裁掉的旧对话压成
+        # 一条省略摘要并入 global_summary，整体再按 summary 预算截断——被裁的旧
+        # 对话不至于整段失忆，长会话也不会把模型上下文挤爆。
+        budget = compact_history(conversation_history, settings.context_history_budget)
+        if budget.elision:
+            global_summary = (
+                f"{global_summary}\n\n---\n\n{budget.elision}" if global_summary else budget.elision
+            )
+        global_summary, summary_truncated = fit_text(
+            global_summary, settings.context_summary_budget
+        )
+        logger.info(
+            "context budget: history %d→%d dropped=%d elided=%s summary_tokens≈%d truncated=%s",
+            len(conversation_history), budget.kept_messages, budget.dropped_messages,
+            budget.elided, estimate_tokens(global_summary), summary_truncated,
+        )
+
         envelope = AgentEnvelope(
             trace_id=event.trace_id,
             session_id=event.session_id,
             user_raw_input=event.text,
             global_summary=global_summary,
-            history=tuple(conversation_history),
+            history=tuple(budget.history),
             agent_local_slot={
                 "intent": intent,
                 "resource": intent,

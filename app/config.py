@@ -167,6 +167,16 @@ class Settings:
             os.getenv("BUDGET_SESSION_LIMIT_USD"), 0.0, name="BUDGET_SESSION_LIMIT_USD"
         )
 
+        # ── 上下文预算（上下文工程：裁剪与压缩）───────────────────────────
+        # token 估算口径见 app/context_budget.py（CJK 按字计）。0 = 禁用该项预算，
+        # 保持既有行为；本机 1024 上下文的演示模型建议两个都设 384。
+        self.context_history_budget: int = _parse_int(
+            os.getenv("CONTEXT_HISTORY_BUDGET"), 1024, name="CONTEXT_HISTORY_BUDGET"
+        )
+        self.context_summary_budget: int = _parse_int(
+            os.getenv("CONTEXT_SUMMARY_BUDGET"), 1024, name="CONTEXT_SUMMARY_BUDGET"
+        )
+
         self.validate()
 
     def validate(self) -> None:
@@ -211,6 +221,12 @@ class Settings:
             raise ValueError(
                 f"BUDGET_SESSION_LIMIT_USD 不能为负（0 表示只核算不拦截），得到 {self.budget_session_limit_usd}"
             )
+        for name, value in (
+            ("CONTEXT_HISTORY_BUDGET", self.context_history_budget),
+            ("CONTEXT_SUMMARY_BUDGET", self.context_summary_budget),
+        ):
+            if value < 0:
+                raise ValueError(f"{name} 不能为负（0 表示禁用该预算），得到 {value}")
 
     def to_redis_config(self) -> dict[str, Any]:
         return {
