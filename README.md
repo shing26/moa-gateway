@@ -1,6 +1,8 @@
 # Agent Gateway
 
-企业级 Agent 网关：智能路由省钱 + 安全守卫/HITL + 评估体系，附 GitHub PR 审查垂直应用。
+**LLM 治理层**：把不受控的模型输出收进可审批、可审计、可回归的闭环——意图路由省成本、策略守卫 + 真人 HITL 刹车、评测门禁防退化，附 GitHub PR 审查垂直应用。
+
+> **定位说明（重要）**：这个项目**不是**一个"什么都会的 agent"，而是一层治理框架。它做得最扎实的地方与模型聪不聪明无关：拦截、审批、留痕、回归。模型是它治下的对象，可以随便换（本机演示用小模型，生产接强 API 都行），闸门不动。能力清单（多 Provider、双引擎、长期记忆、任务 Agent）是第二层证据，不是卖点本身。见 [`delivery/定位与减法清单.md`](delivery/定位与减法清单.md)。
 
 项目基于 FastAPI 自研状态机编排，默认运行时不依赖 LangChain/LangGraph；LLM 调用层使用 LiteLLM 支持多 Provider、fallback 与成本统计。另提供可选的 LangGraph 第二引擎（`ENGINE=langgraph`）用于框架等价性验证，默认关闭。
 
@@ -135,6 +137,27 @@ ollama pull nomic-embed-text:latest
 Compose 默认将 Redis 映射到 `6380`、pgvector 映射到 `5433`、网关映射到 `8081`，
 避免与宿主机已有服务抢占默认端口。`VECTOR_DB_EMBEDDING_DIM` 与
 `CODE_REVIEW_EMBEDDING_DIM` 默认按本地 `nomic-embed-text` 的 768 维配置。
+
+### 一键起停（演示前必跑）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1            # 拉起容器 + Ollama + 网关并等 healthz
+powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1 -Action status
+powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1 -Action stop
+```
+
+按顺序探测并拉起三样依赖：容器（redis 6380 / postgres 5433）→ Ollama（11434）→ 网关（8081），
+最后等 `/healthz` 通过。**为什么需要它**：2026-09-20 出过一次事故——容器停了，网关启动阻塞/退出，
+飞书卡片回调打到隧道后 origin 无响应，客户端报 `200671 回调地址不可达`。演示前跑一次即可避免。
+
+开机自启（可选，管理员执行一次）：
+
+```powershell
+schtasks /Create /TN "moa-gateway stack" /SC ONLOGON /RL LIMITED ^
+  /TR "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File <仓库路径>\scripts\start_stack.ps1"
+```
+
+`stop` 只停网关与容器，不停 Ollama（它常被本机其他工具共用）。
 
 ## 测试与质量
 
