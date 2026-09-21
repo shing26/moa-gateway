@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-09-21T20:07:39.174029+00:00",
+  "audit_entries": 2178,
+  "requests": 618,
+  "excluded_synthetic_traces": 0,
+  "guard_interceptions": 23,
+  "matched_decisions": 4,
+  "unmatched_decisions": 89,
+  "undecided_interceptions": 19,
+  "approve_count": 2,
+  "reject_count": 2,
+  "approve_rate": 0.5,
+  "human_intervention_rate": 0.0065,
+  "latencies_ms": [
+    19.5,
+    14.8,
+    10.9,
+    9.9
+  ],
+  "note": "seeded 2026-09-21 by locally simulated card callbacks (same route/handler as real clicks); real Feishu clicks append from here"
+}

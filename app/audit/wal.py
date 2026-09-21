@@ -102,6 +102,9 @@ class AsyncWal:
                 "eval_issues": list(entry.eval_issues),
                 "guard_action": entry.guard_action,
                 "guard_reason": entry.guard_reason,
+                # 命中策略清单：人工审批回流评测需要知道"哪条策略触发了这次拦截"
+                "policy_hits": list(entry.policy_hits or ()),
+                "hitl_decision": entry.hitl_decision,
                 "input_preview": entry.extra.get("input_preview", ""),
                 "output_preview": entry.extra.get("output_preview", ""),
                 "status": entry.extra.get("status"),

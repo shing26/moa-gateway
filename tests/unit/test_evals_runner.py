@@ -146,6 +146,10 @@ async def test_run_all_offline(tmp_path: Path) -> None:
         '{"id":"e1","input":"hi","expected":{"status":"ok"},"judge_criteria":"x"}\n',
         encoding="utf-8",
     )
+    (tmp_path / "tool_selection.jsonl").write_text(
+        '{"id":"t1","input":"现在几点","expected_tool":"current_time"}\n',
+        encoding="utf-8",
+    )
 
     report = await run_all(offline=True, datasets_dir=tmp_path)
 
@@ -153,3 +157,5 @@ async def test_run_all_offline(tmp_path: Path) -> None:
     assert report["guard"]["deny_recall"] == 1.0
     assert report["e2e"]["skipped"] == 1
     assert report["e2e"]["offline_smoke"] == 1
+    assert report["tool_selection"]["accuracy"] == 1.0
+    assert report["agent_metrics"]["tool_selection_accuracy"] == 1.0

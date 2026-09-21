@@ -1,0 +1,17 @@
+{"input": "搜索: redis 连接配置", "expected_tool": "knowledge_search", "note": "关键词触发检索"}
+{"input": "查一下部署文档里的端口", "expected_tool": "knowledge_search", "note": "查一下 命中检索规则"}
+{"input": "检索 向量库的用法", "expected_tool": "knowledge_search", "note": "检索 命中检索规则"}
+{"input": "知识库里的报价策略是什么", "expected_tool": "knowledge_search", "note": "含 知识库 时优先命中检索规则而非文档列表"}
+{"input": "计算 3*7+2", "expected_tool": "calculator", "note": "计算 命中计算器"}
+{"input": "帮我算 12*12", "expected_tool": "calculator", "note": "帮我算 命中计算器"}
+{"input": "求值 8+9*2", "expected_tool": "calculator", "note": "求值 命中计算器"}
+{"input": "现在几点", "expected_tool": "current_time", "note": "时间类无参数工具"}
+{"input": "今天日期是多少", "expected_tool": "current_time", "note": "今天/日期 命中时间工具"}
+{"input": "记录一下：明天要演示", "expected_tool": "add_note", "note": "记录一下 命中笔记写入"}
+{"input": "备忘：给客户回电话", "expected_tool": "add_note", "note": "备忘 命中笔记写入"}
+{"input": "查看笔记", "expected_tool": "get_notes", "note": "查看笔记 命中笔记读取"}
+{"input": "我的笔记列表", "expected_tool": "get_notes", "note": "笔记列表 命中笔记读取"}
+{"input": "列出文档", "expected_tool": "list_documents", "note": "列出文档 命中文档列表"}
+{"input": "文档列表", "expected_tool": "list_documents", "note": "文档列表 命中文档列表"}
+{"input": "你好", "expected_tool": "", "note": "无工具可匹配：应走直接回复而非乱调工具"}
+{"input": "谢谢", "expected_tool": "", "note": "无工具可匹配：应走直接回复而非乱调工具"}
