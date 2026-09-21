@@ -22,7 +22,7 @@ import time
 from typing import Any
 
 from app.fsm.state_machine import Event as FsmEvent
-from app.middleware.request_logger import log_request
+from app.middleware.request_logger import bind_trace, log_request
 from app.models.events import MoAEvent
 from app.pipeline import PipelineResult
 
@@ -74,6 +74,8 @@ class EngineDispatcher:
         target: str,
         request: Any | None = None,
     ) -> PipelineResult:
+        # 审计 trace 贯通（图路径的 log_request 由本类统一写，绑定后同 trace）
+        bind_trace(event.trace_id)
         if self.needs_fsm(event):
             return await self._fsm.run(
                 event, channel=channel, target=target, request=request

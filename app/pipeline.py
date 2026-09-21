@@ -19,7 +19,7 @@ from app.guard.guard_service import GuardianAction, GuardVerdict
 from app.guard.rbac import Role
 from app.models.errors import ErrorCode
 from app.long_term_memory import extract_memory_ops
-from app.middleware.request_logger import log_request
+from app.middleware.request_logger import bind_trace, log_request
 from app.models.events import MoAEvent
 from app.prompt_registry.canary import CanaryConfig, select_canary_version
 
@@ -113,6 +113,8 @@ class MoAPipeline:
         request: Any | None = None,
     ) -> PipelineResult:
         start = time.monotonic()
+        # 审计 trace 贯通：本请求内所有审计条目共享 event.trace_id
+        bind_trace(event.trace_id)
 
         session_state = await self.engine.handle_event(event)
         state = session_state.context.state.value

@@ -16,7 +16,7 @@ from app.channels.feishu_event import parse_feishu_event
 from app.channels.feishu_signature import verify_verification_token
 from app.config import settings
 from app.deps import adapter, engine, pipeline
-from app.middleware.request_logger import log_request
+from app.middleware.request_logger import bind_trace, log_request
 from app.models.errors import ErrorCode
 from app.fsm.state_machine import Event as FsmEvent
 from app.models.events import MoAEvent, new_trace_id
@@ -68,6 +68,9 @@ async def _process_hitl_card(action: str, trace_id: str, session_id: str) -> Non
     输出 → 审计留痕（guard_action=hitl_approve / hitl_reject）。"""
     hitl_id = trace_id or session_id
     started = time.time()
+    # 后台任务在独立上下文中运行：显式绑定，保证决策审计与触发审批的
+    # 请求共享同一 trace（人工决策因此可按 trace 回流评测）
+    bind_trace(trace_id or session_id)
     duration_ms = 0.0
     outcome = "hitl_not_found"
     try:

@@ -8,7 +8,7 @@ from app.channels.feishu_cards import parse_card_callback
 from app.deps import adapter, engine, logger, pipeline, tracer
 from app.fsm.state_machine import Event as FsmEvent
 from app.limit_providers.rate_limiter import rate_limiter
-from app.middleware.request_logger import log_request
+from app.middleware.request_logger import bind_trace, log_request
 from app.models.errors import ErrorCode
 from app.models.events import MoAEvent, PlatformEvent, new_trace_id
 
@@ -23,6 +23,8 @@ async def webhook_callback(request: Request) -> JSONResponse:
         return JSONResponse({"error": ErrorCode.INVALID_CALLBACK_PAYLOAD.value}, status_code=400)
     session_id, trace_id, action = parsed
     logger.info("card callback session=%s trace=%s action=%s", session_id, trace_id, action)
+    # 卡片回调的审计与最初触发审批的请求共享同一 trace，决策可回流可复盘
+    bind_trace(trace_id or session_id)
     hitl_id = trace_id or session_id
     hitl = engine.session_store.get_hitl(hitl_id)
     if hitl is None:

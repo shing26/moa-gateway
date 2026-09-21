@@ -3,6 +3,7 @@
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import Any
 
 from app.audit.models import AuditEntry
@@ -12,6 +13,17 @@ from app.models.events import new_trace_id
 logger = logging.getLogger("moa.middleware.request_logger")
 
 _wal = AsyncWal(_config=LogConfig(directory="logs", retention_days=90))
+
+# 请求作用域的审计 trace：一次请求内的所有审计条目（含双引擎与后台任务）
+# 共享同一个 trace，否则 review 与后续 hitl_approve/reject 分属两条互不
+# 关联的记录，人工决策无法回流、也无法按 trace 复盘（此前每条都用
+# new_trace_id()，审计虽在但连不起来）。
+_current_trace: ContextVar[str] = ContextVar("moa_audit_trace", default="")
+
+
+def bind_trace(trace_id: str) -> None:
+    """把当前请求（或后台任务）的 trace 绑定到审计上下文。"""
+    _current_trace.set(trace_id or "")
 
 
 async def log_request(
@@ -35,7 +47,7 @@ async def log_request(
     input_preview = input_text.strip()[:500]
     output_preview = output_text.strip()[:2000]
     entry = AuditEntry(
-        trace_id=new_trace_id(),
+        trace_id=_current_trace.get() or new_trace_id(),
         session_id=session_id or "unknown",
         agent_name=agent_name,
         agent_output=output_preview,
