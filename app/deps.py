@@ -17,6 +17,7 @@ from app.vectordb import build_vector_client
 from app.vectordb.retriever import ContextRetriever
 from app.audit.es_writer import EsWriter, build_es_writer
 from app.budget.guard import BudgetGuard
+from app.context_budget import ContextBudget
 from app.channels.feishu import FeishuChannelAdapter, FeishuConfig
 from app.channels.feishu_auth import FeishuAuthConfig, FeishuTokenProvider
 from app.channels.feishu_cards import FeishuCardSender
@@ -59,6 +60,11 @@ obsidian_sync = ObsidianVaultSync.from_env(knowledge_base=knowledge_base)
 command_mode = CommandMode()
 # M6：per-session 成本预算；limit<=0 时只核算不拦截，请求路径零变化。
 budget_guard = BudgetGuard(settings.budget_session_limit_usd)
+# 上下文预算策略：双引擎共用同一实例（0 = 不裁剪，保持既有行为）
+context_budget = ContextBudget(
+    history_tokens=settings.context_history_budget,
+    summary_tokens=settings.context_summary_budget,
+)
 adapter = ResponseAdapter()
 evaluator = RuleEvaluator()
 # permission_guard = FailClosedPermissionGuard()  # removed: unused legacy guard
@@ -120,6 +126,8 @@ fsm_pipeline = MoAPipeline(
     command_mode=command_mode,
     card_sender=None,
     long_term_memory=long_term_memory,
+    budget_guard=budget_guard,
+    context_budget=context_budget,
 )
 
 

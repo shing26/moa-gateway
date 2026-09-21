@@ -363,6 +363,8 @@ MODELLED_COLLABORATORS = {
     "long_term_memory",
     # M6：execute 起点预检 + 执行后累计，与 FSM 管道共用同一 guard 实例
     "budget_guard",
+    # 上下文工程：两引擎共用组合根构造的同一 ContextBudget 实例
+    "context_budget",
 }
 
 # Deliberately not modelled. See the module docstring of app/orchestration/graph.py.

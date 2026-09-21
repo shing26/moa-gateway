@@ -80,11 +80,12 @@ from langgraph.types import Command, interrupt
 import app.agents.loader  # noqa: F401  (import for agent registration side effects)
 from app.agents.contract import AgentEnvelope, get_agent
 from app.agents.intent_map import resolve_agent_key
-from app.context_budget import compact_history, estimate_tokens, fit_text
+from app.context_budget import apply_context_budget
 from app.engine import HitlRequest
 from app.guard.guard_service import GuardianAction, GuardVerdict
 from app.guard.rbac import Role
 from app.long_term_memory import extract_memory_ops
+from app.middleware.request_logger import bind_context_stats
 from app.models.errors import ErrorCode
 from app.models.events import MoAEvent
 from app.fsm.state_machine import Event as FsmEvent
@@ -156,6 +157,7 @@ class LangGraphOrchestrator:
         long_term_memory: Any = None,
         settings_obj: Any = None,
         budget_guard: Any = None,
+        context_budget: Any = None,
         checkpointer: Any = None,
     ) -> None:
         self._router = router
@@ -173,6 +175,8 @@ class LangGraphOrchestrator:
         self._engine = engine
         self._long_term_memory = long_term_memory
         self._settings = settings_obj
+        # 上下文预算：与 FSM 管道共用 deps 构造的同一实例（None = 不裁剪）
+        self._context_budget = context_budget
         # M6：与 FSM 管道共用同一个预算 guard 实例（由 deps 注入）
         self._budget_guard = budget_guard
         self._checkpointer = checkpointer or InMemorySaver()
@@ -199,6 +203,7 @@ class LangGraphOrchestrator:
             long_term_memory=deps.long_term_memory,
             settings_obj=deps.settings,
             budget_guard=getattr(deps, "budget_guard", None),
+            context_budget=getattr(deps, "context_budget", None),
             **kwargs,
         )
 
@@ -344,26 +349,19 @@ class LangGraphOrchestrator:
             }
 
         history = self._memory.get_history(state["session_id"])
-        # 上下文预算：与 MoAPipeline 同一套 helper 与优先级（历史裁剪 + 旧对话
-        # 省略摘要 + 摘要截断），保证两条引擎送给 agent 的上下文等价。
-        budget = compact_history(history, getattr(self._settings, "context_history_budget", 0) or 0)
-        summary = state.get("retrieved_context", "")
-        if budget.elision:
-            summary = f"{summary}\n\n---\n\n{budget.elision}" if summary else budget.elision
-        summary, summary_truncated = fit_text(
-            summary, getattr(self._settings, "context_summary_budget", 0) or 0
+        # 与 MoAPipeline 共用 apply_context_budget 与同一个 ContextBudget 实例
+        # （组合根注入），两条引擎送给 agent 的上下文因此不会漂移。
+        budgeted = apply_context_budget(
+            history, state.get("retrieved_context", ""), self._context_budget
         )
-        logger.info(
-            "context budget (langgraph): history %d→%d dropped=%d elided=%s summary_tokens≈%d truncated=%s",
-            len(history), budget.kept_messages, budget.dropped_messages,
-            budget.elided, estimate_tokens(summary), summary_truncated,
-        )
+        bind_context_stats(budgeted.stats)
+        logger.info("context budget (langgraph): %s", budgeted.stats)
         envelope = AgentEnvelope(
             trace_id=state["trace_id"],
             session_id=state["session_id"],
             user_raw_input=state["text"],
-            global_summary=summary,
-            history=tuple(budget.history),
+            global_summary=budgeted.summary,
+            history=tuple(budgeted.history),
             agent_local_slot={
                 "intent": state.get("intent", ""),
                 "resource": state.get("intent", ""),

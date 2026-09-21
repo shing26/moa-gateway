@@ -209,6 +209,11 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   锁目前只在单测中被调用，**未接入请求路径**，多实例部署前需要先接线。
 - 预算拦截（`BUDGET_SESSION_LIMIT_USD`）的累计器在**进程内**：单实例语义正确，多实例部署需要把累计器外部化
   （如 Redis INCR）。`limit<=0` 时只核算不拦截，请求路径零变化。
+- 上下文预算（`CONTEXT_HISTORY_BUDGET` / `CONTEXT_SUMMARY_BUDGET`，启发式估算 CJK 按字）**只裁剪随会话增长的两块
+  ——历史与摘要**：系统提示与工具描述是固定开销、不计入，因此它不承诺"总上下文绝不溢出"。默认 1024 对该窗口以下
+  的模型（如本机演示模型的 1024）仍应下调到 ~384。被裁掉的旧对话会压成一条省略摘要，不会整段失忆；
+  0 表示禁用（与引入前行为一致）。每次请求的裁剪决策（kept/dropped/elided/tokens）写入审计的
+  `context_budget` 字段，可按 trace 查询。
 - 错误码语义（`app/models/errors.py`）在 webhook / chat / dashboard 三个路由统一为 `{"error": code, "message"}`；
   **飞书事件回调例外**——平台契约要求一律 HTTP 200，错误只体现在回复文案与日志中。
 - `app/main.py` 使用 FastAPI lifespan 管理启动/关闭钩子（`on_event` 已迁移）。

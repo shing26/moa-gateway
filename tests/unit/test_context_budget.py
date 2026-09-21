@@ -7,7 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 import app.pipeline as pipeline_module
-from app.context_budget import compact_history, estimate_tokens, fit_text
+from app.context_budget import (
+    ContextBudget,
+    apply_context_budget,
+    compact_history,
+    estimate_tokens,
+    fit_text,
+)
 from app.engine import Engine
 from app.fsm.state_machine import Event as FsmEvent
 from app.guard.rbac import GuardianAction, GuardVerdict
@@ -46,7 +52,8 @@ def test_fit_text_truncates_and_marks():
     fitted, truncated = fit_text(text, 100)
     assert truncated is True
     assert "已截断" in fitted
-    assert estimate_tokens(fitted) <= 100 + 20  # 标记本身占一点余量
+    # 标记本身也占预算：结果必须真的落在预算内（评审发现的 off-by-N）
+    assert estimate_tokens(fitted) <= 100
 
 
 # ── 历史裁剪与省略摘要 ──────────────────────────────────────────────────────
@@ -84,9 +91,49 @@ def test_compact_history_keeps_newest_and_elides_old():
 
 def test_compact_history_empty_and_tiny_budget():
     assert compact_history([], 100).history == []
-    res = compact_history(_history(3, chars=200), 1)  # 预算小到装不下任何一轮
-    assert res.history == []
-    assert res.dropped_messages == 6
+    # 预算小到装不下任何完整一轮：退化保底——保留最新一条，而不是全裁空；
+    # 预算连截断标记都放不下时留空内容，宁可不带上下文也不超预算。
+    res = compact_history(_history(3, chars=200), 1)
+    assert len(res.history) == 1
+    assert res.dropped_messages >= 1
+    assert str(res.history[0]["content"]) == ""
+
+
+def test_compact_history_never_starts_with_orphan_assistant():
+    hist = [
+        {"role": "user", "content": "甲" * 300},
+        {"role": "assistant", "content": "乙" * 300},
+        {"role": "user", "content": "丙" * 50},
+        {"role": "assistant", "content": "丁" * 50},
+    ]
+    res = compact_history(hist, 120)
+    assert res.history, "至少要保留最新一轮"
+    # 首条不能是没有对应提问的孤儿回复
+    assert res.history[0]["role"] == "user"
+
+
+# ── 共享入口 apply_context_budget ───────────────────────────────────────────
+
+
+def test_apply_context_budget_disabled_is_passthrough():
+    hist = _history(3)
+    out = apply_context_budget(hist, "摘要", None)
+    assert out.history == hist
+    assert out.summary == "摘要"
+    assert out.stats == {"enabled": False}
+    out2 = apply_context_budget(hist, "摘要", ContextBudget())
+    assert out2.history == hist and out2.stats["enabled"] is False
+
+
+def test_apply_context_budget_merges_elision_and_reports_stats():
+    hist = _history(20, chars=200)
+    out = apply_context_budget(hist, "检索上下文", ContextBudget(history_tokens=400, summary_tokens=600))
+    assert out.stats["enabled"] is True
+    assert out.stats["history_kept"] < out.stats["history_in"]
+    assert out.stats["elided"] is True
+    assert "已省略" in out.summary
+    assert "检索上下文" in out.summary
+    assert out.stats["budget"] == {"history": 400, "summary": 600}
 
 
 # ── pipeline 集成：长历史被裁剪且摘要并入上下文 ────────────────────────────
@@ -174,6 +221,7 @@ async def test_pipeline_trims_history_and_merges_elision(monkeypatch):
         flag_client=FakeFlagClient(),
         guard_service=FakeGuard(),
         command_mode=FakeCommandMode(),
+        context_budget=ContextBudget(history_tokens=1024, summary_tokens=1024),
     )
     event = MoAEvent(
         trace_id=new_trace_id(),

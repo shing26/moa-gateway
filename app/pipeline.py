@@ -12,14 +12,14 @@ import app.agents.loader
 from app.channels.feishu_cards import ApprovalCard
 from app.command_mode import MODES, parse_command
 from app.config import settings
-from app.context_budget import compact_history, estimate_tokens, fit_text
+from app.context_budget import apply_context_budget
 from app.engine import HitlRequest
 from app.fsm.state_machine import Event as FsmEvent
 from app.guard.guard_service import GuardianAction, GuardVerdict
 from app.guard.rbac import Role
 from app.models.errors import ErrorCode
 from app.long_term_memory import extract_memory_ops
-from app.middleware.request_logger import bind_trace, log_request
+from app.middleware.request_logger import bind_context_stats, bind_trace, log_request
 from app.models.events import MoAEvent
 from app.prompt_registry.canary import CanaryConfig, select_canary_version
 
@@ -75,6 +75,7 @@ class MoAPipeline:
         card_sender: Any = None,
         long_term_memory: Any = None,
         budget_guard: Any = None,
+        context_budget: Any = None,
     ) -> None:
         self.engine = engine
         self.router = router
@@ -91,6 +92,8 @@ class MoAPipeline:
         self.long_term_memory = long_term_memory
         # M6：per-session 预算 guard；None 或 limit<=0 时零行为差异。
         self.budget_guard = budget_guard
+        # 上下文预算：组合根构造、双引擎共用同一实例；None = 不裁剪（旧行为）。
+        self.context_budget = context_budget
 
     def set_card_sender(self, sender: Any) -> None:
         self.card_sender = sender
@@ -238,29 +241,19 @@ class MoAPipeline:
 
         conversation_history = self.memory.get_history(event.session_id)
 
-        # 上下文预算（上下文工程）：历史按预算从最新往回保留，被裁掉的旧对话压成
-        # 一条省略摘要并入 global_summary，整体再按 summary 预算截断——被裁的旧
-        # 对话不至于整段失忆，长会话也不会把模型上下文挤爆。
-        budget = compact_history(conversation_history, settings.context_history_budget)
-        if budget.elision:
-            global_summary = (
-                f"{global_summary}\n\n---\n\n{budget.elision}" if global_summary else budget.elision
-            )
-        global_summary, summary_truncated = fit_text(
-            global_summary, settings.context_summary_budget
-        )
-        logger.info(
-            "context budget: history %d→%d dropped=%d elided=%s summary_tokens≈%d truncated=%s",
-            len(conversation_history), budget.kept_messages, budget.dropped_messages,
-            budget.elided, estimate_tokens(global_summary), summary_truncated,
-        )
+        # 上下文预算（上下文工程）：双引擎共用 apply_context_budget，保证送进
+        # agent 的历史与摘要完全一致；决策统计绑定到审计上下文，可按 trace 查询。
+        budgeted = apply_context_budget(conversation_history, global_summary, self.context_budget)
+        conversation_history, global_summary = budgeted.history, budgeted.summary
+        bind_context_stats(budgeted.stats)
+        logger.info("context budget: %s", budgeted.stats)
 
         envelope = AgentEnvelope(
             trace_id=event.trace_id,
             session_id=event.session_id,
             user_raw_input=event.text,
             global_summary=global_summary,
-            history=tuple(budget.history),
+            history=tuple(conversation_history),
             agent_local_slot={
                 "intent": intent,
                 "resource": intent,

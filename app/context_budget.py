@@ -27,6 +27,9 @@ from typing import Any
 _MESSAGE_OVERHEAD_TOKENS = 8
 # 省略摘要中每条旧消息保留的字符数
 _ELISION_SNIPPET_CHARS = 40
+# 截断标记（其自身也占预算）
+_TRUNCATION_MARKER = "\n…（上下文超出预算已截断）"
+_TRUNCATION_MARKER_TOKENS = 14  # 见 tests：estimate_tokens(_TRUNCATION_MARKER)
 
 
 def _is_cjk(ch: str) -> bool:
@@ -57,12 +60,13 @@ def fit_text(text: str, budget_tokens: int) -> tuple[str, bool]:
         return text, False
     if estimate_tokens(text) <= budget_tokens:
         return text, False
-    # 逐字符二分不划算：按估算比例先粗切，再回退到预算内
-    ratio = budget_tokens / max(1, estimate_tokens(text))
+    # 截断标记自身也占预算：先扣掉，保证返回值真的在预算内
+    target = max(1, budget_tokens - estimate_tokens(_TRUNCATION_MARKER))
+    ratio = target / max(1, estimate_tokens(text))
     cut = max(1, int(len(text) * ratio))
-    while cut > 0 and estimate_tokens(text[:cut]) > budget_tokens:
+    while cut > 0 and estimate_tokens(text[:cut]) > target:
         cut = int(cut * 0.9) if cut > 10 else cut - 1
-    return text[:cut] + "\n…（上下文超出预算已截断）", True
+    return text[:cut] + _TRUNCATION_MARKER, True
 
 
 @dataclass
@@ -104,6 +108,28 @@ def compact_history(
         used += cost
     kept.reverse()
 
+    # 裁剪后若以非 user 消息开头，说明它对应的提问已被裁掉：孤儿回复会让模型
+    # 误读上下文，直接去掉。
+    while kept and kept[0].get("role") != "user":
+        kept = kept[1:]
+
+    # 退化保底：若一条完整轮次都放不下（或清完孤儿后为空），保留最新一条——
+    # 能装下就原样保留，装不下则截断。丢掉"用户刚说了什么"比留下一条截断的
+    # 上下文更糟。
+    if not kept:
+        newest = dict(history[-1])
+        content = str(newest.get("content", ""))
+        room = budget_tokens - _MESSAGE_OVERHEAD_TOKENS
+        if estimate_tokens(content) > room:
+            if room > _TRUNCATION_MARKER_TOKENS:
+                content, _ = fit_text(content, room)
+            else:
+                # 连截断标记都放不下：宁可不带内容，也不超预算
+                content = ""
+            newest["content"] = content
+        kept = [newest]
+        used = estimate_tokens(str(newest["content"])) + _MESSAGE_OVERHEAD_TOKENS
+
     dropped = history[: len(history) - len(kept)]
     elision = ""
     if dropped:
@@ -130,8 +156,77 @@ def compact_history(
     )
 
 
+@dataclass(frozen=True)
+class ContextBudget:
+    """一次部署的上下文预算策略：组合根构造，双引擎共用同一实例。
+
+    0 表示该项禁用（保持既有行为）。**预算只覆盖"历史 + 摘要"两块**：
+    系统提示与工具描述是固定开销、不计入，因此本策略不承诺"总上下文绝不
+    溢出"，只保证随会话增长的两块不会无限膨胀。1024 窗口的模型建议两项都设
+    384（见 README 已知边界）。
+    """
+
+    history_tokens: int = 0
+    summary_tokens: int = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self.history_tokens > 0 or self.summary_tokens > 0
+
+
+@dataclass(frozen=True)
+class ContextBudgetResult:
+    history: list[dict[str, Any]]
+    summary: str
+    stats: dict[str, Any]
+
+
+def apply_context_budget(
+    history: list[dict[str, Any]] | None,
+    summary: str,
+    budget: "ContextBudget | None",
+) -> ContextBudgetResult:
+    """双引擎唯一的上下文预算入口：历史裁剪 → 省略摘要合并 → 摘要截断。
+
+    两条引擎（MoAPipeline / LangGraphOrchestrator）都只调用本函数，避免各自
+    实现导致送进 agent 的上下文漂移（ADR-008 的等价性要求）。budget 为
+    None 或未启用时原样返回，行为与引入本模块前完全一致。
+    """
+    history = list(history or [])
+    summary = summary or ""
+    if budget is None or not budget.enabled:
+        return ContextBudgetResult(
+            history=history,
+            summary=summary,
+            stats={"enabled": False},
+        )
+
+    compaction = compact_history(history, budget.history_tokens)
+    merged = summary
+    if compaction.elision:
+        merged = f"{merged}\n\n---\n\n{compaction.elision}" if merged else compaction.elision
+    merged, truncated = fit_text(merged, budget.summary_tokens)
+    return ContextBudgetResult(
+        history=compaction.history,
+        summary=merged,
+        stats={
+            "enabled": True,
+            "history_in": len(history),
+            "history_kept": compaction.kept_messages,
+            "history_dropped": compaction.dropped_messages,
+            "elided": compaction.elided,
+            "summary_tokens": estimate_tokens(merged),
+            "summary_truncated": truncated,
+            "budget": {"history": budget.history_tokens, "summary": budget.summary_tokens},
+        },
+    )
+
+
 __all__ = [
+    "ContextBudget",
+    "ContextBudgetResult",
     "HistoryBudgetResult",
+    "apply_context_budget",
     "compact_history",
     "estimate_tokens",
     "fit_text",
