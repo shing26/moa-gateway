@@ -52,7 +52,17 @@ async def log_request(
     cost_usd: float = 0.0,
     llm_latency_ms: float = 0.0,
     fallback_used: str = "",
+    eval_score: float | None = None,
+    eval_issues: tuple[str, ...] = (),
 ) -> None:
+    """写一条审计。
+
+    ``eval_score`` / ``eval_issues`` 由调用方从 ``Evaluator.score()`` 的返回值透传。
+    **默认 None 不是 0.0**：``Evaluator`` 的语义是 1.0=干净、0.3=有问题、0.0=AST 危险，
+    而早退路径（控制指令、敏感挂起、路由前返回）根本没跑评测——那些条目应当留 None，
+    不能与"评测判定为危险"共用一个 0.0。此前本函数把 eval_score 写死 0.0、
+    eval_issues 从不写入，导致真实流量的这两个字段全是哑值（2026-09-22 修补）。
+    """
     input_preview = input_text.strip()[:500]
     output_preview = output_text.strip()[:2000]
     extra: dict[str, Any] = {
@@ -79,7 +89,8 @@ async def log_request(
         agent_name=agent_name,
         agent_output=output_preview,
         intent=intent or "unknown",
-        eval_score=0.0,
+        eval_score=eval_score,
+        eval_issues=eval_issues,
         guard_action=guard_action,
         policy_hits=policy_hits,
         violation=policy_hits[0] if policy_hits else "",

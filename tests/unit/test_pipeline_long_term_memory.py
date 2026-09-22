@@ -6,6 +6,7 @@ import pytest
 
 import app.pipeline as pipeline_module
 from app.engine import Engine
+from app.evaluator.evaluator import EvalResult
 from app.fsm.state_machine import Event as FsmEvent
 from app.guard.rbac import GuardianAction, GuardVerdict
 from app.long_term_memory import LongTermMemory
@@ -31,7 +32,8 @@ class FakeFlagClient:
 
 class FakeEvaluator:
     async def score(self, output_text, intent):
-        return SimpleNamespace(score=1.0, need_human_review=False)
+        # 同 test_pipeline：桩返回真实 EvalResult，避免少字段的漂移
+        return EvalResult(score=1.0, need_human_review=False)
 
 
 class FakeMemory:

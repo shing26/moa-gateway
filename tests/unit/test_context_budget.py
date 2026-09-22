@@ -15,6 +15,7 @@ from app.context_budget import (
     fit_text,
 )
 from app.engine import Engine
+from app.evaluator.evaluator import EvalResult
 from app.fsm.state_machine import Event as FsmEvent
 from app.guard.rbac import GuardianAction, GuardVerdict
 from app.models.events import MoAEvent, new_trace_id
@@ -153,7 +154,7 @@ class FakeFlagClient:
 
 class FakeEvaluator:
     async def score(self, output_text, intent):
-        return SimpleNamespace(score=1.0, need_human_review=False)
+        return EvalResult(score=1.0, need_human_review=False)
 
 
 class LongHistoryMemory:

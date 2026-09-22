@@ -94,6 +94,50 @@ class TestAsyncWal:
         assert '"cost_usd": 0.001' in line
         assert '"llm_latency_ms": 123.4' in line
 
+    @pytest.mark.asyncio
+    async def test_log_request_persists_eval_score_and_issues(self, monkeypatch, tmp_path):
+        """评测结果必须落盘，而不是像此前那样恒 0.0 / 恒空。"""
+        wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
+        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+
+        class FakeRequest:
+            method = "POST"
+            url = "http://test/webhook/feishu"
+
+        await log_request(
+            FakeRequest(), 200, 5.0, "s1", "general", "coding", "review", "改一下", "输出",
+            eval_score=0.3,
+            eval_issues=("contains_unfinished_marker",),
+        )
+        entries = await wal.replay_all()
+        assert entries[0].eval_score == 0.3
+        assert entries[0].eval_issues == ("contains_unfinished_marker",)
+
+        line = list(tmp_path.glob("audit-*.jsonl"))[0].read_text(encoding="utf-8")
+        assert '"eval_score": 0.3' in line
+        assert "contains_unfinished_marker" in line
+
+    @pytest.mark.asyncio
+    async def test_log_request_defaults_eval_score_to_none_not_zero(self, monkeypatch, tmp_path):
+        """没跑评测的条目必须留 None，不能与「评测判定为 AST 危险」共用一个 0.0。
+
+        0.0 在 Evaluator 的语义里是"有问题且危险"，而早退路径（控制指令 / 敏感挂起 /
+        路由前返回）根本没跑评测。两者都用 0.0 时，接线断开与真的危险在数据上分不开——
+        这正是 2026-09-21 那轮评估误判的成因。这条是那个歧义的回归守卫。
+        """
+        wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
+        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+
+        class FakeRequest:
+            method = "POST"
+            url = "http://test/webhook/feishu"
+
+        await log_request(FakeRequest(), 200, 5.0, "s1", "control", "control", "reset", "reset", "会话已重置")
+        entries = await wal.replay_all()
+        assert entries[0].eval_score is None
+        assert entries[0].eval_score != 0.0
+        assert entries[0].eval_issues == ()
+
 
 class TestVectorDBClient:
     @pytest.mark.asyncio

@@ -8,6 +8,7 @@ import pytest
 from app.deps import pipeline
 import app.pipeline as pipeline_module
 from app.engine import Engine, HitlRequest
+from app.evaluator.evaluator import EvalResult
 from app.fsm.state_machine import Event, State, next_state
 from app.main import app
 from app.vectordb.retriever import RetrievalResult
@@ -141,7 +142,7 @@ def test_webhook_execute_code_marker_triggers_review(monkeypatch) -> None:
         return False
 
     async def fake_score(*args, **kwargs):
-        return SimpleNamespace(score=1.0, need_human_review=False)
+        return EvalResult(score=1.0, need_human_review=False)
 
     async def fake_log(*args, **kwargs):
         pass

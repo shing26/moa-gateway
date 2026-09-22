@@ -6,6 +6,7 @@ import pytest
 
 import app.pipeline as pipeline_module
 from app.engine import Engine
+from app.evaluator.evaluator import EvalResult
 from app.fsm.state_machine import Event as FsmEvent
 from app.guard.guard_service import GuardService
 from app.guard.rbac import GuardianAction, GuardVerdict
@@ -26,11 +27,17 @@ class FakeFlagClient:
 
 
 class FakeEvaluator:
-    def __init__(self, need_human_review=False):
+    def __init__(self, need_human_review=False, score=1.0, issues=()):
         self.need_human_review = need_human_review
+        self._result = EvalResult(
+            score=score, need_human_review=need_human_review, issues=tuple(issues),
+        )
 
     async def score(self, output_text, intent):
-        return SimpleNamespace(score=1.0, need_human_review=self.need_human_review)
+        # 返回真实 EvalResult 而不是 SimpleNamespace 的部分形状：Evaluator 协议声明
+        # score() -> EvalResult，桩少一个字段就会在"链路真的用它"时才发现（2026-09-22
+        # 接 eval_score 到审计时，四个文件的桩因为缺 issues 当场红）。
+        return self._result
 
 
 class FakeMemory:
@@ -116,13 +123,14 @@ def make_pipeline(
     command_mode=None,
     card_sender=None,
     agent=None,
+    evaluator=None,
 ):
     return MoAPipeline(
         engine=engine or Engine(),
         router=router or FakeRouter(),
         memory=memory or FakeMemory(),
         adapter=ResponseAdapter(),
-        evaluator=FakeEvaluator(),
+        evaluator=evaluator or FakeEvaluator(),
         retriever=FakeRetriever(),
         prompt_registry=object(),
         flag_client=FakeFlagClient(),
@@ -464,6 +472,33 @@ async def test_log_request_receives_llm_metrics(monkeypatch):
     assert calls[0]["cost_usd"] == 0.0123
     assert calls[0]["llm_latency_ms"] == 456.7
     assert calls[0]["fallback_used"] == "gpt-3.5-turbo"
+
+
+@pytest.mark.asyncio
+async def test_log_request_receives_eval_score_and_issues(monkeypatch):
+    """评测器的返回值必须进审计（A4/A6）。
+
+    此前 log_request 把 eval_score 写死 0.0、eval_issues 从不写入，于是真实流量里
+    「评测跑过且判 1.0」与「压根没评测」在数据上分不开——两个字段都成了结构性哑字段
+    （2026-09-21 的 12 维评估据此误判过一轮）。这条钉住「pipeline 真的把 evaluator
+    的返回值透传下去了」。
+    """
+    calls = []
+
+    async def fake_log(*args, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(pipeline_module, "log_request", fake_log)
+    patch_agents(monkeypatch, OkAgent())
+    evaluator = FakeEvaluator(score=0.3, issues=("contains_unfinished_marker",))
+    p = make_pipeline(evaluator=evaluator)
+    req = SimpleNamespace(method="POST", url="http://test/x")
+    result = await p.run(make_event(), channel="test", target="s1", request=req)
+
+    assert result.status == "ok"
+    assert len(calls) == 1
+    assert calls[0]["eval_score"] == 0.3
+    assert calls[0]["eval_issues"] == ("contains_unfinished_marker",)
 
 
 @pytest.mark.asyncio

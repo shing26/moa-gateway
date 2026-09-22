@@ -108,6 +108,41 @@ async def test_e2e_eval_aggregates_cost_and_judge_score() -> None:
     assert report["avg_latency_ms"] > 0
 
 
+def test_judge_config_defaults_to_project_llm_config(monkeypatch) -> None:
+    """评测器默认复用 ``LLM_*`` 配置，而不是硬编码 OpenAI 的 gpt-4o-mini。
+
+    2026-09-22 实测缺陷：judge 的 base_url 取 ``OPENAI_BASE_URL``（local 形态下指向
+    Ollama），model 却是硬编码默认 ``gpt-4o-mini`` —— 两个来源混用，请求打到一个没有
+    该模型的端点，报 ``model 'gpt-4o-mini' not found``。这是 e2e 长期只能 ``--offline``
+    的原因之一：真跑一次就炸。
+    """
+    from evals.judge import _judge_config
+
+    monkeypatch.delenv("JUDGE_MODEL", raising=False)
+    monkeypatch.setenv("LLM_PROVIDER", "local")
+    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("LLM_MODEL", "moa-qwen")
+
+    cfg = _judge_config()
+    assert "moa-qwen" in cfg.model
+    assert cfg.model != "gpt-4o-mini"
+    assert cfg.base_url == "http://localhost:11434/v1"
+
+
+def test_judge_config_honours_explicit_judge_model(monkeypatch) -> None:
+    """显式设了 JUDGE_MODEL 时走 JUDGE_* 全家（评测想用更强模型的口子）。"""
+    from evals.judge import _judge_config
+
+    monkeypatch.setenv("JUDGE_MODEL", "gpt-4o")
+    monkeypatch.setenv("JUDGE_BASE_URL", "https://api.example/v1")
+    monkeypatch.setenv("JUDGE_PROVIDER", "openai")
+
+    cfg = _judge_config()
+    # openai 属 openai 兼容提供方，_qualify_model 会加 litellm 前缀
+    assert cfg.model == "openai/gpt-4o"
+    assert cfg.base_url == "https://api.example/v1"
+
+
 def test_load_dataset_parses_jsonl(tmp_path: Path) -> None:
     path = tmp_path / "intent.jsonl"
     path.write_text(

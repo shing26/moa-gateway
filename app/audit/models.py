@@ -12,7 +12,10 @@ class AuditEntry:
     agent_name: str
     agent_output: str
     intent: str
-    eval_score: float
+    # None = 这条请求没走评测（控制指令 / 敏感挂起 / 路由前早退等），
+    # 与 0.0（评测跑了且判定为 AST 危险）是两件事。此前两者都用 0.0 表示，
+    # 于是"接线断开"和"真的危险"在数据里分不开——见 2026-09-22 的修补记录。
+    eval_score: float | None = None
     eval_issues: tuple[str, ...] = ()
     guard_action: str = ""
     guard_reason: str = ""

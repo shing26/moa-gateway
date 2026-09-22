@@ -170,45 +170,56 @@ async def run_e2e_eval(
     pipeline: Any | None = None,
     judge: Any | None = None,
 ) -> dict[str, Any]:
-    from app.deps import init_prompts
+    from app.deps import init_prompts, vector_client
     from app.deps import pipeline as default_pipeline
     from evals.judge import score as default_judge
 
     from app.fsm.state_machine import Event
 
-    # 服务进程在 FastAPI lifespan 里初始化 prompt 注册表；eval 进程没有 lifespan，需手动注册
+    # 服务进程在 FastAPI lifespan 里做这两件事；eval 进程没有 lifespan，需手动补。
+    # 漏掉 vector_client.start() 时检索腿永远空转：pgvector 的 _pool 为 None，search
+    # 静默返回空结果（日志里是 `后端已降级…（None）`），e2e 会"跑通"但测的是**没有
+    # RAG 上下文**的链路——那正是本项要验的东西（2026-09-22 实测）。
     init_prompts()
+    # 只有走真实 pipeline 时才需要真实存储；注入 pipeline 的调用方（单测）不该被拖去连库。
+    use_store = pipeline is None
+    if use_store:
+        await vector_client.start()
     runner = pipeline or default_pipeline
     judge_fn = judge or default_judge
     scores: list[float] = []
     latencies: list[float] = []
     costs: list[float] = []
     status_matches = 0
-    for case in cases:
-        event = MoAEvent(
-            trace_id=f"eval-{case.get('id', 'unknown')}",
-            event=Event.MESSAGE_RECEIVED,
-            session_id=f"eval-{case.get('id', 'unknown')}",
-            text=str(case.get("input", "")),
-            context={},
-        )
-        start = time.monotonic()
-        result = await runner.run(event, channel="eval", target="eval")
-        latency_ms = (time.monotonic() - start) * 1000
-        latencies.append(latency_ms)
-        costs.append(float(getattr(result, "cost_usd", 0.0) or 0.0))
-        expected = case.get("expected", {})
-        if isinstance(expected, dict) and expected.get("status") != result.status:
-            scores.append(0.0)
-        else:
-            status_matches += 1
-            scores.append(
-                await judge_fn(
-                    str(case.get("input", "")),
-                    result.text,
-                    str(case.get("judge_criteria", "")),
-                )
+    try:
+        for case in cases:
+            event = MoAEvent(
+                trace_id=f"eval-{case.get('id', 'unknown')}",
+                event=Event.MESSAGE_RECEIVED,
+                session_id=f"eval-{case.get('id', 'unknown')}",
+                text=str(case.get("input", "")),
+                context={},
             )
+            start = time.monotonic()
+            result = await runner.run(event, channel="eval", target="eval")
+            latency_ms = (time.monotonic() - start) * 1000
+            latencies.append(latency_ms)
+            costs.append(float(getattr(result, "cost_usd", 0.0) or 0.0))
+            expected = case.get("expected", {})
+            if isinstance(expected, dict) and expected.get("status") != result.status:
+                scores.append(0.0)
+            else:
+                status_matches += 1
+                scores.append(
+                    await judge_fn(
+                        str(case.get("input", "")),
+                        result.text,
+                        str(case.get("judge_criteria", "")),
+                    )
+                )
+    finally:
+        if use_store:
+            await vector_client.close()
     return {
         "total": len(cases),
         "run": len(cases),
@@ -383,6 +394,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--datasets-dir", type=Path, default=ROOT / "evals" / "datasets")
     parser.add_argument("--report-path", type=Path, default=ROOT / "evals" / "reports" / "latest.json")
     args = parser.parse_args(argv)
+
+    # psycopg 的 async pool 不能用 Windows 默认的 ProactorEventLoop（实测报
+    # `Psycopg cannot use the 'ProactorEventLoop' to run in async mode`）→ 向量池
+    # 初始化超时 → 检索腿静默退化 → e2e 变成"没有 RAG 上下文的链路"。
+    # 只改本 CLI 的循环策略，不动服务进程（服务在 uvicorn / Linux 下另有其循环）。
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     report = asyncio.run(run_all(args.offline, args.datasets_dir, engine=args.engine))
     write_report(report, args.report_path)

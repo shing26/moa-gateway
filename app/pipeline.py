@@ -361,6 +361,8 @@ class MoAPipeline:
                     cost_usd=cost_usd,
                     llm_latency_ms=llm_latency_ms,
                     fallback_used=fallback_used,
+                    eval_score=eval_result.score,
+                    eval_issues=eval_result.issues,
                 )
             return PipelineResult(
                 trace_id=event.trace_id, state="SUSPENDED", intent=intent,
@@ -381,6 +383,8 @@ class MoAPipeline:
                     cost_usd=cost_usd,
                     llm_latency_ms=llm_latency_ms,
                     fallback_used=fallback_used,
+                    eval_score=eval_result.score,
+                    eval_issues=eval_result.issues,
                 )
             return PipelineResult(
                 trace_id=event.trace_id, state=state, intent=intent,
@@ -411,6 +415,8 @@ class MoAPipeline:
                 cost_usd=cost_usd,
                 llm_latency_ms=llm_latency_ms,
                 fallback_used=fallback_used,
+                eval_score=eval_result.score,
+                eval_issues=eval_result.issues,
             )
         return PipelineResult(
             trace_id=event.trace_id, state=state, intent=intent,

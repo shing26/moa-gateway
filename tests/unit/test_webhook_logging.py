@@ -8,6 +8,7 @@ import pytest
 from app.deps import pipeline
 import app.pipeline as pipeline_module
 from app.engine import HitlRequest
+from app.evaluator.evaluator import EvalResult
 from app.guard.rbac import GuardianAction, GuardVerdict
 from app.main import app
 from app.vectordb.retriever import RetrievalResult
@@ -66,7 +67,7 @@ def test_webhook_writes_request_log_for_agent_flow(monkeypatch) -> None:
     calls = []
 
     async def fake_score(*args, **kwargs):
-        return SimpleNamespace(score=1.0, need_human_review=False)
+        return EvalResult(score=1.0, need_human_review=False)
 
     def fake_adapt(*args, **kwargs):
         return SimpleNamespace(text="hello reply")
@@ -131,7 +132,7 @@ def test_webhook_debug_text_not_500(monkeypatch) -> None:
     monkeypatch.setattr(pipeline.engine, "handle_event", real_handle)
 
     async def fake_score(*args, **kwargs):
-        return SimpleNamespace(score=1.0, need_human_review=False)
+        return EvalResult(score=1.0, need_human_review=False)
 
     async def fake_log(*args, **kwargs):
         return None

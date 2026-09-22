@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.evaluator.evaluator import EvalResult
 from app.middleware import request_logger
 from app.middleware.request_logger import bind_trace, log_request
 from app.models.events import MoAEvent, new_trace_id
@@ -73,7 +74,7 @@ def _fakes():
 
     class FakeEvaluator:
         async def score(self, output_text, intent):
-            return SimpleNamespace(score=1.0, need_human_review=False)
+            return EvalResult(score=1.0, need_human_review=False)
 
     class FakeMemory:
         def get_history(self, session_id):

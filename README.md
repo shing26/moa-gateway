@@ -56,14 +56,22 @@ uv run python scripts/redteam/run_redteam.py
 每次改动可以跑三类评估并输出 JSON 报告：
 
 ```bash
-uv run python evals/run_evals.py --offline
+uv run python evals/run_evals.py --offline   # 离线：e2e 走假引擎，标 skipped
+uv run python evals/run_evals.py             # 活体：e2e 走真实编排 + 真实判分（需 Ollama/pgvector 就绪）
 ```
 
 | 维度 | 数据量 | 当前指标 |
 |---|---|---|
 | Intent 意图路由 | 50 条 | 准确率 1.0 |
 | Guard 守卫对抗 | 50 条 | deny 召回 1.0 / 精确率 1.0，review 召回 1.0 |
-| E2E 端到端 | 30 条 | offline 标记 skipped，CI 不依赖网络 |
+| E2E 端到端 | 30 条 | 活体 `run=30 skipped=0`，success 1.0 / judge 均分 0.7428 / 均时 1984 ms；`--offline` 则标 skipped，CI 不依赖网络 |
+
+> **活体 e2e 的两次修复（2026-09-22）**：此前真跑必炸，`--offline` 是唯一跑法。两处原因都已修：
+> ① 判分器自建配置——base_url 取 `OPENAI_BASE_URL`（local 形态指向 Ollama）而 model 硬编码
+> `gpt-4o-mini`，两个来源混用导致 `model 'gpt-4o-mini' not found`；② eval 进程没有 FastAPI
+> lifespan，漏了 `vector_client.start()`，检索腿静默空转（且 Windows 默认 Proactor 循环与
+> psycopg 异步池不兼容，需 Selector 循环）。**CI 仍跑 `--offline`**：门禁不引入网络依赖，
+> 活体那跑是本地/发布前的验收。
 
 红队基线（`scripts/redteam/cases.json`，200 条）：
 
@@ -206,7 +214,8 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 - 等价性由 `tests/unit/test_engine_parity_golden.py` 的三个确定性场景（纯回答 / 真实 TaskAgent 工具循环 /
   REVIEW→审批）逐字段比对，与 `test_langgraph_adapter.py` 一起进 CI。
 - `evals/run_evals.py --engine fsm|langgraph` 可把同一份 e2e 数据集指向任一引擎；`--offline` 跑的是假引擎，
-  不经过真实编排，所以门禁落在上面那组单测。
+  不经过真实编排，所以门禁落在上面那组单测。**不带 `--offline` 则走真实编排 + 真实判分**（2026-09-22 起可用，
+  需 Ollama 与 pgvector 就绪；此前因判分器配置错与存储未初始化而必炸）。
 
 ## 简历条目草稿
 
