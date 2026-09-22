@@ -99,13 +99,63 @@ async def test_e2e_eval_aggregates_cost_and_judge_score() -> None:
     async def fake_judge(input_text, output_text, criteria) -> float:
         return 0.8
 
-    report = await run_e2e_eval(cases, pipeline=FakePipeline(), judge=fake_judge)
+    # use_store=False：注入测试替身时不该被拖去连真实 pgvector
+    report = await run_e2e_eval(
+        cases, pipeline=FakePipeline(), judge=fake_judge, use_store=False,
+    )
 
     assert report["run"] == 2
     assert report["skipped"] == 0
     assert report["avg_cost_usd"] == 0.01
     assert report["avg_judge_score"] == 0.8
     assert report["avg_latency_ms"] > 0
+
+
+@pytest.mark.asyncio
+async def test_e2e_eval_store_lifecycle_is_explicit(monkeypatch) -> None:
+    """真实存储的启停必须是显式开关，不能从 ``pipeline is None`` 推断。
+
+    回归：早先 ``use_store = pipeline is None``，而 ``--engine fsm|langgraph`` 传入的
+    是**真实** runner（fsm_pipeline / LangGraphOrchestrator），于是被判成"注入了假
+    pipeline"→ 跳过 ``vector_client.start()`` → pgvector 的 ``_pool`` 为 None →
+    search 静默返回空。**那两个引擎跑的其实是没有 RAG 上下文的链路**，而 e2e 照样报
+    success 1.0（日志里只有一行 `后端已降级，search 返回空结果（None）`）。
+    """
+    from app import deps
+
+    lifecycle: list[str] = []
+
+    class RecordingStore:
+        async def start(self) -> None:
+            lifecycle.append("start")
+
+        async def close(self) -> None:
+            lifecycle.append("close")
+
+    monkeypatch.setattr(deps, "vector_client", RecordingStore())
+
+    class FakePipeline:
+        async def run(self, event, *, channel, target):
+            return PipelineResult(
+                trace_id=event.trace_id, state="ROUTED", intent="assistant",
+                text="fake", status="ok",
+            )
+
+    async def fake_judge(_input: str, _output: str, _criteria: str) -> float:
+        return 1.0
+
+    cases = [{"id": "e1", "input": "hi", "expected": {"status": "ok"}}]
+
+    # 默认（= run_all 与 --engine 走的路径）：真实 runner，必须启停真实存储
+    await run_e2e_eval(cases, pipeline=FakePipeline(), judge=fake_judge)
+    assert lifecycle == ["start", "close"]
+
+    # 注入测试替身的调用方显式 opt out：不连库，也不受本机 DSN 影响
+    lifecycle.clear()
+    await run_e2e_eval(
+        cases, pipeline=FakePipeline(), judge=fake_judge, use_store=False,
+    )
+    assert lifecycle == []
 
 
 def test_judge_config_defaults_to_project_llm_config(monkeypatch) -> None:

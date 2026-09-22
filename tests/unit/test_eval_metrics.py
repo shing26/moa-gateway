@@ -109,7 +109,7 @@ async def test_e2e_success_rate_counts_status_mismatches():
         {"id": "a", "input": "普通", "expected": {"status": "ok"}},
         {"id": "b", "input": "blocked 请求", "expected": {"status": "ok"}},
     ]
-    result = await run_e2e_eval(cases, pipeline=_Pipeline(), judge=_judge)
+    result = await run_e2e_eval(cases, pipeline=_Pipeline(), judge=_judge, use_store=False)
     assert result["success_rate"] == 0.5
     assert result["run"] == 2
 
@@ -139,6 +139,6 @@ async def test_e2e_dataset_can_expect_a_non_ok_status():
     cases = [
         {"id": "b", "input": "含内网 IP 的请求", "expected": {"status": "blocked"}},
     ]
-    result = await run_e2e_eval(cases, pipeline=_Pipeline(), judge=_judge)
+    result = await run_e2e_eval(cases, pipeline=_Pipeline(), judge=_judge, use_store=False)
     assert result["success_rate"] == 1.0
     assert result["avg_judge_score"] == 0.8

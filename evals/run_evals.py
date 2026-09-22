@@ -169,6 +169,7 @@ async def run_e2e_eval(
     *,
     pipeline: Any | None = None,
     judge: Any | None = None,
+    use_store: bool = True,
 ) -> dict[str, Any]:
     from app.deps import init_prompts, vector_client
     from app.deps import pipeline as default_pipeline
@@ -181,8 +182,11 @@ async def run_e2e_eval(
     # 静默返回空结果（日志里是 `后端已降级…（None）`），e2e 会"跑通"但测的是**没有
     # RAG 上下文**的链路——那正是本项要验的东西（2026-09-22 实测）。
     init_prompts()
-    # 只有走真实 pipeline 时才需要真实存储；注入 pipeline 的调用方（单测）不该被拖去连库。
-    use_store = pipeline is None
+    # 真实存储的启停必须显式，**不能**从 ``pipeline is None`` 推断：``--engine fsm``
+    # 传入的 fsm_pipeline 是真实 runner，却会被那句推断判成"注入了假 pipeline"而跳过
+    # start() → 同样是静默无 RAG 的链路（2026-09-22 实测 --engine 跑时日志刷
+    # `后端已降级，search 返回空结果（None）`）。注入测试替身的调用方显式传
+    # use_store=False，既不连库也不受本机 DSN 影响。
     if use_store:
         await vector_client.start()
     runner = pipeline or default_pipeline
