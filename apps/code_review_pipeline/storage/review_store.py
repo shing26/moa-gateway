@@ -35,15 +35,16 @@ def _build_dsn() -> str | None:
 
 
 def _embedding_dim() -> int:
-    raw = (
-        os.getenv("CODE_REVIEW_EMBEDDING_DIM")
-        or os.getenv("VECTOR_DB_EMBEDDING_DIM")
-        or "1536"
-    )
-    try:
-        dim = int(raw)
-    except ValueError as exc:
-        raise StorageInitError(f"invalid embedding dimension: {raw!r}") from exc
+    """向量维度：与 ``app.config.settings`` 同源。
+
+    回归（2026-09-23）：本函数与 ``rag/embeddings.py`` 的同名函数此前都**反向**
+    优先 ``CODE_REVIEW_EMBEDDING_DIM``，而 ``app/config.py`` 优先
+    ``VECTOR_DB_EMBEDDING_DIM`` —— 同一组 env 可能算出不同维度，而这个维度决定了
+    建表 DDL 与写入向量的长度，错了直接失败。非正整数的 fail-fast 交给 config 层。
+    """
+    from app.config import settings
+
+    dim = int(settings.vector_db_embedding_dim)
     if dim <= 0:
         raise StorageInitError(f"embedding dimension must be positive: {dim}")
     return dim

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -25,23 +24,30 @@ class EmbeddingResult:
 
 
 def embedding_dimension() -> int:
-    raw = (
-        os.getenv("CODE_REVIEW_EMBEDDING_DIM")
-        or os.getenv("VECTOR_DB_EMBEDDING_DIM")
-        or "1536"
-    )
-    try:
-        dim = int(raw)
-    except ValueError as exc:
-        raise ValueError(f"invalid embedding dimension: {raw!r}") from exc
+    """向量维度：与 ``app.config.settings`` 同源，本模块不另起一套 env 读取。
+
+    回归（2026-09-23）：本模块此前**反向**优先 ``CODE_REVIEW_EMBEDDING_DIM``，而
+    ``app/config.py`` 优先 ``VECTOR_DB_EMBEDDING_DIM`` —— 两处对同一组 env 会算出
+    不同维度（``.env`` 里两个值恰好都是 768，所以一直潜伏）。同源的还有 API Key：
+    这里只读 ``CODE_REVIEW_EMBEDDING_API_KEY``，而 config 的链是
+    ``EMBEDDING_API_KEY → CODE_REVIEW_EMBEDDING_API_KEY → OPENAI_API_KEY``——
+    只设通用名时 ``app/vectordb`` 拿得到 key、本模块拿到空串，调用会**静默 401**
+    （"功能看起来配好了，实际没生效"）。现在统一读 settings，由 config 层做
+    非正整数的 fail-fast 校验。
+    """
+    from app.config import settings
+
+    dim = int(settings.vector_db_embedding_dim)
     if dim <= 0:
         raise ValueError(f"embedding dimension must be positive: {dim}")
     return dim
 
 
 def _build_embedding_client() -> httpx.AsyncClient:
-    api_key = os.getenv("CODE_REVIEW_EMBEDDING_API_KEY", "")
-    base_url = os.getenv("CODE_REVIEW_EMBEDDING_BASE_URL", "https://api.openai.com/v1")
+    from app.config import settings
+
+    api_key = settings.embedding_api_key
+    base_url = settings.embedding_base_url
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -65,15 +71,19 @@ async def generate_embeddings(
     """
     Generate embeddings for a list of texts using an OpenAI-compatible endpoint.
 
-    Required env:
-        CODE_REVIEW_EMBEDDING_API_KEY or OPENAI_API_KEY
-        CODE_REVIEW_EMBEDDING_BASE_URL (default https://api.openai.com/v1)
-        CODE_REVIEW_EMBEDDING_MODEL (default text-embedding-3-small)
+    Configuration comes from ``app.config.settings`` (single source of truth):
+        api key   : EMBEDDING_API_KEY or CODE_REVIEW_EMBEDDING_API_KEY or OPENAI_API_KEY
+        base url  : EMBEDDING_BASE_URL or CODE_REVIEW_EMBEDDING_BASE_URL or OPENAI_BASE_URL
+                    (default https://api.openai.com/v1)
+        model     : EMBEDDING_MODEL or CODE_REVIEW_EMBEDDING_MODEL
+                    (default text-embedding-3-small)
     """
     if not texts:
         return []
 
-    model = model or os.getenv("CODE_REVIEW_EMBEDDING_MODEL", "text-embedding-3-small")
+    from app.config import settings
+
+    model = model or settings.embedding_model
     client = client or _build_embedding_client()
 
     try:

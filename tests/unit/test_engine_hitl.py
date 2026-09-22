@@ -11,6 +11,7 @@ from app.engine import Engine, HitlRequest
 from app.evaluator.evaluator import EvalResult
 from app.fsm.state_machine import Event, State, next_state
 from app.main import app
+from app.models.events import MoAEvent
 from app.vectordb.retriever import RetrievalResult
 from tests.support import app_client
 
@@ -18,6 +19,53 @@ from tests.support import app_client
 @pytest.fixture
 def engine() -> Engine:
     return Engine()
+
+
+def _evt(session_id: str, event: Event) -> MoAEvent:
+    return MoAEvent(
+        trace_id=f"t-{session_id}-{event.value}", event=event,
+        session_id=session_id, text="", context={},
+    )
+
+
+# ── 人工决定推进 FSM（重启后可失效）────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_decide_hitl_applies_when_session_is_suspended(engine: Engine) -> None:
+    await engine.handle_event(_evt("s1", Event.MESSAGE_RECEIVED))
+    await engine.handle_event(_evt("s1", Event.NEEDS_HUMAN))
+
+    ctx, expired = await engine.decide_hitl(session_id="s1", trace_id="t1", approve=True)
+
+    assert expired is False
+    assert ctx is not None and ctx.state is State.EXECUTING
+
+
+@pytest.mark.asyncio
+async def test_decide_hitl_reject_also_applies(engine: Engine) -> None:
+    await engine.handle_event(_evt("s1", Event.MESSAGE_RECEIVED))
+    await engine.handle_event(_evt("s1", Event.NEEDS_HUMAN))
+
+    ctx, expired = await engine.decide_hitl(session_id="s1", trace_id="t1", approve=False)
+
+    assert expired is False
+    assert ctx is not None and ctx.state is State.REJECTED
+
+
+@pytest.mark.asyncio
+async def test_decide_hitl_reports_expired_when_session_state_lost(engine: Engine) -> None:
+    """回归（2026-09-23）：重启后挂起记录还在、FSM 状态已丢。
+
+    ``HitlRequest`` 在 Redis（带 TTL），会话状态只在**进程内**——重启后
+    ``INIT + HUMAN_APPROVED`` 是非法迁移。此前抛异常 → webhook 500 /
+    飞书"处理审批时出错了"，而且用户重试仍然失败（卡片变成点一次错一次的砖）。
+    现在识别为"已失效"，由调用方消耗挂起记录并明确告知。
+    """
+    # 全新 Engine = 模拟重启后的干净进程，该会话从未有过状态
+    ctx, expired = await engine.decide_hitl(session_id="ghost", trace_id="t1", approve=True)
+
+    assert expired is True
+    assert ctx is None
 
 
 # ── HITL storage tests (engine level) ──────────────────────────────────

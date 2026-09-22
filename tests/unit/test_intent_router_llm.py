@@ -63,3 +63,22 @@ async def test_specific_tool_intents_win_over_broad_task_phrase() -> None:
 
     assert search_intent == "search"
     assert task_intent == "task"
+
+
+@pytest.mark.asyncio
+async def test_bare_suan_is_not_a_task_trigger() -> None:
+    """`算` 不能裸写进 task 正则：它是「预**算**」「打**算**」「核**算**」的一部分。
+
+    回归（2026-09-23）：实测「预算表里的数字对不上」与「这活儿我算下来要三天」
+    都被裸 `算` 吞成 task —— 后者会把一句普通陈述送进 TaskAgent。改为只保留明确
+    的动词短语后两者不再命中，而真计算请求仍然命中。
+    """
+    router = IntentRouter()
+
+    for text in ("预算表里的数字对不上", "这活儿我算下来要三天"):
+        intent, level = await router._regex_fallback(text)
+        assert level == "none", f"{text} 不该被正则命中（裸 `算` 又回来了？）"
+
+    for text in ("算一下 37*89", "算一算这个比例", "记一下明天开会"):
+        intent, level = await router._regex_fallback(text)
+        assert (intent, level) == ("task", "regex"), text

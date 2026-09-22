@@ -280,7 +280,11 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 - 双引擎模式下的边界：LangGraph 是可选 extra，Docker 镜像默认不带（`ENGINE=langgraph` 会自动回退 FSM 并告警）；
   图的 checkpoint 是进程内的 `InMemorySaver`，与 FSM 的 `_session_states` 同级，都不承诺跨重启恢复。
 - FSM 会话状态保存在进程内（`Engine._session_states`）；`app/redis_state/stack.py` 与 `lock.py` 的 Redis 状态栈 / Lua
-  锁目前只在单测中被调用，**未接入请求路径**，多实例部署前需要先接线。
+  锁目前只在单测中被调用，**未接入请求路径**，多实例部署前需要先接线。**重启后的语义是"审批失效"**
+  （ADR-012）：`HitlRequest` 在 Redis 而会话状态在进程内，重启后两者不同步，此时点旧卡片会被识别为
+  已失效——作废该记录、回复用户重新发起、审计写 `guard_action="hitl_expired"`。此前那条路径是 500 /
+  "处理审批时出错了"且重试无效（卡片变成砖）。**挂起中的审批不会跨重启存活，这是有意为之**：
+  要么接 redis_state，要么承认它只在进程生命周期内有效。
 - 预算拦截（`BUDGET_SESSION_LIMIT_USD`）的累计器在**进程内**：单实例语义正确，多实例部署需要把累计器外部化
   （如 Redis INCR）。`limit<=0` 时只核算不拦截，请求路径零变化。
 - 上下文预算（`CONTEXT_HISTORY_BUDGET` / `CONTEXT_SUMMARY_BUDGET`，启发式估算 CJK 按字）**只裁剪随会话增长的两块

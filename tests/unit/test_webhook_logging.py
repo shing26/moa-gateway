@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import json
 import time
 import os
 
@@ -144,6 +145,65 @@ def test_webhook_escalates_agent_failure_to_hitl(monkeypatch) -> None:
     assert kwargs["retry_count"] == 1, "首次尝试 + 一次重试 = 1 次重试"
     assert kwargs["hitl_kind"] == "failure_escalation"
     assert "boom" in kwargs["retry_reason"]
+
+
+class _JsonRequest:
+    """够用的 Request 替身：处理器只用到 await request.json() 与 method/url。"""
+
+    method = "POST"
+    url = "http://test/webhook/callback"
+
+    def __init__(self, body: dict) -> None:
+        self._body = body
+
+    async def json(self) -> dict:
+        return self._body
+
+
+@pytest.mark.asyncio
+async def test_webhook_callback_expired_hitl_is_invalidated_not_500(monkeypatch) -> None:
+    """重启后点旧卡片：不能 500，要作废记录并明确告知已失效。
+
+    回归（2026-09-23）：此前这里是裸 `await engine.handle_event(...)`，而重启后
+    FSM 会话状态（进程内）已丢，`INIT + HUMAN_APPROVED` 非法迁移 → 500；更糟的是
+    挂起记录留在 Redis 里，卡片点一次错一次。
+    """
+    import app.routes.webhook as webhook_route
+
+    calls = []
+
+    async def fake_log(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(webhook_route, "log_request", fake_log)
+
+    req = HitlRequest(
+        session_id="expired-sess", trace_id="expired-trace", agent_output="out",
+        intent="coding", agent_name="coder", channel="feishu", target="chat_1",
+    )
+    store = webhook_route.engine.session_store
+    store.store_hitl("expired-sess", req)
+    # 模拟"服务重启后会话状态丢失"
+    webhook_route.engine.reset_session("expired-sess")
+
+    body = {
+        "action": {
+            "value": {
+                "session_id": "expired-sess",
+                "trace_id": "expired-trace",
+                "action": "approve",
+            }
+        }
+    }
+    try:
+        resp = await webhook_route.webhook_callback(_JsonRequest(body))
+    finally:
+        store.remove_hitl("expired-trace")
+
+    assert resp.status_code == 200, "失效不是服务器错误，不该 500"
+    assert json.loads(resp.body)["status"] == "expired"
+    assert calls and calls[0][1]["guard_action"] == "hitl_expired"
+    assert store.get_hitl("expired-trace") is None, "失效的挂起记录必须被消耗掉"
 
 
 def test_webhook_debug_text_not_500(monkeypatch) -> None:

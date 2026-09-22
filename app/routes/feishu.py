@@ -79,12 +79,28 @@ async def _process_hitl_card(action: str, trace_id: str, session_id: str) -> Non
             logger.warning("card_action hitl not found hitl_id=%s", hitl_id)
             await _safe_send(session_id, "该审批请求已失效或已被处理", trace_id)
             return
-        fsm_event = FsmEvent.HUMAN_APPROVED if action == "approve" else FsmEvent.HUMAN_REJECTED
-        moa_event = MoAEvent(
-            trace_id=trace_id, event=fsm_event, session_id=session_id, text="",
-            context={"source": "feishu_card_callback", "action": action},
+        ctx, expired = await engine.decide_hitl(
+            session_id=session_id, trace_id=trace_id, approve=(action == "approve"),
         )
-        await engine.handle_event(moa_event)
+        if expired:
+            # 重启后挂起记录还在、FSM 会话状态已丢：作废 + 明确告知，
+            # 否则这张卡片会点一次错一次（此前回的是"处理审批时出错了"）。
+            engine.session_store.remove_hitl(hitl_id)
+            duration_ms = round((time.time() - started) * 1000, 1)
+            await log_request(
+                None, 200, duration_ms, session_id=session_id,
+                agent_name=hitl.agent_name, intent=hitl.intent,
+                guard_action="hitl_expired", input_text="",
+                output_text=hitl.agent_output[:2000], hitl_decision=action,
+                hitl_duration_ms=duration_ms, hitl_kind=hitl.hitl_kind,
+            )
+            await _safe_send(
+                session_id,
+                "该审批已失效（审批可能已处理，或服务重启过），请重新发起该请求",
+                trace_id,
+            )
+            outcome = "hitl_expired"
+            return
         # 本地格式化先于 remove_hitl：格式化是纯本地操作，若它失败，挂起请求
         # 不应被消费，用户还能重点一次（网络发送失败同理，故 send 也在其后）。
         if action == "approve":

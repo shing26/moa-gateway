@@ -30,21 +30,31 @@ async def webhook_callback(request: Request) -> JSONResponse:
     if hitl is None:
         logger.warning("hitl request not found hitl_id=%s session=%s", hitl_id, session_id)
         return JSONResponse({"error": ErrorCode.HITL_REQUEST_NOT_FOUND.value}, status_code=404)
-    if action == "approve":
-        fsm_event = FsmEvent.HUMAN_APPROVED
-    elif action == "reject":
-        fsm_event = FsmEvent.HUMAN_REJECTED
-    else:
+    if action not in ("approve", "reject"):
         return JSONResponse({"error": f"unknown_action:{action}"}, status_code=400)
-    moa_event = MoAEvent(
-        trace_id=trace_id, event=fsm_event, session_id=session_id, text="",
-        context={"source": "feishu_card_callback", "action": action},
+    session_context, expired = await engine.decide_hitl(
+        session_id=session_id, trace_id=trace_id, approve=(action == "approve"),
     )
-    session_state = await engine.handle_event(moa_event)
+    hitl_duration_ms = (
+        round((time.time() - hitl.created_at) * 1000, 1) if hitl.created_at > 0 else 0.0
+    )
+    if expired:
+        # 与 /feishu/event 同一语义：重启后会话状态已丢，作废 + 明确告知。
+        # 此前这里是裸 await，非法迁移会直接 500。
+        engine.session_store.remove_hitl(hitl_id)
+        await log_request(
+            request, 200, 0, session_id=session_id, agent_name=hitl.agent_name,
+            intent=hitl.intent, guard_action="hitl_expired", input_text="",
+            output_text=hitl.agent_output[:2000], hitl_decision=action,
+            hitl_duration_ms=hitl_duration_ms, hitl_kind=hitl.hitl_kind,
+        )
+        return JSONResponse({
+            "trace_id": trace_id, "status": "expired",
+            "message": "该审批已失效（审批可能已处理，或服务重启过），请重新发起",
+        })
     if action == "approve":
         engine.session_store.remove_hitl(hitl_id)
         response = adapter.adapt(hitl.agent_output, channel=hitl.channel, target=hitl.target)
-        hitl_duration_ms = round((time.time() - hitl.created_at) * 1000, 1) if hitl.created_at > 0 else 0.0
         await log_request(
             request, 200, 0, session_id=session_id, agent_name=hitl.agent_name,
             intent=hitl.intent, guard_action=f"hitl_{action}", input_text="",
@@ -52,11 +62,10 @@ async def webhook_callback(request: Request) -> JSONResponse:
             hitl_duration_ms=hitl_duration_ms, hitl_kind=hitl.hitl_kind,
         )
         return JSONResponse({
-            "trace_id": trace_id, "state": session_state.context.state.value, "text": response.text, "status": "approved",
+            "trace_id": trace_id, "state": session_context.state.value, "text": response.text, "status": "approved",
         })
     else:
         engine.session_store.remove_hitl(hitl_id)
-        hitl_duration_ms = round((time.time() - hitl.created_at) * 1000, 1) if hitl.created_at > 0 else 0.0
         await log_request(
             request, 200, 0, session_id=session_id, agent_name=hitl.agent_name,
             intent=hitl.intent, guard_action=f"hitl_{action}", input_text="",

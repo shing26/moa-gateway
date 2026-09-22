@@ -21,7 +21,6 @@ from apps.code_review_pipeline.rag.vector_store import (
     build_vector_store,
 )
 from apps.code_review_pipeline.storage.review_store import (
-    StorageInitError,
     _embedding_dim,
     render_schema as render_review_schema,
 )
@@ -36,15 +35,31 @@ def test_normalize_vector_rounds_floats() -> None:
 
 
 def test_review_schema_uses_configured_embedding_dimension(monkeypatch) -> None:
-    monkeypatch.setenv("CODE_REVIEW_EMBEDDING_DIM", "768")
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "vector_db_embedding_dim", 768)
     assert _embedding_dim() == 768
     assert render_review_schema("embedding vector(1536)", 768) == "embedding vector(768)"
 
 
-def test_review_schema_rejects_invalid_embedding_dimension(monkeypatch) -> None:
+def test_embedding_dimension_readers_ignore_env(monkeypatch) -> None:
+    """回归（2026-09-23）：维度读取点不再各自读 env。
+
+    此前 ``review_store._embedding_dim()`` 与 ``rag/embeddings.embedding_dimension()``
+    都**反向**优先 ``CODE_REVIEW_EMBEDDING_DIM``，而 ``app/config.py`` 优先
+    ``VECTOR_DB_EMBEDDING_DIM`` —— 同一组 env 可能算出不同维度，而它决定建表 DDL
+    与写入向量的长度。现在唯一读取点是 config：env 在进程启动后即失效，非法值由
+    config 层 fail-fast（见 test_config）。
+    """
+    from app.config import settings
+
+    from apps.code_review_pipeline.rag.embeddings import embedding_dimension
+
     monkeypatch.setenv("CODE_REVIEW_EMBEDDING_DIM", "not-a-number")
-    with pytest.raises(StorageInitError, match="invalid embedding dimension"):
-        _embedding_dim()
+    monkeypatch.setattr(settings, "vector_db_embedding_dim", 512)
+
+    assert _embedding_dim() == 512, "读取点不该再看 env"
+    assert embedding_dimension() == 512, "两个读取点必须同源"
 
 
 def test_review_schema_allows_knowledge_vectors_without_pr() -> None:
@@ -339,7 +354,10 @@ async def test_knowledge_base_list_docs_uses_configured_embedding_dimension(
             self.vector = vector
             return []
 
-    monkeypatch.setenv("CODE_REVIEW_EMBEDDING_DIM", "768")
+    from app.config import settings
+
+    # 走 settings 而不是 env：维度读取点已统一到 config（见上面那条回归）
+    monkeypatch.setattr(settings, "vector_db_embedding_dim", 768)
     store = RecordingStore()
     kb = KnowledgeBase(store=store)
 

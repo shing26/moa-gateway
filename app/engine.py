@@ -7,7 +7,13 @@ from typing import Any
 
 from redis.asyncio import Redis
 
-from app.fsm.state_machine import Event, State, next_state, StateContext
+from app.fsm.state_machine import (
+    Event,
+    InvalidStateTransitionException,
+    State,
+    StateContext,
+    next_state,
+)
 from app.memory import _SHARED_BRIDGE
 from app.models.events import MoAEvent
 from app.outbound.adapter import ResponseAdapter, OutboundResponse
@@ -284,6 +290,34 @@ class Engine:
 
     def reset_session(self, session_id: str) -> None:
         self._session_states.pop(session_id, None)
+
+    async def decide_hitl(
+        self, *, session_id: str, trace_id: str, approve: bool
+    ) -> tuple[StateContext | None, bool]:
+        """把人工审批决定推进到 FSM，返回 ``(新状态, 是否已失效)``。
+
+        为什么需要这个入口：``HitlRequest`` 落在 Redis（带 TTL），而 FSM 的会话状态
+        只在**进程内**（``_session_states``）。服务重启后挂起记录还在、状态已经没了，
+        此时 ``INIT + HUMAN_APPROVED`` 是非法迁移——此前表现为 webhook 路径 500、
+        飞书路径"处理审批时出错了"，而用户再点一次仍然失败，卡片变成点一次错一次的砖。
+
+        正确语义是"这套审批已失效"：调用方据此**消耗掉**挂起记录、明确告知用户重新
+        发起，并写 ``guard_action="hitl_expired"`` 审计。两个回调入口（飞书 /
+        webhook）共用本函数，避免两边语义漂移。
+        """
+        event = Event.HUMAN_APPROVED if approve else Event.HUMAN_REJECTED
+        try:
+            result = await self.handle_event(MoAEvent(
+                trace_id=trace_id, event=event, session_id=session_id, text="",
+                context={"source": "hitl_callback"},
+            ))
+        except InvalidStateTransitionException:
+            logger.warning(
+                "hitl decision cannot be applied (session state lost) session=%s trace=%s",
+                session_id, trace_id,
+            )
+            return None, True
+        return result.context, False
 
     def peek(self, session_id: str) -> StateContext | None:
         """Read-only view of a session's FSM context.

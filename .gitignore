@@ -1,4 +1,4 @@
-﻿__pycache__
+__pycache__/
 .venv
 .eggs
 *.egg-info
@@ -12,6 +12,13 @@ build
 !.env.template
 !.dockerignore
 cloudflared.exe
+
+# 工具/会话产物。必须放在 !/*/ 之后：那条负向规则会 un-ignore 所有顶层目录，
+# 而这些目录里的内容（如 .workbuddy/ 的会话记忆）不该入库。
+.workbuddy/
+.mimosa/
+.zcode/
+__pycache__/
 
 logs/
 data/
