@@ -412,6 +412,11 @@ async def test_deny_via_real_guard_sensitive_resource(monkeypatch):
 @pytest.mark.asyncio
 async def test_agent_error_escalates_to_hitl_after_retry(monkeypatch):
     """重试预算耗尽 → 升级人工（ADR-010），不再静默回一句 error。"""
+    from app.config import settings
+
+    # HITL 开关默认 false（.env.template 的默认），升级路径依赖它，测试必须自己定死：
+    # 本机 .env 设了 HITL_ENABLED=true 而 CI 没有，漏了这句就是非 hermetic 的用例。
+    monkeypatch.setattr(settings, "hitl_enabled", True)
     patch_agents(monkeypatch, RaisingAgent())
     engine = Engine()
     card_sender = FakeCardSender()
@@ -435,8 +440,10 @@ async def test_agent_error_escalates_to_hitl_after_retry(monkeypatch):
 @pytest.mark.asyncio
 async def test_agent_error_with_hitl_disabled_returns_error(monkeypatch):
     """HITL 关闭时没有人可以升级，保持原来的错误返回语义。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "hitl_enabled", False)
     patch_agents(monkeypatch, RaisingAgent())
-    monkeypatch.setattr(pipeline_module.settings, "hitl_enabled", False)
     p = make_pipeline()
     result = await p.run(make_event(), channel="test", target="s1")
     assert result.status == "error"
@@ -602,6 +609,9 @@ async def test_log_request_receives_eval_score_and_issues(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_log_request_on_agent_failure_records_escalation(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "hitl_enabled", True)
     calls = []
 
     async def fake_log(*args, **kwargs):

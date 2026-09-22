@@ -61,8 +61,19 @@
    （`store_hitl` → `NEEDS_HUMAN` → 卡片 → 回调 approve/reject → 审计）。`HitlRequest.hitl_kind`
    区分来源（`review` / `eval_review` / `failure_escalation`），卡片按来源切换标题、配色与输出
    标签——失败升级卡片里没有"待批准的输出"，沿用审批标题会让人误以为有内容要批。`hitl_kind`
-   也写进回调侧审计，人工决策因此可按来源拆分回流。`MOA_HITL_ENABLED=false` 时没有人可升级，
-   保持原来的错误返回语义。
+   也写进回调侧审计，人工决策因此可按来源拆分回流。审批开关关闭时没有人可升级，退回原来的错误
+   返回语义。
+
+   **两个引擎必须读同一个开关**。此前 graph 的 `_hitl_enabled()` 回退到 `MOA_HITL_ENABLED`
+   （默认 true），而管线读 `app.config.settings.hitl_enabled`（env 名 `HITL_ENABLED`，默认 false）
+   ——同一个概念两个变量名、两个默认值，且 `MOA_HITL_ENABLED` 全仓库只有那一行在用。任何只设了
+   其中一个的部署都会让两条引擎对"要不要人工审批"给出相反答案。现统一到 `settings.hitl_enabled`，
+   并有 `test_golden_failure_with_hitl_disabled_matches` 钉住关闭态下两引擎同为 `error`。
+
+   顺带修掉一个既存的图路径 bug：`_after_execute` 原先没有 error 分支，execute 节点返回的
+   `status="error"` 会顺着 `ok` 边继续走 evaluate → guard → deliver，于是**图路径的 agent 崩溃
+   会被当成正常回答交付**（空输出经 guard 后 deliver，`status` 被覆盖成 `"ok"`）。FSM 路径没有
+   这个问题——它的错误分支直接 return。现在 execute 的错误走新的 `failed` 边直接到 `END`。
 
 7. **评估器接刹车**。`_merge_guard` 的第三个参数从**从未被使用**的 `policy_ids` 换成
    `eval_verdict`（同 arity，最小 diff），优先级 `DENY > REVIEW`。新增
@@ -80,7 +91,9 @@
 
 ## 后果
 
-- 全量测试 670 → 723 passed / 8 skipped；`ruff`、`bandit` 干净；红队 200 条仍 100% / 0 误拦；
+- 全量测试 670 → 726 passed / 8 skipped（**在 `HITL_ENABLED` 开与关两种条件下都跑过**——首轮提交
+  只在开关为 true 的本机验证，CI 因开关默认 false 当场红了 4 条用例：升级路径依赖该开关，而用例
+  没把它定死）；`ruff`、`bandit` 干净；红队 200 条仍 100% / 0 误拦；
   `eval --offline` 退出码 0。
 - **对外契约变化**：成功响应的 `state` 从 `ROUTED` 变为 `COMPLETED`，被拦截的输出停在
   `OUTPUT_READY`（不借用 `REJECTED`——那个状态专指"人工拒绝"）。受影响的断言已同步

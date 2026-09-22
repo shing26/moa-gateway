@@ -246,7 +246,9 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   （`RETRY_BUDGET = 1`）而不是配置项，有漂移守卫钉住；失败原因经 `AgentEnvelope.failure_reason`
   喂回 prompt，重试耗尽后升级人工审批。**工具级失败不走重试**：ReAct 把它转成 observation 让模型
   自愈（那是更细粒度的恢复，且盲目重试有副作用的工具是危险的），只有上抛到 pipeline 的基础设施
-  异常（LLM 超时/网络/解析）才重试。`MOA_HITL_ENABLED=false` 时无人可升级，退回原来的 error 返回。
+  异常（LLM 超时/网络/解析）才重试。`HITL_ENABLED=false`（`.env.template` 的默认值）时无人可升级，
+  退回原来的 error 返回——**两条引擎读同一个开关**（此前 graph 读的是另一个变量名 `MOA_HITL_ENABLED`
+  且默认相反，会让两引擎在只设其一的部署上给出不同答案）。
 - 评估器判定进 HITL 会让**更多**请求走人工：`empty_output`、`output_too_long` 这类原本直接返回的
   输出现在需要批准。这是语义正确的代价；若演示体验优先，可把 `empty_output` 排除出 `review`。
 - `app/vectordb` 在未配置 `VECTOR_DB_DSN` 时回退到中文 bigram 关键词检索；配置

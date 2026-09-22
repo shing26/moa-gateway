@@ -238,11 +238,17 @@ class LangGraphOrchestrator:
         graph.add_edge("route", "retrieve")
         graph.add_edge("retrieve", "execute")
         # M6：execute 起点做预算预检，超限短路到 blocked，不再进入评估；
-        # 重试预算耗尽时直接去人工审批（失败升级），与 FSM 路径同义。
+        # 重试预算耗尽时直接去人工审批（失败升级），与 FSM 路径同义；
+        # 执行期错误必须终止，不能落进 evaluate/guard/deliver。
         graph.add_conditional_edges(
             "execute",
             self._after_execute,
-            {"ok": "evaluate", "budget_blocked": "blocked", "escalate": "prepare_hitl"},
+            {
+                "ok": "evaluate",
+                "budget_blocked": "blocked",
+                "escalate": "prepare_hitl",
+                "failed": END,
+            },
         )
         graph.add_edge("evaluate", "guard")
         graph.add_conditional_edges(
@@ -265,11 +271,19 @@ class LangGraphOrchestrator:
 
     @staticmethod
     def _after_execute(state: GraphState) -> str:
-        """execute 后的分流：预算预检短路去 blocked，重试耗尽去人工审批。"""
+        """execute 后的分流：预算短路去 blocked，失败去人工/终止，其余去评估。
+
+        ``failed`` 这条是必须的：早先没有它，execute 节点返回的 ``status="error"``
+        会顺着 ``ok`` 边继续走 evaluate → guard → deliver，于是**图路径的 agent
+        崩溃会被当成正常回答交付**（空输出经 guard ALLOW 后 deliver，status 被覆盖
+        成 "ok"）。FSM 路径没有这个问题——它的错误分支直接 return。
+        """
         if state.get("error_code") == ErrorCode.BUDGET_EXCEEDED.value:
             return "budget_blocked"
         if state.get("status") == "pending_review":
             return "escalate"
+        if state.get("status") == "error":
+            return "failed"
         return "ok"
 
     @staticmethod
@@ -317,9 +331,18 @@ class LangGraphOrchestrator:
         return advanced
 
     def _hitl_enabled(self) -> bool:
+        """审批开关必须与 MoAPipeline 读**同一个**来源。
+
+        此前这里的回退分支读 ``MOA_HITL_ENABLED``（默认 true），而管线读
+        ``app.config.settings.hitl_enabled``（env 名是 ``HITL_ENABLED``，默认 false）——
+        同一个概念两个变量名、两个默认值，全仓库只有这一行用 ``MOA_HITL_ENABLED``。
+        任何只设了其中一个的部署都会让两条引擎对"要不要人工审批"给出相反答案。
+        """
         if self._settings is not None:
-            return bool(getattr(self._settings, "hitl_enabled", True))
-        return bool(os.environ.get("MOA_HITL_ENABLED", "true").lower() in ("1", "true", "yes"))
+            return bool(getattr(self._settings, "hitl_enabled", False))
+        from app.config import settings
+
+        return bool(settings.hitl_enabled)
 
     # ── nodes ──────────────────────────────────────────────────────────────
 
@@ -445,8 +468,25 @@ class LangGraphOrchestrator:
                 "langgraph orchestrator: agent failed after %d attempts (%s)",
                 failure.attempts, reason,
             )
-            return {
+            shared = {
                 "fsm_state": fsm_state,
+                "retry_count": failure.attempts - 1,
+                "retry_reason": reason,
+                "hitl_kind": "failure_escalation",
+                "node_path": ["execute"],
+            }
+            if not self._hitl_enabled():
+                # 与 MoAPipeline 同一条门：审批关闭时没有人可升级，退回错误语义。
+                # 两条引擎必须在这里给出同一个答案，否则 parity 会在 HITL 关闭的
+                # 部署上分叉。
+                return {
+                    **shared,
+                    "status": "error",
+                    "error": "agent execution failed",
+                    "error_code": ErrorCode.AGENT_FAILED.value,
+                }
+            return {
+                **shared,
                 "status": "pending_review",
                 "raw_output": (
                     f"[自动处理失败] 已尝试 {failure.attempts} 次仍未完成。\n"
@@ -455,10 +495,6 @@ class LangGraphOrchestrator:
                 ),
                 "guard_action": GuardianAction.REVIEW.value,
                 "guard_reason": "自动处理失败，已转人工处理",
-                "hitl_kind": "failure_escalation",
-                "retry_count": failure.attempts - 1,
-                "retry_reason": reason,
-                "node_path": ["execute"],
             }
         except Exception as exc:  # noqa: BLE001 - mirrored from MoAPipeline
             logger.exception("langgraph orchestrator: agent execution failed")

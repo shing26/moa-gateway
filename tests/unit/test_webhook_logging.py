@@ -115,6 +115,10 @@ def test_webhook_writes_request_log_for_agent_flow(monkeypatch) -> None:
 
 def test_webhook_escalates_agent_failure_to_hitl(monkeypatch) -> None:
     """重试预算耗尽 → 升级人工（ADR-010），不再只回一句 500。"""
+    from app.config import settings
+
+    # 升级路径依赖审批开关，而它默认 false——测试必须自己定死，别依赖本机 .env
+    monkeypatch.setattr(settings, "hitl_enabled", True)
     calls = []
 
     async def fake_log(*args, **kwargs):

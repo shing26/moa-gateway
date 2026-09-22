@@ -361,6 +361,10 @@ async def test_golden_failure_escalation_matches(monkeypatch) -> None:
 
     失败路径是"看起来等价、其实分叉"最容易发生的地方，所以它也要进 golden。
     """
+    from app.config import settings
+
+    # HITL 开关默认 false，升级路径依赖它，测试必须自己定死（本机 .env 与 CI 不同）
+    monkeypatch.setattr(settings, "hitl_enabled", True)
     pipeline, graph, engine, _store, _agent = build_pair(
         monkeypatch, agent=FailingAgent()
     )
@@ -384,3 +388,30 @@ async def test_golden_failure_escalation_matches(monkeypatch) -> None:
     # 会话真身都停在 SUSPENDED（RETRY --TASK_FAILED--> SUSPENDED）
     assert engine.peek("fail-fsm").state.value == "SUSPENDED"
     assert engine.peek("fail-graph").state.value == "SUSPENDED"
+
+
+@pytest.mark.asyncio
+async def test_golden_failure_with_hitl_disabled_matches(monkeypatch) -> None:
+    """HITL 关闭时的失败路径也必须两引擎一致（都退回 error）。
+
+    这是 2026-09-22 CI 变红暴露的分叉：管线读 ``settings.hitl_enabled``，图却回退到
+    另一个变量名 ``MOA_HITL_ENABLED``（默认 true）——同一个概念两个默认值。
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "hitl_enabled", False)
+    pipeline, graph, _engine, _store, _agent = build_pair(
+        monkeypatch, agent=FailingAgent()
+    )
+
+    fsm_result = await pipeline.run(
+        make_event("随便问点什么", "off-fsm"), channel="test", target="t1"
+    )
+    graph_result = await graph.run(
+        make_event("随便问点什么", "off-graph"), channel="test", target="t1"
+    )
+
+    assert fsm_result.status == "error"
+    assert graph_result.status == "error"
+    assert _comparable(graph_result) == _comparable(fsm_result)
+    assert fsm_result.retry_count == graph_result.retry_count == 1
