@@ -63,6 +63,10 @@ class PipelineResult:
     # ——这个区分是 2026-09-22 接 eval_score 到审计时定下的语义。
     eval_score: float | None = None
     eval_issues: tuple[str, ...] = ()
+    # 工具活动：tool_calls=3 / tool_errors=3 表示"三个工具全失败但任务仍返回了结果"。
+    # 没有这两个数，"任务完成"与"优雅失败"在审计里长得一样。
+    tool_calls: int = 0
+    tool_errors: int = 0
 
 
 def _merge_guard(
@@ -478,6 +482,10 @@ class MoAPipeline:
         cost_usd = float(llm_metrics.get("cost_usd", 0.0))
         llm_latency_ms = float(llm_metrics.get("llm_latency_ms", 0.0))
         fallback_used = str(llm_metrics.get("fallback_used", ""))
+        # 工具活动：只有真调工具且真的报告了的 agent（当前是 TaskAgent）会写这两个键。
+        # tool_calls=3/tool_errors=3 就是"三个工具全失败却仍返回了结果"。
+        tool_calls = int(envelope.agent_local_slot.get("tool_calls_total", 0) or 0)
+        tool_errors = int(envelope.agent_local_slot.get("tool_errors_total", 0) or 0)
         # M6：调用后累计真实成本（超限影响的是该会话的"下一次"请求）
         if self.budget_guard is not None and cost_usd > 0:
             self.budget_guard.record(event.session_id, cost_usd)
@@ -550,6 +558,9 @@ class MoAPipeline:
                     eval_issues=eval_result.issues,
                     retry_count=retry_count,
                     hitl_kind=hitl_kind,
+                    tool_calls=tool_calls,
+                    tool_errors=tool_errors,
+                    route_fallback=fallback,
                 )
             return PipelineResult(
                 trace_id=event.trace_id, state="SUSPENDED", intent=intent,
@@ -560,6 +571,7 @@ class MoAPipeline:
                 agent_name=agent_name, guard_action=verdict.action.value,
                 eval_score=eval_result.score, eval_issues=eval_result.issues,
                 hitl_kind=hitl_kind or "review",
+                tool_calls=tool_calls, tool_errors=tool_errors,
             )
 
         if verdict.action == GuardianAction.DENY:
@@ -576,6 +588,9 @@ class MoAPipeline:
                     eval_issues=eval_result.issues,
                     retry_count=retry_count,
                     hitl_kind=hitl_kind,
+                    tool_calls=tool_calls,
+                    tool_errors=tool_errors,
+                    route_fallback=fallback,
                 )
             return PipelineResult(
                 trace_id=event.trace_id, state=state, intent=intent,
@@ -585,6 +600,7 @@ class MoAPipeline:
                 agent_name=agent_name, guard_action=verdict.action.value,
                 eval_score=eval_result.score, eval_issues=eval_result.issues,
                 hitl_kind=hitl_kind,
+                tool_calls=tool_calls, tool_errors=tool_errors,
             )
 
         response = self.adapter.adapt(raw_output, channel=channel, target=target)
@@ -613,6 +629,9 @@ class MoAPipeline:
                 eval_score=eval_result.score,
                 eval_issues=eval_result.issues,
                 retry_count=retry_count,
+                tool_calls=tool_calls,
+                tool_errors=tool_errors,
+                route_fallback=fallback,
             )
         return PipelineResult(
             trace_id=event.trace_id, state=state, intent=intent,
@@ -624,4 +643,5 @@ class MoAPipeline:
             agent_name=agent_name, guard_action=verdict.action.value,
             retry_count=retry_count,
             eval_score=eval_result.score, eval_issues=eval_result.issues,
+            tool_calls=tool_calls, tool_errors=tool_errors,
         )

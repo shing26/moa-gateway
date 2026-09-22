@@ -130,10 +130,14 @@ class TaskAgent:
                 for r in results
             ]
             total_tools = sum(r.tool_calls for r in results)
+            total_tool_errors = sum(r.tool_errors for r in results)
             envelope.agent_local_slot["tool_calls_total"] = total_tools
+            # 工具失败必须留下计数：否则"任务真的完成"与"所有工具都失败但优雅降级"
+            # 在审计里长得一模一样（2026-09-22 外部评估指出的可观测性缺口）。
+            envelope.agent_local_slot["tool_errors_total"] = total_tool_errors
             logger.info(
-                "task agent done trace=%s tool_calls=%d cost_usd=%s",
-                envelope.trace_id, total_tools, spent["cost_usd"],
+                "task agent done trace=%s tool_calls=%d tool_errors=%d cost_usd=%s",
+                envelope.trace_id, total_tools, total_tool_errors, spent["cost_usd"],
             )
             return answer
         finally:

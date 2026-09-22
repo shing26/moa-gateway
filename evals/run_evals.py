@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,20 @@ def _ratio(numerator: int, denominator: int) -> float:
     return round(numerator / denominator, 4) if denominator else 0.0
 
 
+# 一致性维度的重放次数。5 是折中：少于 3 次看不出摆动；每次都是一次真实 LLM
+# 调用，再多对本地小模型太慢。
+CONSISTENCY_REPEATS = 5
+
+
 async def run_intent_eval(cases: list[dict[str, Any]]) -> dict[str, Any]:
+    """意图路由准确率。
+
+    **只测正则表**：这里构造的 ``IntentRouter()`` 不注入微模型/路由 LLM，所以
+    正则未命中的用例只会拿到 ``default_intent``。数据集里那几条非正则用例的
+    ``expected_intent`` 恰好就是默认值 ``assistant``，因此本维度的 1.0 是"正则表
+    与标签集出自同一心智模型"的结果，不含模型路径的信息。模型兜底路径的稳定性
+    由 ``run_intent_consistency_eval`` 单独测。
+    """
     router = IntentRouter()
     correct = 0
     confusion: dict[str, dict[str, int]] = {}
@@ -46,6 +60,107 @@ async def run_intent_eval(cases: list[dict[str, Any]]) -> dict[str, Any]:
         "correct": correct,
         "accuracy": _ratio(correct, total),
         "confusion": confusion,
+    }
+
+
+async def run_intent_consistency_eval(
+    cases: list[dict[str, Any]],
+    *,
+    repeats: int = CONSISTENCY_REPEATS,
+    router: Any = None,
+) -> dict[str, Any]:
+    """同一输入重放 N 次，测意图判定的**一致率**。
+
+    与 ``run_intent_eval`` 的根本区别：那个维度比对"是否等于期望意图"，数据集、
+    正则表、标签出自同一设计者，所以恒 1.0 不含信息。**本维度没有任何期望值**，
+    只看同一输入多次判定是否收敛——因此设计者无法自证：除非系统真的稳定，写不出
+    1.0。它是对"这套评测有没有区分度"这个问题的直接回答。
+
+    它测的是**模型兜底路径**，所以必须真注入 LLM（默认取 ``app.deps.router``）；
+    数据集用例必须不命中任何意图正则，由
+    ``test_intent_consistency_cases_bypass_the_regex_table`` 钉住。
+
+    **必须一起看 ``levels`` / ``degraded_calls``**：路由对每个请求返回
+    ``(intent, level)``，``level="none"`` 表示微模型/路由 LLM 那一层没给出判定
+    （未配置、超时或报错），于是 intent 是**默认值**。此时"稳定"是"一致地降级"，
+    不是"判断稳定"——2026-09-22 实测正是这种情形（冷启动首次调用 4.2s 超过
+    ``ROUTER_LLM_TIMEOUT_MS=2000``，超时取消后模型热不起来，55/55 全是 none）。
+    所以稳定率 1.0 单独拿出来看毫无意义，报告必须把降级次数放在旁边。
+
+    **故意不设数值门禁**：在拿到真实数值之前定一个阈值就是编数字，而"编数字"正是
+    这个维度要治的病。报告只给数，不稳定用例逐个列出。
+    """
+    if router is None:
+        from app.deps import router as default_router
+
+        router = default_router
+    repeats = max(2, int(repeats))
+
+    stable = 0
+    agreement_sum = 0.0
+    unstable: list[dict[str, Any]] = []
+    levels: dict[str, int] = {}
+    for case in cases:
+        text = str(case.get("input", ""))
+        seen: list[str] = []
+        for _ in range(repeats):
+            intent, level = await router.route(text)
+            seen.append(str(intent))
+            levels[str(level)] = levels.get(str(level), 0) + 1
+        counts = Counter(seen)
+        top = max(counts.values())
+        agreement_sum += top / repeats
+        if top == repeats:
+            stable += 1
+        else:
+            unstable.append({
+                "id": case.get("id", ""),
+                "input": text,
+                "intents": dict(counts),
+            })
+
+    total = len(cases)
+    total_calls = total * repeats
+    degraded = int(levels.get("none", 0))
+    if total_calls and degraded == total_calls:
+        note = "全部调用降级到默认意图（路由 LLM 未配置或超时）——稳定率不代表判断质量"
+    elif degraded:
+        note = f"{degraded}/{total_calls} 次调用降级到默认意图，稳定率被高估"
+    else:
+        note = ""
+    return {
+        "total": total,
+        "repeats": repeats,
+        "stable": stable,
+        "stable_rate": _ratio(stable, total),
+        "avg_agreement": round(agreement_sum / total, 4) if total else 0.0,
+        "unstable": unstable,
+        "levels": levels,
+        "degraded_calls": degraded,
+        "note": note,
+        "skipped": 0,
+    }
+
+
+def _consistency_skipped(
+    cases: list[dict[str, Any]], *, repeats: int = CONSISTENCY_REPEATS
+) -> dict[str, Any]:
+    """--offline 的形态。
+
+    纯正则表是确定性的，拿它测一致率必然 1.0 —— 那是**假的一致**，比不测更糟
+    （会让人以为模型路径也稳）。所以离线如实标 skipped，而不是给一个漂亮的 1.0。
+    """
+    return {
+        "total": len(cases),
+        "repeats": repeats,
+        "stable": 0,
+        "stable_rate": 0.0,
+        "avg_agreement": 0.0,
+        "unstable": [],
+        "levels": {},
+        "degraded_calls": 0,
+        "note": "",
+        "skipped": len(cases),
     }
 
 
@@ -261,14 +376,36 @@ def build_summary(report: dict[str, Any]) -> str:
     tool = report.get("tool_selection", {})
     hitl = report.get("hitl_feedback", {})
     metrics = report.get("agent_metrics", {})
-    hitl_part = (
-        f"hitl cases={hitl['cases']} approve_rate={hitl['approve_rate']} "
-        f"介入率={hitl['human_intervention_rate']}"
-        if hitl.get("available")
-        else "hitl cases=0 (未采集)"
-    )
+    consistency = report.get("intent_consistency", {})
+    if consistency.get("skipped"):
+        consistency_part = f"intent_consistency skipped={consistency['skipped']} (离线无模型)"
+    else:
+        consistency_part = (
+            f"intent_consistency stable={consistency.get('stable_rate')} "
+            f"({consistency.get('stable')}/{consistency.get('total')}"
+            f"×{consistency.get('repeats')}, unstable={len(consistency.get('unstable', []))}, "
+            f"degraded={consistency.get('degraded_calls', 0)})"
+        )
+        # 降级次数不为 0 时给个显眼标记：稳定率此时是被高估的
+        if consistency.get("note"):
+            consistency_part += f" ⚠️ {consistency['note']}"
+    if hitl.get("available"):
+        synthetic = int(hitl.get("synthetic_cases", 0) or 0)
+        # 全为模拟时必须写在脸上：这些数来自本地模拟点击，不是真实用户被拦。
+        tag = (
+            " (全为模拟)"
+            if synthetic and synthetic >= hitl["cases"]
+            else f" (synthetic={synthetic})"
+        )
+        hitl_part = (
+            f"hitl cases={hitl['cases']}{tag} approve_rate={hitl['approve_rate']} "
+            f"介入率={hitl['human_intervention_rate']}"
+        )
+    else:
+        hitl_part = "hitl cases=0 (未采集)"
     return (
         f"intent accuracy={intent['accuracy']} ({intent['correct']}/{intent['total']}), "
+        f"{consistency_part}, "
         f"guard deny recall={guard['deny_recall']} precision={guard['deny_precision']}, "
         f"tool_select acc={tool.get('accuracy')} ({tool.get('correct')}/{tool.get('total')}), "
         f"e2e run={e2e['run']} skipped={e2e['skipped']} success={metrics.get('task_success_rate')}, "
@@ -276,11 +413,26 @@ def build_summary(report: dict[str, Any]) -> str:
     )
 
 
+# 与 scripts/collect_hitl_feedback.py 同一口径：合成流量（探针/评测/测试夹具）的
+# 会话前缀。命中即视为"不是真实用户产生的决策"。
+_SYNTHETIC_SESSION_PREFIXES = ("probe", "eval", "test", "dash-test")
+
+
+def _is_synthetic_session(session_id: Any) -> bool:
+    sid = str(session_id or "").lower()
+    return any(sid.startswith(prefix) for prefix in _SYNTHETIC_SESSION_PREFIXES)
+
+
 def load_hitl_feedback(datasets_dir: Path) -> dict[str, Any]:
     """人工决策回流用例（scripts/collect_hitl_feedback.py 从审计采集）。
 
     这是"人工介入率/放行率"等真实业务指标的来源；数据集不存在时如实报告
     不可用，而不是编造 0。
+
+    ``synthetic_cases`` / ``real_cases`` 是**必须看**的两个字段：随包数据集当前
+    全是本地模拟点击产生的种子（会话前缀 ``probe-*``），也就是说那几个比率目前
+    在统计上不具意义。派生自 session_id 前缀（口径与采集器一致），不需要改数据集
+    schema；报告与命令行摘要都会把"全为模拟"标出来。
     """
     dataset_path = datasets_dir / "hitl_feedback.jsonl"
     meta_path = datasets_dir / "hitl_feedback.meta.json"
@@ -299,9 +451,12 @@ def load_hitl_feedback(datasets_dir: Path) -> dict[str, Any]:
             meta = {}
     approved = sum(1 for c in cases if c.get("decision") == "approve")
     latencies = [c["decision_latency_ms"] for c in cases if c.get("decision_latency_ms")]
+    synthetic = sum(1 for c in cases if _is_synthetic_session(c.get("session_id")))
     return {
         "available": True,
         "cases": len(cases),
+        "synthetic_cases": synthetic,
+        "real_cases": len(cases) - synthetic,
         "approve_count": approved,
         "reject_count": len(cases) - approved,
         "approve_rate": _ratio(approved, len(cases)),
@@ -365,6 +520,12 @@ async def run_all(
     )
     hitl_feedback = load_hitl_feedback(datasets_dir)
     e2e_cases = load_dataset(datasets_dir / "e2e.jsonl")
+    consistency_cases = load_dataset(datasets_dir / "intent_consistency.jsonl")
+    consistency = (
+        _consistency_skipped(consistency_cases)
+        if offline
+        else await run_intent_consistency_eval(consistency_cases)
+    )
     e2e = (
         await run_e2e_offline(e2e_cases)
         if offline
@@ -375,6 +536,7 @@ async def run_all(
         "git_sha": git_sha(),
         "engine": engine or "default",
         "intent": intent,
+        "intent_consistency": consistency,
         "guard": guard,
         "tool_selection": tool_selection,
         "hitl_feedback": hitl_feedback,

@@ -608,6 +608,37 @@ async def test_log_request_receives_eval_score_and_issues(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_log_request_records_tool_activity(monkeypatch):
+    """工具活动必须进审计。
+
+    tool_calls=3 / tool_errors=3 就是"三个工具全失败却仍返回了结果"——没有这两个
+    数，"任务真的完成"与"优雅失败"在审计里无法区分。
+    """
+    calls = []
+
+    async def fake_log(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    class ToolReportingAgent:
+        async def execute(self, envelope):
+            envelope.agent_local_slot["tool_calls_total"] = 3
+            envelope.agent_local_slot["tool_errors_total"] = 3
+            return "用了工具但还是没查到"
+
+    monkeypatch.setattr(pipeline_module, "log_request", fake_log)
+    patch_agents(monkeypatch, ToolReportingAgent())
+    p = make_pipeline()
+    req = SimpleNamespace(method="POST", url="http://test/x")
+    result = await p.run(make_event(), channel="test", target="s1", request=req)
+
+    args, kwargs = calls[0]
+    assert kwargs["tool_calls"] == 3
+    assert kwargs["tool_errors"] == 3
+    assert result.tool_calls == 3
+    assert result.tool_errors == 3
+
+
+@pytest.mark.asyncio
 async def test_log_request_on_agent_failure_records_escalation(monkeypatch):
     from app.config import settings
 

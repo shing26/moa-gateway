@@ -27,15 +27,21 @@ flowchart LR
 
 ### 1. 智能路由省钱
 
-- 三级降级意图路由：正则命中直接返回，不调 LLM；只有低置信度才升级到微模型/路由模型。
+- 三级降级意图路由：正则命中直接返回，不调 LLM；未命中的才升级到微模型/路由模型，**再失败才落默认意图**。
 - LiteLLM 内核：`chat` / `chat_with_tools` 接口保持兼容，内置多模型 fallback，网络/429/5xx 自动切换。
 - 每次调用记录 `model_used`、`cost_usd`、`llm_latency_ms`、`fallback_used`，随审计日志落盘。
-- Eval 实测（`evals/datasets/intent.jsonl`，50 条）：意图准确率 1.0，其中 **46 条（92%）由正则直接命中，0 次 LLM 调用**，只有 4 条落到模型兜底路径。
+- Eval 实测（`evals/datasets/intent.jsonl`，50 条）：意图准确率 1.0，其中 **46 条（92%）由正则直接命中**。
 
 | 路由层级 | 说明 | 50 条用例命中 |
 |---|---|---|
 | 正则 | 0 LLM 调用，毫秒级返回 | 46（92%） |
-| 微模型 / 路由 LLM | 正则未命中时升级 | 4（8%） |
+| 默认意图 | 未命中正则，且该维度**不注入 LLM** | 4（8%） |
+
+> ⚠️ 这个维度**只验证正则表**：`run_intent_eval` 构造的 `IntentRouter()` 不注入任何 LLM，
+> 所以未命中正则的 4 条直接拿到默认意图 `assistant`——而它们的 `expected_intent` 恰好也是
+> `assistant`，等于"默认值命中默认值"。**它不含模型兜底路径的任何信息。**
+> 模型兜底路径的稳定性由 `intent_consistency` 维度单独测（下面第 3 节），实测预热后
+> 11 条非正则输入 × 5 次重放 = 55/55 一致。
 
 每次真实调用的成本都会写入审计日志 `cost_usd` 字段，可据此按周聚合实际节省金额。
 
@@ -57,18 +63,25 @@ uv run python scripts/redteam/run_redteam.py
 
 ### 3. 自建 Eval 评估体系
 
-每次改动可以跑三类评估并输出 JSON 报告：
+每次改动可以跑全部维度并输出 JSON 报告：
 
 ```bash
-uv run python evals/run_evals.py --offline   # 离线：e2e 走假引擎，标 skipped
-uv run python evals/run_evals.py             # 活体：e2e 走真实编排 + 真实判分（需 Ollama/pgvector 就绪）
+uv run python evals/run_evals.py --offline   # 离线：e2e 与一致性走假引擎/标 skipped，CI 用这条
+uv run python evals/run_evals.py             # 活体：真实编排 + 真实判分（需 Ollama/pgvector 就绪）
 ```
 
-| 维度 | 数据量 | 当前指标 |
-|---|---|---|
-| Intent 意图路由 | 50 条 | 准确率 1.0 |
-| Guard 守卫对抗 | 50 条 | deny 召回 1.0 / 精确率 1.0，review 召回 1.0 |
-| E2E 端到端 | 30 条 | 活体 `run=30 skipped=0`，success 1.0（可复现）；judge 均分与均时**随机器与模型变化**，不在此写死数字，看 `evals/reports/latest.json`（该目录未入库）；`--offline` 则标 skipped，CI 不依赖网络 |
+| 维度 | 数据量 | 当前指标 | **测的到底是什么** |
+|---|---|---|---|
+| Intent 意图路由 | 50 条 | 准确率 1.0 | **只测正则表**（不注入 LLM，见第 1 节警示） |
+| Intent 一致性 | 11 条 × 5 次 | 预热后 `stable 1.0 / degraded 0`（55/55 一致） | **模型兜底路径**：同输入重放看是否收敛。**没有期望值**，设计者无法自证 |
+| Guard 守卫对抗 | 50 条 | deny 召回 1.0 / 精确率 1.0 | 策略正则表 |
+| 工具选择 | 17 条 | 准确率 1.0（CI 硬门禁） | **`MockTaskLLM` 的规则表**，不是真实 Agent 的工具选择 |
+| E2E 端到端 | 30 条 | 活体 `run=30 skipped=0`，success 1.0 | 真实编排；judge 均分与均时随机器/模型变化，不写死数字 |
+| HITL 决策回流 | 4 条 | approve_rate 0.5，介入率 0.0065 | **全部是本地模拟点击的种子**（会话前缀 `probe-*`），n=4 无统计意义 |
+
+> **看这张表的方式**：前三行里有两行测的是"我自己写的规则表"，一行（一致性）测的是模型路径
+> 且无法自证；e2e 与 HITL 两行的数字目前不具统计意义。报告与命令行摘要会把
+> `degraded=…`、`(全为模拟)` 这类限定词直接打出来，就是为了不让"全绿"被误读。
 
 > **活体 e2e 的三次修复（2026-09-22）**：此前真跑必炸，`--offline` 是唯一跑法。三处原因都已修：
 > ① 判分器自建配置——base_url 取 `OPENAI_BASE_URL`（local 形态指向 Ollama）而 model 硬编码
@@ -251,6 +264,14 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   且默认相反，会让两引擎在只设其一的部署上给出不同答案）。
 - 评估器判定进 HITL 会让**更多**请求走人工：`empty_output`、`output_too_long` 这类原本直接返回的
   输出现在需要批准。这是语义正确的代价；若演示体验优先，可把 `empty_output` 排除出 `review`。
+- 意图路由的兜底层需要模型是**热的**：`ROUTER_LLM_TIMEOUT_MS` 默认 2000ms，而本地小模型冷启动
+  首次调用实测约 4.2s；`asyncio.wait_for` 超时会取消请求，模型因此热不起来，后续每次都超时——
+  **所有非正则输入静默降级成默认意图 `assistant`**，而审计里只有 intent、看不出降级
+  （2026-09-22 实测：不预热时 55/55 全降级，预热后 55/55 走 `router_llm`）。现在审计新增
+  `route_fallback` 字段记录路由层级（`none` = 降级到默认），`intent_consistency` 维度也会把
+  `degraded` 计数与警示语打出来。本地模型建议把超时上调到 8000ms 左右，或演示前先预热一次。
+- 微模型那一级（`MICRO_LLM_MODEL`）默认**未配置**，所以本地实际是"正则 → 路由 LLM → 默认意图"
+  两级。三级降级的能力在，但要配了 `MICRO_LLM_*` 才真的走三级。
 - `app/vectordb` 在未配置 `VECTOR_DB_DSN` 时回退到中文 bigram 关键词检索；配置
   pgvector + embedding 后切换到混合向量检索，并可通过 `/healthz` 观察后端状态。
 - Redis 不可用时回退内存存储，内存回退也支持幂等锁脚本（acquire/release/extend + TTL），但只保证单进程内语义。

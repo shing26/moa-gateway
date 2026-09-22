@@ -48,6 +48,7 @@ class ReActLoop:
         observations: list[str] = []
         steps: list[TaskStep] = []
         tool_calls = 0
+        tool_errors = 0
 
         for i in range(self._max_steps):
             decision = await self._llm.decide(
@@ -65,13 +66,14 @@ class ReActLoop:
                 )
                 return TaskResult(
                     answer=answer, steps=steps, plan=[subtask],
-                    tool_calls=tool_calls,
+                    tool_calls=tool_calls, tool_errors=tool_errors,
                 )
 
             if decision.action == "call_tool":
                 tool = self._tools.get(decision.tool_name)
                 if tool is None:
                     obs = f"[错误] 工具不存在: {decision.tool_name}"
+                    tool_errors += 1
                 else:
                     try:
                         args = dict(decision.arguments)
@@ -87,6 +89,7 @@ class ReActLoop:
                         tool_calls += 1
                     except Exception as exc:
                         obs = f"[错误] 工具 {decision.tool_name} 调用失败: {exc}"
+                        tool_errors += 1
                 observations.append(obs)
                 steps.append(TaskStep(index=i, decision=decision, observation=obs))
 
@@ -99,7 +102,8 @@ class ReActLoop:
             )
         )
         return TaskResult(
-            answer=final, steps=steps, plan=[subtask], tool_calls=tool_calls,
+            answer=final, steps=steps, plan=[subtask],
+            tool_calls=tool_calls, tool_errors=tool_errors,
         )
 
     @staticmethod

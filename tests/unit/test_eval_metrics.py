@@ -69,6 +69,29 @@ def test_load_hitl_feedback_reads_cases_and_meta(tmp_path: Path):
     assert result["note"] == "seeded"
 
 
+def test_load_hitl_feedback_flags_synthetic_seeds(tmp_path: Path):
+    """模拟点击产生的决策必须被标出来。
+
+    随包数据集当前全是本地模拟点击的种子（会话前缀 probe-*），那几个比率在统计上
+    没有意义——报告与命令行摘要都要让人看得见这一点，而不是悄悄把 0.65% 当真实
+    人工介入率讲。
+    """
+    (tmp_path / "hitl_feedback.jsonl").write_text(
+        "\n".join([
+            json.dumps({"id": "1", "decision": "approve", "session_id": "probe-seed-a-1"}),
+            json.dumps({"id": "2", "decision": "reject", "session_id": "probe-seed-r-1"}),
+            json.dumps({"id": "3", "decision": "approve", "session_id": "feishu-ou_abc"}),
+        ]),
+        encoding="utf-8",
+    )
+
+    result = load_hitl_feedback(tmp_path)
+
+    assert result["cases"] == 3
+    assert result["synthetic_cases"] == 2
+    assert result["real_cases"] == 1
+
+
 def test_agent_metrics_aggregates_the_three_sources():
     metrics = build_agent_metrics(
         {"success_rate": 0.9, "avg_cost_usd": 0.002, "avg_latency_ms": 1200.0},

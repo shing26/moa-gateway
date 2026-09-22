@@ -103,7 +103,51 @@ async def test_react_loop_missing_tool_reports_error() -> None:
     result = await loop.run(task="x", subtask="x")
 
     assert result.tool_calls == 0
+    assert result.tool_errors == 1
     assert "工具不存在" in result.answer
+
+
+@pytest.mark.asyncio
+async def test_react_loop_counts_failed_tool_calls() -> None:
+    """工具抛异常被降级成 observation（有意设计），但必须留下计数。
+
+    否则"任务真的完成"与"所有工具都失败但优雅降级"在审计里长得一模一样——
+    上层无法区分这两者（2026-09-22 外部评估指出的可观测性缺口）。
+    """
+    from app.agent_core.react import ReActLoop
+    from app.agents.tools import AgentTool, ToolRegistry
+
+    async def boom() -> str:
+        raise RuntimeError("tool down")
+
+    registry = ToolRegistry()
+    registry.register(
+        AgentTool(
+            name="broken",
+            description="always fails",
+            parameters={"type": "object", "properties": {}},
+            handler=boom,
+        )
+    )
+
+    class CallBroken:
+        async def decide(self, *, task, subtask, observations):
+            if observations:
+                return ReActDecision(action="finish", final_answer="")
+            return ReActDecision(action="call_tool", tool_name="broken", note="try")
+
+        async def plan(self, *, task):
+            return [task]
+
+        async def summarize(self, *, task, plan, results):
+            return "done"
+
+    loop = ReActLoop(CallBroken(), registry, max_steps=8, session_id="s1")
+    result = await loop.run(task="x", subtask="x")
+
+    assert result.tool_calls == 0
+    assert result.tool_errors == 1, "失败的调用必须计数，否则与'完成'无法区分"
+    assert "调用失败" in result.answer
 
 
 @pytest.mark.asyncio

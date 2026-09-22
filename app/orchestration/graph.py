@@ -147,6 +147,10 @@ class GraphState(TypedDict, total=False):
     retry_count: int
     retry_reason: str
     hitl_kind: str
+    # 工具活动：tool_calls=3/tool_errors=3 表示"三个工具全失败却仍返回了结果"，
+    # 用来把"完成"与"优雅失败"分开（与 MoAPipeline 写进审计的同名字段对齐）。
+    tool_calls: int
+    tool_errors: int
     # Reducer demo: LangGraph appends instead of overwriting, which is how you
     # get an execution trace for free without bolting on a tracer.
     node_path: Annotated[list[str], operator.add]
@@ -515,6 +519,8 @@ class LangGraphOrchestrator:
             "raw_output": raw_output,
             "fsm_state": fsm_state,
             "retry_count": attempts - 1,
+            "tool_calls": int(envelope.agent_local_slot.get("tool_calls_total", 0) or 0),
+            "tool_errors": int(envelope.agent_local_slot.get("tool_errors_total", 0) or 0),
             "llm_model": str(metrics.get("model_used", "")),
             "cost_usd": float(metrics.get("cost_usd", 0.0)),
             "llm_latency_ms": float(metrics.get("llm_latency_ms", 0.0)),
@@ -777,6 +783,8 @@ class LangGraphOrchestrator:
             hitl_kind=state.get("hitl_kind", ""),
             eval_score=state.get("eval_score"),
             eval_issues=tuple(state.get("eval_issues", ()) or ()),
+            tool_calls=int(state.get("tool_calls", 0) or 0),
+            tool_errors=int(state.get("tool_errors", 0) or 0),
         )
 
     async def run(

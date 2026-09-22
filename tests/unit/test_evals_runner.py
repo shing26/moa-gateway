@@ -208,6 +208,58 @@ def test_load_dataset_parses_jsonl(tmp_path: Path) -> None:
     assert cases[1]["id"] == "b"
 
 
+def test_summary_flags_synthetic_hitl_and_consistency() -> None:
+    """摘要必须把"全为模拟"和一致率写在脸上——报告里最容易被误读的两个数。"""
+    from evals.run_evals import build_summary
+
+    report = {
+        "intent": {"accuracy": 1.0, "correct": 50, "total": 50},
+        "intent_consistency": {
+            "total": 11, "repeats": 5, "stable": 9, "stable_rate": 0.8182,
+            "unstable": [{"id": "c1"}, {"id": "c2"}],
+            "degraded_calls": 0, "note": "",
+        },
+        "guard": {"deny_recall": 1.0, "deny_precision": 1.0},
+        "tool_selection": {"accuracy": 1.0, "correct": 17, "total": 17},
+        "e2e": {"run": 30, "skipped": 0},
+        "agent_metrics": {"task_success_rate": 1.0},
+        "hitl_feedback": {
+            "available": True, "cases": 4, "synthetic_cases": 4,
+            "approve_rate": 0.5, "human_intervention_rate": 0.0065,
+        },
+    }
+
+    summary = build_summary(report)
+
+    assert "intent_consistency stable=0.8182 (9/11×5, unstable=2, degraded=0)" in summary
+    assert "hitl cases=4 (全为模拟)" in summary
+
+
+def test_summary_warns_when_consistency_is_all_degraded() -> None:
+    """全部降级时必须在摘要里显眼提示：那时的稳定率是被高估的。"""
+    from evals.run_evals import build_summary
+
+    report = {
+        "intent": {"accuracy": 1.0, "correct": 50, "total": 50},
+        "intent_consistency": {
+            "total": 11, "repeats": 5, "stable": 11, "stable_rate": 1.0,
+            "unstable": [], "degraded_calls": 55,
+            "note": "全部调用降级到默认意图（路由 LLM 未配置或超时）——稳定率不代表判断质量",
+        },
+        "guard": {"deny_recall": 1.0, "deny_precision": 1.0},
+        "tool_selection": {"accuracy": 1.0, "correct": 17, "total": 17},
+        "e2e": {"run": 30, "skipped": 0},
+        "agent_metrics": {"task_success_rate": 1.0},
+        "hitl_feedback": {"available": False},
+    }
+
+    summary = build_summary(report)
+
+    assert "degraded=55" in summary
+    assert "⚠️" in summary
+    assert "稳定率不代表判断质量" in summary
+
+
 def test_write_report(tmp_path: Path) -> None:
     report_path = tmp_path / "reports" / "latest.json"
     write_report({"summary": "ok", "intent": {"accuracy": 1.0}}, report_path)
@@ -235,6 +287,10 @@ async def test_run_all_offline(tmp_path: Path) -> None:
         '{"id":"t1","input":"现在几点","expected_tool":"current_time"}\n',
         encoding="utf-8",
     )
+    (tmp_path / "intent_consistency.jsonl").write_text(
+        '{"id":"ic1","input":"客户问能不能下周交付"}\n',
+        encoding="utf-8",
+    )
 
     report = await run_all(offline=True, datasets_dir=tmp_path)
 
@@ -244,3 +300,7 @@ async def test_run_all_offline(tmp_path: Path) -> None:
     assert report["e2e"]["offline_smoke"] == 1
     assert report["tool_selection"]["accuracy"] == 1.0
     assert report["agent_metrics"]["tool_selection_accuracy"] == 1.0
+    # 离线没有模型可测 → 如实标 skipped，而不是给一个漂亮但假的一致率 1.0
+    assert report["intent_consistency"]["skipped"] == 1
+    assert report["intent_consistency"]["stable_rate"] == 0.0
+    assert "intent_consistency skipped=1" in report["summary"]
