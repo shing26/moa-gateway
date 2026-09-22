@@ -175,24 +175,92 @@ async def test_ok_path(monkeypatch):
     assert agent.envelopes[0].agent_local_slot["intent"] == "coding"
 
 
-@pytest.mark.asyncio
-async def test_ok_path_need_human_review_from_evaluator(monkeypatch):
-    patch_agents(monkeypatch, OkAgent())
-    p = MoAPipeline(
-        engine=Engine(),
+def _pipeline_with(engine, evaluator, guard):
+    return MoAPipeline(
+        engine=engine,
         router=FakeRouter(),
         memory=FakeMemory(),
         adapter=ResponseAdapter(),
-        evaluator=FakeEvaluator(need_human_review=True),
+        evaluator=evaluator,
         retriever=FakeRetriever(),
         prompt_registry=object(),
         flag_client=FakeFlagClient(),
-        guard_service=FakeGuard(GuardVerdict(action=GuardianAction.ALLOW, reason="ok")),
+        guard_service=guard,
         command_mode=FakeCommandMode(),
     )
+
+
+@pytest.mark.asyncio
+async def test_evaluator_review_brakes_into_hitl(monkeypatch):
+    """评估器判定必须真的刹车：此前 need_human_review 只是响应体里的一个字段，
+    输出照样以 status="ok" 送达用户（评估器"想升级人工"的意图没有接线到刹车）。"""
+    patch_agents(monkeypatch, OkAgent())
+    engine = Engine()
+    p = _pipeline_with(
+        engine,
+        FakeEvaluator(need_human_review=True, issues=("empty_output",)),
+        FakeGuard(GuardVerdict(action=GuardianAction.ALLOW, reason="ok")),
+    )
     result = await p.run(make_event(), channel="test", target="s1")
-    assert result.status == "ok"
+    assert result.status == "pending_review"
     assert result.need_human_review is True
+    assert result.guard_action == "review"
+    assert result.hitl_kind == "eval_review"
+    stored = engine.session_store.get_hitl(result.trace_id)
+    assert stored is not None and stored.hitl_kind == "eval_review"
+
+
+@pytest.mark.asyncio
+async def test_evaluator_dangerous_output_is_denied_not_reviewed(monkeypatch):
+    """AST 危险类 issue 不可审批：可执行危险代码是"绝不能交付"，不是"要不要批准"。"""
+    patch_agents(monkeypatch, OkAgent())
+    p = _pipeline_with(
+        Engine(),
+        FakeEvaluator(
+            need_human_review=True, score=0.0, issues=("dangerous_call:exec",),
+        ),
+        FakeGuard(GuardVerdict(action=GuardianAction.ALLOW, reason="ok")),
+    )
+    result = await p.run(make_event(), channel="test", target="s1")
+    assert result.status == "blocked"
+    assert result.guard_action == "deny"
+    assert result.hitl_kind == "eval_deny"
+
+
+@pytest.mark.asyncio
+async def test_guard_deny_outranks_evaluator_review(monkeypatch):
+    """优先级 DENY > REVIEW：策略拦截胜过评估器的质量提醒。"""
+    patch_agents(monkeypatch, OkAgent())
+    p = _pipeline_with(
+        Engine(),
+        FakeEvaluator(need_human_review=True, issues=("empty_output",)),
+        FakeGuard(GuardVerdict(action=GuardianAction.DENY, reason="blocked by policy")),
+    )
+    result = await p.run(make_event(), channel="test", target="s1")
+    assert result.status == "blocked"
+    # 请求侧 DENY 时根本不做输出/评估判定，所以来源不标记为评估器
+    assert result.hitl_kind == ""
+
+
+def test_verdict_from_eval_issues_classification():
+    """分级：AST 危险类 → DENY（不可审批）；其余 issue → REVIEW；干净 → None。"""
+    from app.pipeline import _verdict_from_eval_issues
+
+    assert _verdict_from_eval_issues(()) is None
+    assert _verdict_from_eval_issues(None) is None
+
+    review = _verdict_from_eval_issues(("empty_output", "output_too_long"))
+    assert review is not None and review.action == GuardianAction.REVIEW
+
+    for issue in (
+        "dangerous_call:exec",
+        "dangerous_method:system",
+        "dangerous_import:os",
+        "dangerous_import_from:subprocess",
+        "write_mode_open:w",
+    ):
+        verdict = _verdict_from_eval_issues((issue,))
+        assert verdict is not None and verdict.action == GuardianAction.DENY, issue
 
 
 @pytest.mark.asyncio
@@ -524,10 +592,12 @@ async def test_log_request_receives_eval_score_and_issues(monkeypatch):
     req = SimpleNamespace(method="POST", url="http://test/x")
     result = await p.run(make_event(), channel="test", target="s1", request=req)
 
-    assert result.status == "ok"
+    # 有 issue → 评估器判定为 REVIEW，输出进人工而不是直接送达（ADR-010 第二部分）
+    assert result.status == "pending_review"
     assert len(calls) == 1
     assert calls[0]["eval_score"] == 0.3
     assert calls[0]["eval_issues"] == ("contains_unfinished_marker",)
+    assert calls[0]["hitl_kind"] == "eval_review"
 
 
 @pytest.mark.asyncio

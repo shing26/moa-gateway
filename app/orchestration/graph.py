@@ -100,6 +100,7 @@ from app.fsm.state_machine import next_state
 from app.pipeline import PipelineResult
 from app.pipeline import FAILURE_ESCALATION_TEXT
 from app.pipeline import _merge_guard  # 复用同一条守卫优先级规则，避免两套运行时漂移
+from app.pipeline import _verdict_from_eval_issues  # 评估器分级同样只有一份定义
 from app.prompt_registry.canary import CanaryConfig, select_canary_version
 
 logger = logging.getLogger("moa.orchestration.langgraph")
@@ -125,6 +126,7 @@ class GraphState(TypedDict, total=False):
     retrieved_context: str
     raw_output: str
     eval_score: float
+    eval_issues: tuple[str, ...]
     guard_action: str
     guard_reason: str
     policy_hits: tuple[str, ...]
@@ -486,7 +488,13 @@ class LangGraphOrchestrator:
 
     async def _node_evaluate(self, state: GraphState) -> dict[str, Any]:
         result = await self._evaluator.score(state.get("raw_output", ""), state.get("intent", ""))
-        return {"eval_score": float(result.score), "node_path": ["evaluate"]}
+        # issues 必须留下来：guard 节点据此构造评估器 verdict（ADR-010 的第二部分），
+        # 只留一个 float 分数的话"评估器接刹车"在图上就无从实现。
+        return {
+            "eval_score": float(result.score),
+            "eval_issues": tuple(getattr(result, "issues", ()) or ()),
+            "node_path": ["evaluate"],
+        }
 
     async def _node_guard(self, state: GraphState) -> dict[str, Any]:
         raw_output = state.get("raw_output", "")
@@ -502,6 +510,7 @@ class LangGraphOrchestrator:
 
         verdict = self._guard.evaluate(agent_name, guard_intent, payload, hitl_enabled=hitl_enabled)
         policy_ids: tuple[str, ...] = ()
+        hitl_kind = ""
         if verdict.action != GuardianAction.DENY:
             try:
                 role = Role(payload.get("role", "operator"))
@@ -514,17 +523,28 @@ class LangGraphOrchestrator:
             except Exception:  # noqa: BLE001 - mirrored from MoAPipeline
                 output_verdict = GuardVerdict(action=GuardianAction.ALLOW, reason="ok")
                 policy_ids = ()
-            verdict = _merge_guard(verdict, output_verdict, policy_ids)
+            eval_verdict = _verdict_from_eval_issues(state.get("eval_issues", ()))
+            merged = _merge_guard(verdict, output_verdict, eval_verdict)
+            if eval_verdict is not None and merged is eval_verdict:
+                hitl_kind = (
+                    "eval_deny"
+                    if eval_verdict.action == GuardianAction.DENY
+                    else "eval_review"
+                )
+            verdict = merged
 
         return {
             "guard_action": verdict.action.value,
             "guard_reason": verdict.reason,
             "policy_hits": policy_ids,
+            "hitl_kind": hitl_kind,
             "node_path": ["guard"],
         }
 
     async def _node_prepare_hitl(self, state: GraphState) -> dict[str, Any]:
-        hitl_kind = state.get("hitl_kind", "review")
+        # guard 节点在未命中评估器时会显式写空串，所以这里用 or 归一化：
+        # 缺省来源是 guard 策略判定（"review"）。
+        hitl_kind = state.get("hitl_kind") or "review"
         hitl = HitlRequest(
             session_id=state["session_id"],
             trace_id=state["trace_id"],
@@ -719,6 +739,8 @@ class LangGraphOrchestrator:
             retry_count=int(state.get("retry_count", 0) or 0),
             retry_reason=state.get("retry_reason", ""),
             hitl_kind=state.get("hitl_kind", ""),
+            eval_score=state.get("eval_score"),
+            eval_issues=tuple(state.get("eval_issues", ()) or ()),
         )
 
     async def run(

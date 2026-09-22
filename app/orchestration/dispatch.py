@@ -124,6 +124,8 @@ class EngineDispatcher:
             retry_count=result.retry_count,
             retry_reason=result.retry_reason,
             hitl_kind=result.hitl_kind,
+            eval_score=result.eval_score,
+            eval_issues=result.eval_issues,
         )
 
 

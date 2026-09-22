@@ -58,16 +58,62 @@ class PipelineResult:
     retry_count: int = 0
     retry_reason: str = ""
     hitl_kind: str = ""
+    # 评估结果：dispatcher 用它们给图路径写审计（此前图路径算了 eval_score 却
+    # 无处安放，审计里永远是 None）。None 表示"没跑评测"，与 0.0（判为危险）不同
+    # ——这个区分是 2026-09-22 接 eval_score 到审计时定下的语义。
+    eval_score: float | None = None
+    eval_issues: tuple[str, ...] = ()
 
 
-def _merge_guard(verdict: GuardVerdict, output_verdict: GuardVerdict, policy_ids: tuple[str, ...]) -> GuardVerdict:
+def _merge_guard(
+    verdict: GuardVerdict,
+    output_verdict: GuardVerdict,
+    eval_verdict: GuardVerdict | None = None,
+) -> GuardVerdict:
+    """合并三个判定来源，优先级 DENY > REVIEW。
+
+    第三个参数此前是调用方传进来却从未被使用的 ``policy_ids``（死参数），现在
+    承载评估器判定——它是第四道闸门：guard 策略查的是合规（内网 IP / 密钥 /
+    价格承诺），评估器查的是**输出本身**的完整性与危险性。评估器判 DENY 时不可
+    审批（危险代码不是"要不要批准"的问题），判 REVIEW 时进人工。
+    """
     if verdict.action == GuardianAction.DENY:
         return verdict
     if output_verdict.action == GuardianAction.DENY:
         return output_verdict
+    if eval_verdict is not None and eval_verdict.action == GuardianAction.DENY:
+        return eval_verdict
     if output_verdict.action == GuardianAction.REVIEW:
         return output_verdict
+    if eval_verdict is not None and eval_verdict.action == GuardianAction.REVIEW:
+        return eval_verdict
     return verdict
+
+
+# 这些 issue 前缀代表"输出里含可执行的危险动作"，不可审批只能拦。
+_EVAL_DENY_PREFIXES = (
+    "dangerous_call:",
+    "dangerous_method:",
+    "dangerous_import:",
+    "dangerous_import_from:",
+    "write_mode_open:",
+)
+
+
+def _verdict_from_eval_issues(issues: Any) -> GuardVerdict | None:
+    """把评估器的 issues 变成一个 verdict 来源；干净输出返回 None。
+
+    这是"评估器要求人工"从哑标志变成真刹车的那一步：此前
+    ``EvalResult.need_human_review`` 只被塞进响应体，没有任何动作，于是一个
+    ``empty_output``（score 0.0）但没命中策略规则的输出会以 ``status="ok"``
+    正常送达用户。两条引擎共用本函数，判定不会分叉。
+    """
+    issues = tuple(issues or ())
+    if not issues:
+        return None
+    if any(str(issue).startswith(_EVAL_DENY_PREFIXES) for issue in issues):
+        return GuardVerdict(action=GuardianAction.DENY, reason="evaluator: unsafe output")
+    return GuardVerdict(action=GuardianAction.REVIEW, reason="evaluator: quality check")
 
 
 class MoAPipeline:
@@ -445,6 +491,9 @@ class MoAPipeline:
             guard_intent = "execute_code"
             guard_hitl = True
         verdict = self.guard_service.evaluate(agent_name, guard_intent, payload, hitl_enabled=guard_hitl)
+        # 审批来源：只有评估器判定真的赢下合并时才标记，guard 触发时留空以保持
+        # 既有审计语义（collect_hitl_feedback 按 guard_action 配对决策）。
+        hitl_kind = ""
         if verdict.action == GuardianAction.DENY:
             policy_ids: tuple[str, ...] = ()
         else:
@@ -459,13 +508,21 @@ class MoAPipeline:
             except Exception:
                 output_verdict = GuardVerdict(action=GuardianAction.ALLOW, reason="ok")
                 policy_ids = ()
-            verdict = _merge_guard(verdict, output_verdict, policy_ids)
+            eval_verdict = _verdict_from_eval_issues(eval_result.issues)
+            merged = _merge_guard(verdict, output_verdict, eval_verdict)
+            if eval_verdict is not None and merged is eval_verdict:
+                hitl_kind = (
+                    "eval_deny"
+                    if eval_verdict.action == GuardianAction.DENY
+                    else "eval_review"
+                )
+            verdict = merged
 
         if verdict.action == GuardianAction.REVIEW:
             hitl_request = HitlRequest(
                 session_id=event.session_id, trace_id=event.trace_id, agent_output=raw_output,
                 intent=intent, agent_name=agent_name, channel=channel, target=target,
-                created_at=time.time(),
+                created_at=time.time(), hitl_kind=hitl_kind or "review",
             )
             self.engine.session_store.store_hitl(event.session_id, hitl_request)
             await self.engine.handle_event(MoAEvent(
@@ -477,6 +534,7 @@ class MoAPipeline:
                 card = ApprovalCard(
                     session_id=event.session_id, trace_id=event.trace_id, agent_name=agent_name,
                     intent=intent, agent_output=raw_output, channel=channel, target=target,
+                    hitl_kind=hitl_kind or "review",
                 )
                 await self.card_sender.send_card(card)
             if request is not None:
@@ -491,6 +549,7 @@ class MoAPipeline:
                     eval_score=eval_result.score,
                     eval_issues=eval_result.issues,
                     retry_count=retry_count,
+                    hitl_kind=hitl_kind,
                 )
             return PipelineResult(
                 trace_id=event.trace_id, state="SUSPENDED", intent=intent,
@@ -499,6 +558,8 @@ class MoAPipeline:
                 llm_model=llm_model, cost_usd=cost_usd,
                 llm_latency_ms=llm_latency_ms, fallback_used=fallback_used,
                 agent_name=agent_name, guard_action=verdict.action.value,
+                eval_score=eval_result.score, eval_issues=eval_result.issues,
+                hitl_kind=hitl_kind or "review",
             )
 
         if verdict.action == GuardianAction.DENY:
@@ -514,6 +575,7 @@ class MoAPipeline:
                     eval_score=eval_result.score,
                     eval_issues=eval_result.issues,
                     retry_count=retry_count,
+                    hitl_kind=hitl_kind,
                 )
             return PipelineResult(
                 trace_id=event.trace_id, state=state, intent=intent,
@@ -521,6 +583,8 @@ class MoAPipeline:
                 llm_model=llm_model, cost_usd=cost_usd,
                 llm_latency_ms=llm_latency_ms, fallback_used=fallback_used,
                 agent_name=agent_name, guard_action=verdict.action.value,
+                eval_score=eval_result.score, eval_issues=eval_result.issues,
+                hitl_kind=hitl_kind,
             )
 
         response = self.adapter.adapt(raw_output, channel=channel, target=target)
@@ -559,4 +623,5 @@ class MoAPipeline:
             llm_latency_ms=llm_latency_ms, fallback_used=fallback_used,
             agent_name=agent_name, guard_action=verdict.action.value,
             retry_count=retry_count,
+            eval_score=eval_result.score, eval_issues=eval_result.issues,
         )
