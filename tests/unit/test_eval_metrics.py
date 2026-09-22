@@ -112,3 +112,33 @@ async def test_e2e_success_rate_counts_status_mismatches():
     result = await run_e2e_eval(cases, pipeline=_Pipeline(), judge=_judge)
     assert result["success_rate"] == 0.5
     assert result["run"] == 2
+
+
+@pytest.mark.asyncio
+async def test_e2e_dataset_can_expect_a_non_ok_status():
+    """数据集能表达"期望被拦截"：expected.status 与真实状态一致即算通过。
+
+    为什么失败路径不写进 e2e.jsonl：guard 的 evaluate_output 检查的是 **agent
+    输出**而不是用户输入，活体路径下模型输出不可控，所以"输入含内网 IP 就必然
+    blocked"并不成立——那样加进去只是 flaky 的门禁数据。失败路径的可复现覆盖在
+    单测里（test_agent_retry.py / test_pipeline.py）。这条只钉住 harness 的表达
+    能力，免得以后想加拦截用例时以为必须改 schema。
+    """
+    from app.pipeline import PipelineResult
+
+    class _Pipeline:
+        async def run(self, event, *, channel, target):
+            return PipelineResult(
+                trace_id=event.trace_id, state="", intent="",
+                text="blocked by policy", status="blocked",
+            )
+
+    async def _judge(_input: str, _output: str, _criteria: str) -> float:
+        return 0.8
+
+    cases = [
+        {"id": "b", "input": "含内网 IP 的请求", "expected": {"status": "blocked"}},
+    ]
+    result = await run_e2e_eval(cases, pipeline=_Pipeline(), judge=_judge)
+    assert result["success_rate"] == 1.0
+    assert result["avg_judge_score"] == 0.8

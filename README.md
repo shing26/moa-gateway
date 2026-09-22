@@ -42,6 +42,10 @@ flowchart LR
 ### 2. 安全守卫 + HITL
 
 - 策略引擎覆盖内网 IP、密钥/Token、价格承诺，输出命中 `deny` 直接拦截，`review` 进入人工审批。
+- 静态评估器同样接入刹车（ADR-010）：AST 危险类问题（`exec`/`subprocess`/写模式 `open`…）直接
+  拦为 `deny`（不可审批），空输出、超长、非法 JSON 等质量问题进人工 `review`。此前
+  `need_human_review` 只是响应体里的一个字段，输出照样以 `ok` 送达。
+- 执行期失败带归因重试一次，再失败自动升级人工（复用同一套审批闭环，`hitl_kind` 区分来源）。
 - 策略命中 `review` 的输出强制人工审批，飞书审批卡片闭环：通过送达、拒绝丢弃；`execute_code` 工具未开放，避免占位桩造成假审批。
 - 红队实测：200 条对抗用例，期望拦截 120 条全部命中，漏网 0，误拦截 0，召回率/精确率 100%。
 
@@ -64,7 +68,7 @@ uv run python evals/run_evals.py             # 活体：e2e 走真实编排 + �
 |---|---|---|
 | Intent 意图路由 | 50 条 | 准确率 1.0 |
 | Guard 守卫对抗 | 50 条 | deny 召回 1.0 / 精确率 1.0，review 召回 1.0 |
-| E2E 端到端 | 30 条 | 活体 `run=30 skipped=0`，success 1.0 / judge 均分 0.7428 / 均时 1984 ms；`--offline` 则标 skipped，CI 不依赖网络 |
+| E2E 端到端 | 30 条 | 活体 `run=30 skipped=0`，success 1.0（可复现）；judge 均分与均时**随机器与模型变化**，不在此写死数字，看 `evals/reports/latest.json`（该目录未入库）；`--offline` 则标 skipped，CI 不依赖网络 |
 
 > **活体 e2e 的两次修复（2026-09-22）**：此前真跑必炸，`--offline` 是唯一跑法。两处原因都已修：
 > ① 判分器自建配置——base_url 取 `OPENAI_BASE_URL`（local 形态指向 Ollama）而 model 硬编码
@@ -221,6 +225,7 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 
 > **agent-gateway**（FastAPI · Redis · LiteLLM · OpenTelemetry）
 > - 三级降级意图路由 + Provider fallback，微模型分流简单请求，Eval 实测 50 条用例中 46 条正则直出（0 LLM 调用），成本随审计日志逐次核算。
+> - 任务状态机覆盖完整请求生命周期（`INIT→ROUTED→EXECUTING→OUTPUT_READY→COMPLETED`，失败走 `RETRY→SUSPENDED`）；执行期失败带归因重试一次、再失败自动升级人工审批。重试预算由状态机结构决定并有漂移守卫，双引擎事件序列逐字段等价（golden 含失败升级场景）。
 > - 策略守卫 + RBAC + 飞书 HITL 审批闭环，红队 200 条对抗用例召回率/精确率 100%。
 > - 自建 Eval 体系（150 条数据集 + LLM-as-judge），每次改动离线回归出 JSON 报告。
 > - 后端工程：鉴权中间件、Redis 会话存储（对话记忆 / HITL 审批状态 / 健康探活）、审计 WAL、OTel 链路、Docker + CI。
@@ -230,6 +235,15 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 
 ## 已知边界
 
+- 执行期状态与重试（ADR-010）：FSM 覆盖完整请求生命周期
+  （`INIT→ROUTED→EXECUTING→OUTPUT_READY→COMPLETED`，失败走 `RETRY→SUSPENDED`），因此成功响应
+  的 `state` 是 `COMPLETED`（此前停在 `ROUTED`——四个状态当时是装饰）。重试预算是**状态机结构**
+  （`RETRY_BUDGET = 1`）而不是配置项，有漂移守卫钉住；失败原因经 `AgentEnvelope.failure_reason`
+  喂回 prompt，重试耗尽后升级人工审批。**工具级失败不走重试**：ReAct 把它转成 observation 让模型
+  自愈（那是更细粒度的恢复，且盲目重试有副作用的工具是危险的），只有上抛到 pipeline 的基础设施
+  异常（LLM 超时/网络/解析）才重试。`MOA_HITL_ENABLED=false` 时无人可升级，退回原来的 error 返回。
+- 评估器判定进 HITL 会让**更多**请求走人工：`empty_output`、`output_too_long` 这类原本直接返回的
+  输出现在需要批准。这是语义正确的代价；若演示体验优先，可把 `empty_output` 排除出 `review`。
 - `app/vectordb` 在未配置 `VECTOR_DB_DSN` 时回退到中文 bigram 关键词检索；配置
   pgvector + embedding 后切换到混合向量检索，并可通过 `/healthz` 观察后端状态。
 - Redis 不可用时回退内存存储，内存回退也支持幂等锁脚本（acquire/release/extend + TTL），但只保证单进程内语义。
