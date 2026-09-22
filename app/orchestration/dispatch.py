@@ -121,6 +121,9 @@ class EngineDispatcher:
             cost_usd=result.cost_usd,
             llm_latency_ms=result.llm_latency_ms,
             fallback_used=result.fallback_used,
+            retry_count=result.retry_count,
+            retry_reason=result.retry_reason,
+            hitl_kind=result.hitl_kind,
         )
 
 

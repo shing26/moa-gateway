@@ -25,6 +25,10 @@ class HitlRequest:
     channel: str
     target: str
     created_at: float = 0.0
+    # 审批来源：guard 策略判定（"review"）／评估器判定（"eval_review"）／
+    # 自动处理失败后的升级（"failure_escalation"）。默认值让 Redis 里既有的
+    # 挂起记录仍能反序列化（缺字段走默认），回调侧审计据此区分来源。
+    hitl_kind: str = "review"
 
 
 class RedisHitlStorage:
@@ -237,6 +241,9 @@ class Engine:
             state=previous.state if previous else State.INIT,
             session_id=event.session_id,
             trace_id=event.trace_id,
+            # 必须显式携带：StateContext 每次都是新建的，不带上就等于每次事件
+            # 都把重试计数清零（此前该字段从未被读出，所以这个缺口没暴露过）。
+            retry_count=previous.retry_count if previous else 0,
             metadata=metadata,
         )
         current = ctx.state
@@ -248,6 +255,11 @@ class Engine:
             logger.exception("invalid transition: %s", exc)
             raise
         ctx.state = current
+        if event.event == Event.TASK_FAILED:
+            ctx.retry_count += 1
+        elif event.event in (Event.MESSAGE_RECEIVED, Event.RESET, Event.CANCEL):
+            # 重试预算是"每个请求"的，不是"每个会话"的：新请求或重置即归零。
+            ctx.retry_count = 0
         if event.event in (Event.RESET, Event.CANCEL):
             state_stack = []
             ctx.metadata["hitl_pending"] = False

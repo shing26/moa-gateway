@@ -107,6 +107,17 @@ class FixedOutputAgent:
         return self.output
 
 
+class FailingAgent:
+    """每次都抛异常：用来验证两条引擎的重试耗尽路径逐字段等价。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute(self, envelope):
+        self.calls += 1
+        raise RuntimeError("golden boom")
+
+
 def make_registry() -> PromptRegistry:
     registry = PromptRegistry()
     for name in ("coder", "general", "review", "task"):
@@ -342,3 +353,34 @@ async def test_long_term_memory_write_parity(monkeypatch) -> None:
         docs = await ltm.list_for(user)
         assert len(docs) == 1, f"{user} should have exactly one memory slot"
         assert "小张" in docs[0].content
+
+
+@pytest.mark.asyncio
+async def test_golden_failure_escalation_matches(monkeypatch) -> None:
+    """重试预算耗尽 → 两条引擎都升级人工，且逐字段一致（ADR-010）。
+
+    失败路径是"看起来等价、其实分叉"最容易发生的地方，所以它也要进 golden。
+    """
+    pipeline, graph, engine, _store, _agent = build_pair(
+        monkeypatch, agent=FailingAgent()
+    )
+
+    fsm_result = await pipeline.run(
+        make_event("随便问点什么", "fail-fsm"), channel="test", target="t1"
+    )
+    graph_result = await graph.run(
+        make_event("随便问点什么", "fail-graph"), channel="test", target="t1"
+    )
+
+    assert fsm_result.status == "pending_review"
+    assert graph_result.status == "pending_review"
+    assert _comparable(graph_result) == _comparable(fsm_result)
+
+    # 重试真的发生过，且两条引擎报同一个数
+    assert fsm_result.retry_count == 1
+    assert graph_result.retry_count == 1
+    assert fsm_result.hitl_kind == graph_result.hitl_kind == "failure_escalation"
+    assert "boom" in fsm_result.retry_reason
+    # 会话真身都停在 SUSPENDED（RETRY --TASK_FAILED--> SUSPENDED）
+    assert engine.peek("fail-fsm").state.value == "SUSPENDED"
+    assert engine.peek("fail-graph").state.value == "SUSPENDED"

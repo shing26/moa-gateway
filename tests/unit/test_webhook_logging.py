@@ -26,6 +26,16 @@ class RaisingAgent:
         raise RuntimeError("boom")
 
 
+class FakeCardSender:
+    """替掉真实飞书卡片发送器：失败升级会走卡片通道，测试不该打真网络。"""
+
+    def __init__(self):
+        self.cards = []
+
+    async def send_card(self, card):
+        self.cards.append(card)
+
+
 def _patch_pipeline(monkeypatch, agent):
     async def fake_rate(key):
         return (True, 10)
@@ -49,6 +59,7 @@ def _patch_pipeline(monkeypatch, agent):
     monkeypatch.setattr(pipeline_module, "get_agent", lambda name: agent)
     monkeypatch.setattr(pipeline.retriever, "retrieve", fake_retrieve)
     monkeypatch.setattr(pipeline.flag_client, "get", fake_flag)
+    monkeypatch.setattr(pipeline, "card_sender", FakeCardSender(), raising=False)
     monkeypatch.setattr(
         pipeline_module,
         "select_canary_version",
@@ -102,11 +113,12 @@ def test_webhook_writes_request_log_for_agent_flow(monkeypatch) -> None:
     assert call[6] == "allow"
 
 
-def test_webhook_writes_request_log_on_agent_failure(monkeypatch) -> None:
+def test_webhook_escalates_agent_failure_to_hitl(monkeypatch) -> None:
+    """重试预算耗尽 → 升级人工（ADR-010），不再只回一句 500。"""
     calls = []
 
     async def fake_log(*args, **kwargs):
-        calls.append(args)
+        calls.append((args, kwargs))
 
     agent = RaisingAgent()
     _patch_pipeline(monkeypatch, agent)
@@ -117,13 +129,17 @@ def test_webhook_writes_request_log_on_agent_failure(monkeypatch) -> None:
             "/webhook/feishu",
             json={"session_id": "s1", "chat_id": "c1", "text": "hello"},
         )
-        assert res.status_code == 500
+        assert res.status_code == 200
+        assert res.json()["status"] == "pending_review"
 
     assert calls
-    call = calls[0]
-    assert call[1] == 500
-    assert call[7] == "hello"
-    assert call[6] == "error"
+    args, kwargs = calls[0]
+    assert args[1] == 200
+    assert args[7] == "hello"
+    assert args[6] == "review"
+    assert kwargs["retry_count"] == 1, "首次尝试 + 一次重试 = 1 次重试"
+    assert kwargs["hitl_kind"] == "failure_escalation"
+    assert "boom" in kwargs["retry_reason"]
 
 
 def test_webhook_debug_text_not_500(monkeypatch) -> None:

@@ -46,13 +46,33 @@ class TaskAgent:
         self._llm = llm or _build_task_llm()
         self._max_steps = max_steps
 
+    @staticmethod
+    def _metrics_payload(spent: dict[str, float], model_used: str) -> dict[str, object]:
+        return {
+            "model_used": model_used,
+            "cost_usd": round(spent["cost_usd"], 6),
+            "llm_latency_ms": round(spent["llm_latency_ms"], 1),
+            "fallback_used": "",
+            "prompt_tokens": int(spent["prompt_tokens"]),
+            "completion_tokens": int(spent["completion_tokens"]),
+        }
+
     async def execute(self, envelope: AgentEnvelope) -> str:
-        task = envelope.user_raw_input
+        raw_task = envelope.user_raw_input
         session_id = envelope.session_id
         logger.info(
-            "task agent execute trace=%s session=%s task=%s",
-            envelope.trace_id, session_id, task[:80],
+            "task agent execute trace=%s session=%s task=%s retry=%d",
+            envelope.trace_id, session_id, raw_task[:80], envelope.retry_attempt,
         )
+
+        # 重试归因：上一次失败的原因只拼进本地的 prompt 输入。user_raw_input 是
+        # 审计与长期记忆的原始输入，必须保持用户原话，不能被改写。
+        task = raw_task
+        if envelope.failure_reason:
+            task = (
+                f"（上一次尝试失败：{envelope.failure_reason}。"
+                f"请避开该失败原因，换一种方式完成。）\n{raw_task}"
+            )
 
         # N3：任务链路的 LLM 成本收集器。LLMClient.last_metrics 每次 chat
         # 都会覆盖，因此在 plan / 每轮 ReAct / summarize 后分阶段累加，
@@ -73,57 +93,53 @@ class TaskAgent:
             spent["llm_latency_ms"] += float(metrics.get("llm_latency_ms", 0.0) or 0.0)
             model_used = str(metrics.get("model_used", "")) or model_used
 
-        # 1. 规划
-        plan = await self._llm.plan(task=task)
-        _collect()
-        envelope.agent_local_slot["plan"] = list(plan)
-        logger.info("task agent plan=%s", plan)
-
-        # 2. 每个子任务跑 ReAct 循环
-        results: list[TaskResult] = []
-        for subtask in plan:
-            loop = ReActLoop(
-                self._llm,
-                tool_registry,
-                max_steps=self._max_steps,
-                session_id=session_id,
-            )
-            result = await loop.run(task=task, subtask=subtask)
+        try:
+            # 1. 规划
+            plan = await self._llm.plan(task=task)
             _collect()
-            results.append(result)
+            envelope.agent_local_slot["plan"] = list(plan)
+            logger.info("task agent plan=%s", plan)
 
-        # 3. 汇总
-        answer = await self._llm.summarize(task=task, plan=plan, results=results)
-        _collect()
-        envelope.agent_local_slot["task_results"] = [
-            [
-                {
-                    "index": s.index,
-                    "action": s.decision.action,
-                    "tool": s.decision.tool_name,
-                    "note": s.decision.note,
-                    "observation": s.observation,
-                }
-                for s in r.steps
+            # 2. 每个子任务跑 ReAct 循环
+            results: list[TaskResult] = []
+            for subtask in plan:
+                loop = ReActLoop(
+                    self._llm,
+                    tool_registry,
+                    max_steps=self._max_steps,
+                    session_id=session_id,
+                )
+                result = await loop.run(task=task, subtask=subtask)
+                _collect()
+                results.append(result)
+
+            # 3. 汇总
+            answer = await self._llm.summarize(task=task, plan=plan, results=results)
+            _collect()
+            envelope.agent_local_slot["task_results"] = [
+                [
+                    {
+                        "index": s.index,
+                        "action": s.decision.action,
+                        "tool": s.decision.tool_name,
+                        "note": s.decision.note,
+                        "observation": s.observation,
+                    }
+                    for s in r.steps
+                ]
+                for r in results
             ]
-            for r in results
-        ]
-        total_tools = sum(r.tool_calls for r in results)
-        envelope.agent_local_slot["tool_calls_total"] = total_tools
-        # N3：把累计成本写回 llm_metrics 通道（此前 ReAct 成本从不进审计）
-        envelope.agent_local_slot["llm_metrics"] = {
-            "model_used": model_used,
-            "cost_usd": round(spent["cost_usd"], 6),
-            "llm_latency_ms": round(spent["llm_latency_ms"], 1),
-            "fallback_used": "",
-            "prompt_tokens": spent["prompt_tokens"],
-            "completion_tokens": int(spent["completion_tokens"]),
-        }
-        logger.info(
-            "task agent done trace=%s tool_calls=%d cost_usd=%s",
-            envelope.trace_id, total_tools, spent["cost_usd"],
-        )
-        return answer
+            total_tools = sum(r.tool_calls for r in results)
+            envelope.agent_local_slot["tool_calls_total"] = total_tools
+            logger.info(
+                "task agent done trace=%s tool_calls=%d cost_usd=%s",
+                envelope.trace_id, total_tools, spent["cost_usd"],
+            )
+            return answer
+        finally:
+            # 写在 finally 里：失败的尝试同样烧了 token，不能因为这一轮没成功就
+            # 丢掉成本（重试时 app/agents/retry.py 会把各次尝试的 llm_metrics 累加）。
+            envelope.agent_local_slot["llm_metrics"] = self._metrics_payload(spent, model_used)
 
 
 register_agent("task", TaskAgent())

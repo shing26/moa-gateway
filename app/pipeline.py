@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -8,6 +9,7 @@ from typing import Any
 
 from app.agents.contract import AgentEnvelope, get_agent
 from app.agents.intent_map import INTENT_AGENT_MAP, resolve_agent_key
+from app.agents.retry import AgentExecutionFailed, execute_with_retry
 import app.agents.loader
 from app.channels.feishu_cards import ApprovalCard
 from app.command_mode import MODES, parse_command
@@ -24,6 +26,10 @@ from app.models.events import MoAEvent
 from app.prompt_registry.canary import CanaryConfig, select_canary_version
 
 logger = logging.getLogger("moa.pipeline")
+
+# 重试预算耗尽后用户看到的话。两条引擎共用同一个字面量——图路径的 _to_result
+# 会按 hitl_kind 分支取它，否则失败升级会被硬编码成"待审批的输出"的文案。
+FAILURE_ESCALATION_TEXT = "自动处理失败，已转人工处理"
 
 
 @dataclass(frozen=True)
@@ -47,6 +53,11 @@ class PipelineResult:
     # 错误契约（M1）：status="error" 时必填 ErrorCode 字面量，路由层据此
     # 产出结构化响应；FSM 与 LangGraph 两条引擎都必须填（parity 测试钉住）。
     error_code: str = ""
+    # ADR-010：重试与审批来源。dispatcher 据此给两条引擎写同一份审计 extra，
+    # 图路径因此不需要再补一套字段。
+    retry_count: int = 0
+    retry_reason: str = ""
+    hitl_kind: str = ""
 
 
 def _merge_guard(verdict: GuardVerdict, output_verdict: GuardVerdict, policy_ids: tuple[str, ...]) -> GuardVerdict:
@@ -102,6 +113,98 @@ class MoAPipeline:
     def _resolve_user_id(event: MoAEvent) -> str:
         raw = getattr(event, "user_id", "") or event.context.get("user_id", "")
         return str(raw or "").strip()
+
+    async def _advance_execute_state(
+        self, event: MoAEvent, fsm_event: FsmEvent, *, attempt: int = 0,
+    ) -> str:
+        """推进一个执行期 FSM 事件，返回推进后的状态名。
+
+        执行期的状态由 pipeline 在 agent 调用前后主动推进。此前完全没有推进，
+        所以 EXECUTING / RETRY / OUTPUT_READY / COMPLETED 都是不可达的装饰状态。
+        """
+        session_state = await self.engine.handle_event(MoAEvent(
+            trace_id=event.trace_id, event=fsm_event,
+            session_id=event.session_id, text=event.text,
+            context={"source": "pipeline_execute", "attempt": attempt},
+        ))
+        return session_state.context.state.value
+
+    async def _escalate_failure(
+        self,
+        *,
+        event: MoAEvent,
+        request: Any | None,
+        start: float,
+        agent_name: str,
+        intent: str,
+        channel: str,
+        target: str,
+        failure: AgentExecutionFailed,
+    ) -> PipelineResult:
+        """重试预算耗尽 → 升级人工，而不是只回一句 error 就结束。
+
+        复用 guard REVIEW 的同一套闭环（store_hitl → NEEDS_HUMAN → 卡片 →
+        回调 approve/reject → 审计），所以"自动处理失败"从此进入有人看、有留痕、
+        可回流评测的通道，而不是静默变成一个 500。
+        """
+        reason = f"{type(failure.last_error).__name__}: {failure.last_error}"
+        digest = (
+            f"[自动处理失败] 已尝试 {failure.attempts} 次仍未完成。\n"
+            f"失败原因：{reason}\n"
+            f"trace_id：{event.trace_id}"
+        )
+        if not settings.hitl_enabled:
+            # HITL 关闭时没有人可以升级，保持原有的错误返回语义。
+            if request is not None:
+                await log_request(
+                    request, 500, (time.monotonic() - start) * 1000,
+                    event.session_id, agent_name, intent, "error", event.text,
+                    "agent execution failed",
+                    retry_count=failure.attempts - 1, retry_reason=reason,
+                )
+            return PipelineResult(
+                trace_id=event.trace_id, state="SUSPENDED", intent=intent,
+                text="agent execution failed", status="error",
+                agent_name=agent_name, error_code=ErrorCode.AGENT_FAILED.value,
+                retry_count=failure.attempts - 1, retry_reason=reason,
+                hitl_kind="failure_escalation",
+            )
+        hitl_request = HitlRequest(
+            session_id=event.session_id, trace_id=event.trace_id, agent_output=digest,
+            intent=intent, agent_name=agent_name, channel=channel, target=target,
+            created_at=time.time(), hitl_kind="failure_escalation",
+        )
+        self.engine.session_store.store_hitl(event.session_id, hitl_request)
+        # NEEDS_HUMAN 在 SUSPENDED 上是自环：发它是为了置上 hitl_pending
+        # （dispatcher 据此把该会话的后续消息留给 FSM），状态本身已由
+        # RETRY --TASK_FAILED--> SUSPENDED 落定。
+        await self.engine.handle_event(MoAEvent(
+            trace_id=event.trace_id, event=FsmEvent.NEEDS_HUMAN,
+            session_id=event.session_id, text=event.text,
+            context={"source": "pipeline_failure_escalation"},
+        ))
+        if self.card_sender:
+            card = ApprovalCard(
+                session_id=event.session_id, trace_id=event.trace_id, agent_name=agent_name,
+                intent=intent, agent_output=digest, channel=channel, target=target,
+                hitl_kind="failure_escalation",
+            )
+            await self.card_sender.send_card(card)
+        if request is not None:
+            await log_request(
+                request, 200, (time.monotonic() - start) * 1000,
+                event.session_id, agent_name, intent, "review", event.text, digest,
+                retry_count=failure.attempts - 1, retry_reason=reason,
+                hitl_kind="failure_escalation",
+            )
+        return PipelineResult(
+            trace_id=event.trace_id, state="SUSPENDED", intent=intent,
+            text=FAILURE_ESCALATION_TEXT, status="pending_review",
+            need_human_review=True, agent_name=agent_name,
+            guard_action=GuardianAction.REVIEW.value,
+            retry_count=failure.attempts - 1, retry_reason=reason,
+            hitl_kind="failure_escalation",
+        )
 
     def describe(self) -> dict[str, str]:
         """This object's engine identity, surfaced by ``/healthz``."""
@@ -284,8 +387,28 @@ class MoAPipeline:
                 error_code=ErrorCode.BUDGET_EXCEEDED.value,
             )
 
+        # 执行期状态推进：TASK_STARTED 把 FSM 从 ROUTED 推到 EXECUTING；每次失败由
+        # on_failure 落 RETRY，第二次失败时状态机表自己把它推到 SUSPENDED（表即重试
+        # 预算），成功后由 TASK_SUCCESS 落 OUTPUT_READY。见 ADR-010。
+        state = await self._advance_execute_state(event, FsmEvent.TASK_STARTED)
+
+        async def _on_failure(attempt: int, exc: BaseException) -> None:
+            await self._advance_execute_state(
+                event, FsmEvent.TASK_FAILED, attempt=attempt,
+            )
+
         try:
-            raw_output = await agent.execute(envelope)
+            raw_output, attempts, _ = await execute_with_retry(
+                agent, envelope, on_failure=_on_failure,
+            )
+        except asyncio.CancelledError:
+            raise
+        except AgentExecutionFailed as failure:
+            return await self._escalate_failure(
+                event=event, request=request, start=start,
+                agent_name=agent_name, intent=intent,
+                channel=channel, target=target, failure=failure,
+            )
         except Exception:
             if request is not None:
                 await log_request(
@@ -299,6 +422,10 @@ class MoAPipeline:
                 agent_name=agent_name,
                 error_code=ErrorCode.AGENT_FAILED.value,
             )
+
+        state = await self._advance_execute_state(event, FsmEvent.TASK_SUCCESS)
+        # 审计记的是"重试了几次"（不含首次尝试），所以没重试时为 0、字段缺席。
+        retry_count = attempts - 1
 
         llm_metrics = envelope.agent_local_slot.get("llm_metrics") or {}
         llm_model = str(llm_metrics.get("model_used", ""))
@@ -363,6 +490,7 @@ class MoAPipeline:
                     fallback_used=fallback_used,
                     eval_score=eval_result.score,
                     eval_issues=eval_result.issues,
+                    retry_count=retry_count,
                 )
             return PipelineResult(
                 trace_id=event.trace_id, state="SUSPENDED", intent=intent,
@@ -385,6 +513,7 @@ class MoAPipeline:
                     fallback_used=fallback_used,
                     eval_score=eval_result.score,
                     eval_issues=eval_result.issues,
+                    retry_count=retry_count,
                 )
             return PipelineResult(
                 trace_id=event.trace_id, state=state, intent=intent,
@@ -396,6 +525,8 @@ class MoAPipeline:
 
         response = self.adapter.adapt(raw_output, channel=channel, target=target)
         self.memory.add(event.session_id, event.text, response.text)
+        # 交付完成 → COMPLETED（此前该状态没有任何入边，是彻底的死状态）。
+        state = await self._advance_execute_state(event, FsmEvent.DELIVERED)
         # 记忆写入放在成功路径之后：被 guard 拦截或需要审批的输出不入长期记忆。
         if self.long_term_memory is not None and user_id:
             try:
@@ -417,6 +548,7 @@ class MoAPipeline:
                 fallback_used=fallback_used,
                 eval_score=eval_result.score,
                 eval_issues=eval_result.issues,
+                retry_count=retry_count,
             )
         return PipelineResult(
             trace_id=event.trace_id, state=state, intent=intent,
@@ -426,4 +558,5 @@ class MoAPipeline:
             llm_model=llm_model, cost_usd=cost_usd,
             llm_latency_ms=llm_latency_ms, fallback_used=fallback_used,
             agent_name=agent_name, guard_action=verdict.action.value,
+            retry_count=retry_count,
         )

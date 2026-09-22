@@ -99,7 +99,7 @@ async def _process_hitl_card(action: str, trace_id: str, session_id: str) -> Non
             agent_name=hitl.agent_name, intent=hitl.intent,
             guard_action=f"hitl_{action}", input_text="",
             output_text=hitl.agent_output[:2000], hitl_decision=action,
-            hitl_duration_ms=duration_ms,
+            hitl_duration_ms=duration_ms, hitl_kind=hitl.hitl_kind,
         )
         await _safe_send(session_id, body, trace_id)
         outcome = f"hitl_{action}"

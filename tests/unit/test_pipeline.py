@@ -165,10 +165,12 @@ async def test_ok_path(monkeypatch):
     result = await p.run(make_event(), channel="test", target="s1")
     assert result.status == "ok"
     assert result.text == "agent reply"
-    assert result.state == "ROUTED"
+    # ADR-010：执行期状态真的走完了 ROUTED→EXECUTING→OUTPUT_READY→COMPLETED
+    assert result.state == "COMPLETED"
     assert result.intent == "coding"
     assert result.need_human_review is False
     assert result.fallback == "regex"
+    assert result.retry_count == 0
     assert memory.added == [("s1", "hello", "agent reply")]
     assert agent.envelopes[0].agent_local_slot["intent"] == "coding"
 
@@ -325,7 +327,9 @@ async def test_deny_path(monkeypatch):
     result = await p.run(make_event(), channel="test", target="s1")
     assert result.status == "blocked"
     assert result.text == "blocked by policy"
-    assert result.state == "ROUTED"
+    # 被拦截的输出已经有产出但未交付：状态停在 OUTPUT_READY（不借用 REJECTED，
+    # 那个状态专指"人工拒绝"）。
+    assert result.state == "OUTPUT_READY"
 
 
 @pytest.mark.asyncio
@@ -338,13 +342,38 @@ async def test_deny_via_real_guard_sensitive_resource(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_agent_error_returns_error_without_raising(monkeypatch):
+async def test_agent_error_escalates_to_hitl_after_retry(monkeypatch):
+    """重试预算耗尽 → 升级人工（ADR-010），不再静默回一句 error。"""
     patch_agents(monkeypatch, RaisingAgent())
+    engine = Engine()
+    card_sender = FakeCardSender()
+    p = make_pipeline(engine=engine, card_sender=card_sender)
+    result = await p.run(make_event(), channel="test", target="s1")
+    assert result.status == "pending_review"
+    assert result.text == "自动处理失败，已转人工处理"
+    assert result.intent == "coding"
+    assert result.state == "SUSPENDED"
+    assert result.retry_count == 1, "首次尝试 + 一次重试 = 1 次重试"
+    assert "boom" in result.retry_reason
+    assert result.hitl_kind == "failure_escalation"
+    stored = engine.session_store.get_hitl(result.trace_id)
+    assert stored is not None
+    assert stored.hitl_kind == "failure_escalation"
+    assert "boom" in stored.agent_output
+    assert len(card_sender.cards) == 1
+    assert card_sender.cards[0].hitl_kind == "failure_escalation"
+
+
+@pytest.mark.asyncio
+async def test_agent_error_with_hitl_disabled_returns_error(monkeypatch):
+    """HITL 关闭时没有人可以升级，保持原来的错误返回语义。"""
+    patch_agents(monkeypatch, RaisingAgent())
+    monkeypatch.setattr(pipeline_module.settings, "hitl_enabled", False)
     p = make_pipeline()
     result = await p.run(make_event(), channel="test", target="s1")
     assert result.status == "error"
     assert result.text == "agent execution failed"
-    assert result.intent == "coding"
+    assert result.retry_count == 1
 
 
 @pytest.mark.asyncio
@@ -502,22 +531,25 @@ async def test_log_request_receives_eval_score_and_issues(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_log_request_on_agent_error_logs_500(monkeypatch):
+async def test_log_request_on_agent_failure_records_escalation(monkeypatch):
     calls = []
 
     async def fake_log(*args, **kwargs):
-        calls.append(args)
+        calls.append((args, kwargs))
 
     monkeypatch.setattr(pipeline_module, "log_request", fake_log)
     patch_agents(monkeypatch, RaisingAgent())
     p = make_pipeline()
     req = SimpleNamespace(method="POST", url="http://test/x")
     result = await p.run(make_event(), channel="test", target="s1", request=req)
-    assert result.status == "error"
+    assert result.status == "pending_review"
     assert len(calls) == 1
-    assert calls[0][1] == 500
-    assert calls[0][6] == "error"
-    assert calls[0][8] == "agent execution failed"
+    args, kwargs = calls[0]
+    assert args[1] == 200
+    assert args[6] == "review"
+    assert kwargs["retry_count"] == 1
+    assert kwargs["hitl_kind"] == "failure_escalation"
+    assert "boom" in kwargs["retry_reason"]
 
 
 @pytest.mark.asyncio

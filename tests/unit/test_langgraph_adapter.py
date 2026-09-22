@@ -154,11 +154,11 @@ class _FakeMemory:
 COMPARED_FIELDS = ("status", "intent", "state", "need_human_review", "policy_hits", "text")
 # ``fallback`` is compared separately: see test_known_divergence_route_fallback.
 #
-# ``state`` is compared and must match. That matters more than it looks: the FSM
-# table has no ROUTED -> EXECUTING edge, so MoAPipeline's happy path never
-# reaches EXECUTING/OUTPUT_READY. The adapter reports the same states rather
-# than inventing the missing edge — see the module docstring of
-# app/orchestration/graph.py.
+# ``state`` is compared and must match. That matters more than it looks: both
+# runtimes must walk the same execution-phase sequence (TASK_STARTED → EXECUTING,
+# TASK_FAILED → RETRY, TASK_SUCCESS → OUTPUT_READY, DELIVERED → COMPLETED). ADR-010
+# gave the table those edges, so the adapter reports the real states instead of
+# having to avoid them — see the module docstring of app/orchestration/graph.py.
 
 
 def _comparable(result):
@@ -169,9 +169,11 @@ def _comparable(result):
 @pytest.mark.parametrize(
     ("output", "expected_status", "expected_state"),
     [
-        (ALLOW_OUTPUT, "ok", "ROUTED"),
+        # ADR-010 之后成功路径真的走完生命周期：交付即 COMPLETED。
+        (ALLOW_OUTPUT, "ok", "COMPLETED"),
         (REVIEW_OUTPUT, "pending_review", "SUSPENDED"),
-        (DENY_OUTPUT, "blocked", "ROUTED"),
+        # 被拦截的输出已产出但未交付，停在 OUTPUT_READY。
+        (DENY_OUTPUT, "blocked", "OUTPUT_READY"),
     ],
 )
 async def test_langgraph_matches_fsm_pipeline(
@@ -274,7 +276,10 @@ async def test_resume_approve_delivers_stored_output(monkeypatch) -> None:
 
     assert resumed.status == "approved"
     assert resumed.text == REVIEW_OUTPUT
-    assert resumed.state == FsmState.EXECUTING.value
+    # 批准放行的输出同样走完交付：EXECUTING --TASK_SUCCESS--> OUTPUT_READY
+    # --DELIVERED--> COMPLETED（见 ADR-010）。注意 Engine 真身仍停在 SUSPENDED
+    # ——resume 不驱动 Engine，审批回调才是那条路径的推进者。
+    assert resumed.state == FsmState.COMPLETED.value
     assert store.get_hitl(event.trace_id) is None, "resolved HITL must be cleared"
 
 

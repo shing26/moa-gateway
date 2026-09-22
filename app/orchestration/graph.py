@@ -42,17 +42,21 @@ decision — so the list below cannot quietly go stale.
 * Persistence is ``InMemorySaver`` by default. Swapping in a Redis/Postgres
   checkpointer is the interesting production question and is left to the
   caller via ``checkpointer=``.
+* Request-level retry (``app/agents/retry.py``) is *shared code*, not a graph
+  node: both runtimes call ``execute_with_retry`` inside their execute stage, so
+  the graph needs no cycle or back-edge and ``node_path`` stays a straight line.
 
 What building this surfaced about the FSM (worth knowing)
 --------------------------------------------------------
-The transition table has no ``ROUTED -> EXECUTING`` edge: ``EXECUTING`` is only
-reachable via ``SUSPENDED + HUMAN_APPROVED``. But ``MoAPipeline`` executes the
-agent *before* the guard inspects its output, so its happy path never passes
-through ``EXECUTING`` or ``OUTPUT_READY`` at all — those states are reached only
-on the approval path (``app/routes/webhook.py``). The reported ``PipelineResult.state``
-values therefore match on both runtimes precisely because this adapter does not
-invent a transition the table forbids; the ``node_path`` field carries the real
-execution trace instead.
+The original table had no ``ROUTED -> EXECUTING`` edge, so ``EXECUTING`` was
+reachable only via ``SUSPENDED + HUMAN_APPROVED`` and the happy path never passed
+through ``EXECUTING``/``OUTPUT_READY``/``RETRY``/``COMPLETED`` at all — half the
+states were decoration. ADR-010 closed that: ``TASK_STARTED`` enters ``EXECUTING``,
+``TASK_FAILED`` walks ``RETRY`` (where the retry budget structurally lives),
+``TASK_SUCCESS`` lands ``OUTPUT_READY`` and ``DELIVERED`` completes. Both runtimes
+emit that same sequence — this adapter through ``_advance_execute`` — so
+``PipelineResult.state`` still matches field-for-field, while ``node_path`` remains
+the finer-grained execution trace.
 
 The ``interrupt()`` replay rule
 -------------------------------
@@ -67,6 +71,7 @@ would see an empty result on the first invocation.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import operator
 import os
@@ -80,6 +85,7 @@ from langgraph.types import Command, interrupt
 import app.agents.loader  # noqa: F401  (import for agent registration side effects)
 from app.agents.contract import AgentEnvelope, get_agent
 from app.agents.intent_map import resolve_agent_key
+from app.agents.retry import AgentExecutionFailed, execute_with_retry
 from app.context_budget import apply_context_budget
 from app.engine import HitlRequest
 from app.guard.guard_service import GuardianAction, GuardVerdict
@@ -92,6 +98,7 @@ from app.fsm.state_machine import Event as FsmEvent
 from app.fsm.state_machine import State as FsmState
 from app.fsm.state_machine import next_state
 from app.pipeline import PipelineResult
+from app.pipeline import FAILURE_ESCALATION_TEXT
 from app.pipeline import _merge_guard  # 复用同一条守卫优先级规则，避免两套运行时漂移
 from app.prompt_registry.canary import CanaryConfig, select_canary_version
 
@@ -133,6 +140,11 @@ class GraphState(TypedDict, total=False):
     # 错误契约（M1）：error 存人类可读细节，error_code 存 ErrorCode 字面量；
     # 两者都经 _to_result 进入 PipelineResult，路由层据此产出结构化响应。
     error_code: str
+    # 重试与审批来源（ADR-010）：字段名与 MoAPipeline 写进审计 extra 的保持一致，
+    # dispatcher 因此能用同一段代码给两条引擎落账。
+    retry_count: int
+    retry_reason: str
+    hitl_kind: str
     # Reducer demo: LangGraph appends instead of overwriting, which is how you
     # get an execution trace for free without bolting on a tracer.
     node_path: Annotated[list[str], operator.add]
@@ -223,11 +235,12 @@ class LangGraphOrchestrator:
         graph.add_edge(START, "route")
         graph.add_edge("route", "retrieve")
         graph.add_edge("retrieve", "execute")
-        # M6：execute 起点做预算预检，超限短路到 blocked，不再进入评估
+        # M6：execute 起点做预算预检，超限短路到 blocked，不再进入评估；
+        # 重试预算耗尽时直接去人工审批（失败升级），与 FSM 路径同义。
         graph.add_conditional_edges(
             "execute",
             self._after_execute,
-            {"ok": "evaluate", "budget_blocked": "blocked"},
+            {"ok": "evaluate", "budget_blocked": "blocked", "escalate": "prepare_hitl"},
         )
         graph.add_edge("evaluate", "guard")
         graph.add_conditional_edges(
@@ -250,9 +263,11 @@ class LangGraphOrchestrator:
 
     @staticmethod
     def _after_execute(state: GraphState) -> str:
-        """M6：execute 后的分流——预算预检短路时直接去 blocked。"""
+        """execute 后的分流：预算预检短路去 blocked，重试耗尽去人工审批。"""
         if state.get("error_code") == ErrorCode.BUDGET_EXCEEDED.value:
             return "budget_blocked"
+        if state.get("status") == "pending_review":
+            return "escalate"
         return "ok"
 
     @staticmethod
@@ -263,6 +278,41 @@ class LangGraphOrchestrator:
         transition the FSM forbids — the transition table stays authoritative.
         """
         return next_state(current, event).value
+
+    def _engine_matches(self, state: GraphState, expected: str) -> bool:
+        """Engine（会话真身）是否正停在我们认为的那个状态。
+
+        ``resume()`` 刻意不驱动 Engine——审批回调才是那条路径的推进者（见 resume
+        docstring）。所以审批续跑时图自己的 fsm_state 会领先于 Engine，此时再往
+        Engine 发事件就会撞上非法迁移（SUSPENDED + TASK_SUCCESS）。两个写者不能抢
+        同一个会话：只在两者一致时，才由本图推进 Engine。
+        """
+        if self._engine is None:
+            return False
+        ctx = self._engine.peek(state["session_id"])
+        return ctx is not None and ctx.state.value == expected
+
+    async def _advance_execute(
+        self, state: GraphState, current: str, fsm_event: FsmEvent, *, attempt: int = 0
+    ) -> str:
+        """推进一个执行期事件：Engine（会话真身）与图自己的 fsm_state 同步前进。
+
+        两条引擎的执行期事件序列必须一致，否则 ADR-008 的等价性会在失败场景上
+        分叉。``current`` 显式传入而不是从 ``state`` 里读——同一个节点内要连续推进
+        多个事件，而 GraphState 在节点返回前不会更新。
+        """
+        advanced = self._advance(FsmState(current), fsm_event)
+        if self._engine_matches(state, current):
+            await self._engine.handle_event(
+                MoAEvent(
+                    trace_id=state.get("trace_id", ""),
+                    event=fsm_event,
+                    session_id=state["session_id"],
+                    text=state.get("text", ""),
+                    context={"source": "langgraph_execute", "attempt": attempt},
+                )
+            )
+        return advanced
 
     def _hitl_enabled(self) -> bool:
         if self._settings is not None:
@@ -369,23 +419,64 @@ class LangGraphOrchestrator:
                 "system_prompt": state.get("system_prompt", ""),
             },
         )
+        fsm_state = await self._advance_execute(
+            state, state.get("fsm_state", FsmState.ROUTED.value), FsmEvent.TASK_STARTED
+        )
+
+        async def _on_failure(attempt: int, exc: BaseException) -> None:
+            nonlocal fsm_state
+            fsm_state = await self._advance_execute(
+                state, fsm_state, FsmEvent.TASK_FAILED, attempt=attempt
+            )
+
         try:
-            raw_output = await agent.execute(envelope)
+            raw_output, attempts, _ = await execute_with_retry(
+                agent, envelope, on_failure=_on_failure,
+            )
+        except asyncio.CancelledError:
+            raise
+        except AgentExecutionFailed as failure:
+            # 重试预算耗尽 → 失败升级，与 MoAPipeline 走同一条人工闭环。
+            # fsm_state 已由 RETRY --TASK_FAILED--> SUSPENDED 落定。
+            reason = f"{type(failure.last_error).__name__}: {failure.last_error}"
+            logger.error(
+                "langgraph orchestrator: agent failed after %d attempts (%s)",
+                failure.attempts, reason,
+            )
+            return {
+                "fsm_state": fsm_state,
+                "status": "pending_review",
+                "raw_output": (
+                    f"[自动处理失败] 已尝试 {failure.attempts} 次仍未完成。\n"
+                    f"失败原因：{reason}\n"
+                    f"trace_id：{state.get('trace_id', '')}"
+                ),
+                "guard_action": GuardianAction.REVIEW.value,
+                "guard_reason": "自动处理失败，已转人工处理",
+                "hitl_kind": "failure_escalation",
+                "retry_count": failure.attempts - 1,
+                "retry_reason": reason,
+                "node_path": ["execute"],
+            }
         except Exception as exc:  # noqa: BLE001 - mirrored from MoAPipeline
             logger.exception("langgraph orchestrator: agent execution failed")
             return {
                 "error": str(exc),
                 "error_code": ErrorCode.AGENT_FAILED.value,
                 "status": "error",
+                "fsm_state": fsm_state,
                 "node_path": ["execute"],
             }
 
+        fsm_state = await self._advance_execute(state, fsm_state, FsmEvent.TASK_SUCCESS)
         metrics = envelope.agent_local_slot.get("llm_metrics") or {}
         # M6：调用后累计真实成本（超限影响的是该会话的"下一次"请求）
         if self._budget_guard is not None:
             self._budget_guard.record(state["session_id"], float(metrics.get("cost_usd", 0.0) or 0.0))
         return {
             "raw_output": raw_output,
+            "fsm_state": fsm_state,
+            "retry_count": attempts - 1,
             "llm_model": str(metrics.get("model_used", "")),
             "cost_usd": float(metrics.get("cost_usd", 0.0)),
             "llm_latency_ms": float(metrics.get("llm_latency_ms", 0.0)),
@@ -433,6 +524,7 @@ class LangGraphOrchestrator:
         }
 
     async def _node_prepare_hitl(self, state: GraphState) -> dict[str, Any]:
+        hitl_kind = state.get("hitl_kind", "review")
         hitl = HitlRequest(
             session_id=state["session_id"],
             trace_id=state["trace_id"],
@@ -442,6 +534,7 @@ class LangGraphOrchestrator:
             channel=state.get("channel", ""),
             target=state.get("target", ""),
             created_at=time.time(),
+            hitl_kind=hitl_kind,
         )
         hitl_id = state["trace_id"] or state["session_id"]
         self._session_store.store_hitl(state["session_id"], hitl)
@@ -459,10 +552,16 @@ class LangGraphOrchestrator:
                     context={"source": "langgraph_hitl"},
                 )
             )
+        # 从当前状态推进而不是硬编码 ROUTED：guard REVIEW 时图停在 OUTPUT_READY，
+        # 失败升级时停在 SUSPENDED（RETRY --TASK_FAILED--> SUSPENDED），两者都经
+        # NEEDS_HUMAN 落到 SUSPENDED。
         return {
             "hitl_id": hitl_id,
             "status": "pending_review",
-            "fsm_state": self._advance(FsmState.ROUTED, FsmEvent.NEEDS_HUMAN),
+            "hitl_kind": hitl_kind,
+            "fsm_state": self._advance(
+                FsmState(state.get("fsm_state", FsmState.ROUTED.value)), FsmEvent.NEEDS_HUMAN
+            ),
             "node_path": ["prepare_hitl"],
         }
 
@@ -511,13 +610,17 @@ class LangGraphOrchestrator:
                     logger.info("长期记忆更新 user=%s ops=%s", user_id, applied)
             except Exception:  # noqa: BLE001 - write failure must not lose the reply
                 logger.warning("长期记忆写入失败 user=%s", user_id, exc_info=True)
-        # Deliberately does NOT advance fsm_state. The transition table has no
-        # ROUTED -> EXECUTING edge: in the FSM, EXECUTING is only reachable via
-        # human approval. MoAPipeline executes the agent *before* the guard runs,
-        # so its happy path never passes through EXECUTING/OUTPUT_READY either —
-        # inventing that edge here would report a state the FSM forbids.
+        # 交付即完成：正常路径从 OUTPUT_READY 收口到 COMPLETED；人工批准放行的输出
+        # 此刻还在 EXECUTING（SUSPENDED --HUMAN_APPROVED--> EXECUTING），先落
+        # OUTPUT_READY 再交付，与正常路径共用同一条主干（见 ADR-010）。
+        fsm_state = state.get("fsm_state", FsmState.ROUTED.value)
+        if fsm_state == FsmState.EXECUTING.value:
+            fsm_state = await self._advance_execute(state, fsm_state, FsmEvent.TASK_SUCCESS)
+        if fsm_state == FsmState.OUTPUT_READY.value:
+            fsm_state = await self._advance_execute(state, fsm_state, FsmEvent.DELIVERED)
         return {
             "delivered_text": response.text,
+            "fsm_state": fsm_state,
             "status": "approved" if state.get("hitl_decision") else "ok",
             "node_path": ["deliver"],
         }
@@ -591,8 +694,12 @@ class LangGraphOrchestrator:
             text = state.get("error") or text
         if status == "pending_review":
             # Mirrors MoAPipeline's suspension message so the two runtimes are
-            # field-for-field interchangeable; the parity test locks this.
-            text = "Output requires human approval before delivery"
+            # field-for-field interchangeable; the parity test locks this. 失败升级
+            # 是例外：它没有"待审批的输出"，两引擎共用升级文案。
+            if state.get("hitl_kind") == "failure_escalation":
+                text = FAILURE_ESCALATION_TEXT
+            else:
+                text = "Output requires human approval before delivery"
         return PipelineResult(
             trace_id=state.get("trace_id", ""),
             state=state.get("fsm_state", FsmState.INIT.value),
@@ -609,6 +716,9 @@ class LangGraphOrchestrator:
             agent_name=state.get("agent_name", ""),
             guard_action=state.get("guard_action", ""),
             error_code=state.get("error_code", ""),
+            retry_count=int(state.get("retry_count", 0) or 0),
+            retry_reason=state.get("retry_reason", ""),
+            hitl_kind=state.get("hitl_kind", ""),
         )
 
     async def run(

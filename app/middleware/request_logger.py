@@ -54,6 +54,9 @@ async def log_request(
     fallback_used: str = "",
     eval_score: float | None = None,
     eval_issues: tuple[str, ...] = (),
+    retry_count: int = 0,
+    retry_reason: str = "",
+    hitl_kind: str = "",
 ) -> None:
     """写一条审计。
 
@@ -83,6 +86,14 @@ async def log_request(
     context_stats = _context_stats.get()
     if context_stats:
         extra["context_budget"] = context_stats
+    # 重试与审批来源只在真的发生时写入，避免改变既有审计条目的字段形状。
+    # retry_count 是**重试次数**（不含首次尝试），所以没有重试时保持缺席。
+    if retry_count:
+        extra["retry_count"] = retry_count
+    if retry_reason:
+        extra["retry_reason"] = retry_reason
+    if hitl_kind:
+        extra["hitl_kind"] = hitl_kind
     entry = AuditEntry(
         trace_id=_current_trace.get() or new_trace_id(),
         session_id=session_id or "unknown",

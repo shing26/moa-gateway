@@ -11,6 +11,12 @@ from app.channels.feishu_auth import FeishuTokenProvider
 
 logger = logging.getLogger("moa.channels.feishu_cards")
 
+# 卡片外观按审批来源切换。失败升级卡片里没有"待批准的输出"，只有失败详情；
+# 沿用审批卡片的标题与标签会让人误以为有内容要批，所以这里显式区分。
+_HITL_TITLES = {"failure_escalation": "Agent Gateway - 失败升级待处理"}
+_HITL_TEMPLATES = {"failure_escalation": "red"}
+_HITL_OUTPUT_LABELS = {"failure_escalation": "失败详情"}
+
 
 @dataclass
 class ApprovalCard:
@@ -21,20 +27,34 @@ class ApprovalCard:
     agent_output: str
     channel: str
     target: str
+    # 审批来源：guard 策略判定（"review"）／评估器判定（"eval_review"）／
+    # 自动处理失败后的升级（"failure_escalation"）。默认值让既有构造点不变。
+    hitl_kind: str = "review"
 
     def to_card_payload(self) -> dict[str, Any]:
         return {
             "config": {"wide_screen_mode": True},
             "header": {
-                "title": {"tag": "plain_text", "content": "Agent Gateway - 人工审批请求"},
-                "template": "orange",
+                "title": {
+                    "tag": "plain_text",
+                    "content": _HITL_TITLES.get(
+                        self.hitl_kind, "Agent Gateway - 人工审批请求"
+                    ),
+                },
+                "template": _HITL_TEMPLATES.get(self.hitl_kind, "orange"),
             },
             "elements": [
                 {"tag": "markdown", "content": f"**Agent**: {self.agent_name}"},
                 {"tag": "markdown", "content": f"**Intent**: {self.intent}"},
                 {"tag": "markdown", "content": f"**Trace**: {self.trace_id}"},
                 {"tag": "hr"},
-                {"tag": "markdown", "content": f"**Agent Output**:\n`\n{self.agent_output[:2000]}\n`"},
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**{_HITL_OUTPUT_LABELS.get(self.hitl_kind, 'Agent Output')}**:\n"
+                        f"`\n{self.agent_output[:2000]}\n`"
+                    ),
+                },
                 {"tag": "hr"},
                 {
                     "tag": "action",

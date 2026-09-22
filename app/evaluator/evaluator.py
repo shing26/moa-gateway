@@ -82,7 +82,6 @@ def _check_ast_for_dangerous(text: str) -> list[str]:
 
 
 class RuleEvaluator:
-    MAX_RETRY = 2
     MAX_LENGTH = 20000
 
     async def score(self, output_text: str, intent: str) -> EvalResult:

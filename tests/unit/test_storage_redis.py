@@ -120,6 +120,7 @@ class TestSessionStoreRedis:
             "agent_name": "coder",
             "channel": "feishu",
             "target": "chat_999",
+            "hitl_kind": "review",
         }
         assert store.get_hitl("trace-1") == req
 

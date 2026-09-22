@@ -49,7 +49,7 @@ async def webhook_callback(request: Request) -> JSONResponse:
             request, 200, 0, session_id=session_id, agent_name=hitl.agent_name,
             intent=hitl.intent, guard_action=f"hitl_{action}", input_text="",
             output_text=hitl.agent_output[:2000], hitl_decision=action,
-            hitl_duration_ms=hitl_duration_ms,
+            hitl_duration_ms=hitl_duration_ms, hitl_kind=hitl.hitl_kind,
         )
         return JSONResponse({
             "trace_id": trace_id, "state": session_state.context.state.value, "text": response.text, "status": "approved",
@@ -61,7 +61,7 @@ async def webhook_callback(request: Request) -> JSONResponse:
             request, 200, 0, session_id=session_id, agent_name=hitl.agent_name,
             intent=hitl.intent, guard_action=f"hitl_{action}", input_text="",
             output_text=hitl.agent_output[:2000], hitl_decision=action,
-            hitl_duration_ms=hitl_duration_ms,
+            hitl_duration_ms=hitl_duration_ms, hitl_kind=hitl.hitl_kind,
         )
         return JSONResponse({
             "trace_id": trace_id, "state": session_state.context.state.value, "status": "rejected",

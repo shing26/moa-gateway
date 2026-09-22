@@ -263,6 +263,14 @@ async def test_graph_records_cost_after_execute(monkeypatch):
         _memory = SimpleNamespace(get_history=lambda sid: [])
         # 真实 orchestrator 必有 _context_budget（None = 不裁剪）
         _context_budget = None
+        # ADR-010：执行期节点经 _advance_execute 推进状态。这个桩只验证成本记账，
+        # 所以不带 Engine（_engine=None 时不外发事件，只推进图自己的 fsm_state）。
+        _engine = None
+        # _advance 是 staticmethod，必须重新包一层，否则经实例访问会被绑成
+        # 实例方法、多收到一个 self 参数。
+        _advance = staticmethod(LangGraphOrchestrator._advance)
+        _advance_execute = LangGraphOrchestrator._advance_execute
+        _engine_matches = LangGraphOrchestrator._engine_matches
 
     async def fake_execute(env):
         env.agent_local_slot["llm_metrics"] = {"cost_usd": 0.3}
