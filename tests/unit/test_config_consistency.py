@@ -42,6 +42,9 @@ SINGLE_SOURCE_CONCEPTS = {
         "EMBEDDING_MODEL", "CODE_REVIEW_EMBEDDING_MODEL",
     ),
     "HITL 开关": ("HITL_ENABLED", "MOA_HITL_ENABLED"),
+    "检索库 DSN": (
+        "VECTOR_DB_DSN", "CODE_REVIEW_DATABASE_URL", "DATABASE_URL", "POSTGRES_URL",
+    ),
 }
 
 _ENV_READ = re.compile(r"""(?:os\.getenv|os\.environ\.get)\(\s*["']([A-Z0-9_]+)["']""")

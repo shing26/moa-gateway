@@ -13,9 +13,16 @@ logger = logging.getLogger("moa.channels.feishu_cards")
 
 # 卡片外观按审批来源切换。失败升级卡片里没有"待批准的输出"，只有失败详情；
 # 沿用审批卡片的标题与标签会让人误以为有内容要批，所以这里显式区分。
-_HITL_TITLES = {"failure_escalation": "Agent Gateway - 失败升级待处理"}
-_HITL_TEMPLATES = {"failure_escalation": "red"}
-_HITL_OUTPUT_LABELS = {"failure_escalation": "失败详情"}
+_HITL_TITLES = {
+    "failure_escalation": "Agent Gateway - 失败升级待处理",
+    "notification": "Agent Gateway - 通知",
+}
+_HITL_TEMPLATES = {"failure_escalation": "red", "notification": "blue"}
+_HITL_OUTPUT_LABELS = {"failure_escalation": "失败详情", "notification": "详情"}
+# 只有真的接了审批闭环的卡片才该有按钮。"notification" 用于**没有审批落地**的链路
+# （如 PR 审查报告）：那条路径从不 store_hitl，渲染审批按钮等于承诺一个点了必然
+# 失效的动作（2026-09-23 修正）。
+_NO_ACTION_KINDS = frozenset({"notification"})
 
 
 @dataclass
@@ -32,29 +39,21 @@ class ApprovalCard:
     hitl_kind: str = "review"
 
     def to_card_payload(self) -> dict[str, Any]:
-        return {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "title": {
-                    "tag": "plain_text",
-                    "content": _HITL_TITLES.get(
-                        self.hitl_kind, "Agent Gateway - 人工审批请求"
-                    ),
-                },
-                "template": _HITL_TEMPLATES.get(self.hitl_kind, "orange"),
+        elements: list[dict[str, Any]] = [
+            {"tag": "markdown", "content": f"**Agent**: {self.agent_name}"},
+            {"tag": "markdown", "content": f"**Intent**: {self.intent}"},
+            {"tag": "markdown", "content": f"**Trace**: {self.trace_id}"},
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": (
+                    f"**{_HITL_OUTPUT_LABELS.get(self.hitl_kind, 'Agent Output')}**:\n"
+                    f"`\n{self.agent_output[:2000]}\n`"
+                ),
             },
-            "elements": [
-                {"tag": "markdown", "content": f"**Agent**: {self.agent_name}"},
-                {"tag": "markdown", "content": f"**Intent**: {self.intent}"},
-                {"tag": "markdown", "content": f"**Trace**: {self.trace_id}"},
-                {"tag": "hr"},
-                {
-                    "tag": "markdown",
-                    "content": (
-                        f"**{_HITL_OUTPUT_LABELS.get(self.hitl_kind, 'Agent Output')}**:\n"
-                        f"`\n{self.agent_output[:2000]}\n`"
-                    ),
-                },
+        ]
+        if self.hitl_kind not in _NO_ACTION_KINDS:
+            elements += [
                 {"tag": "hr"},
                 {
                     "tag": "action",
@@ -73,7 +72,19 @@ class ApprovalCard:
                         },
                     ],
                 },
-            ],
+            ]
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": _HITL_TITLES.get(
+                        self.hitl_kind, "Agent Gateway - 人工审批请求"
+                    ),
+                },
+                "template": _HITL_TEMPLATES.get(self.hitl_kind, "orange"),
+            },
+            "elements": elements,
         }
 
     def to_message_payload(self) -> dict[str, Any]:

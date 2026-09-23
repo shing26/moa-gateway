@@ -62,3 +62,41 @@ def test_approval_card_message_payload_structure():
     assert msg["receive_id"] == "chat_789"
     assert msg["msg_type"] == "interactive"
     assert "header" in msg["content"]
+
+
+def test_notification_card_has_no_action_buttons():
+    """通知形态不渲染批准/拒绝按钮。
+
+    "notification" 给的是**没有审批落地**的链路（PR 审查报告）：那条路径从不
+    ``store_hitl``（`apps/` 下 0 处），渲染按钮等于承诺一个点了必然回"已失效"
+    的动作。2026-09-23 修正。
+    """
+    card = ApprovalCard(
+        session_id="t", trace_id="t", agent_name="code-review-report",
+        intent="human_in_the_loop", agent_output="需要人工复核",
+        channel="feishu", target="chat", hitl_kind="notification",
+    )
+    payload = card.to_card_payload()
+
+    assert [e for e in payload["elements"] if e.get("tag") == "action"] == []
+    assert payload["header"]["template"] == "blue"
+    assert "通知" in payload["header"]["title"]["content"]
+
+
+def test_code_review_review_card_is_a_notification_not_an_approval():
+    """PR 审查"需要人工复核"的卡片必须是通知形态（回归见上一条）。"""
+    from apps.code_review_pipeline.notifications.feishu_notifier import (
+        FeishuReviewNotifier,
+        ReviewNotification,
+    )
+
+    notif = ReviewNotification(
+        trace_id="tr-1", repo="acme/api", pr_number=7, author="dev",
+        changed_files=3, overall_need_human_review=True,
+        findings_by_severity={"critical": 1}, report=None,
+    )
+    card = FeishuReviewNotifier._build_review_card(notif)
+
+    assert card.hitl_kind == "notification"
+    assert [e for e in card.to_card_payload()["elements"] if e.get("tag") == "action"] == []
+    assert "不支持在此批准/拒绝" in card.agent_output

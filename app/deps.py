@@ -165,7 +165,17 @@ def init_feishu() -> None:
         _feishu_config = FeishuConfig(app_id=app_id, app_secret=app_secret)
         auth_provider = FeishuTokenProvider(FeishuAuthConfig(app_id=app_id, app_secret=app_secret))
         _card_sender = FeishuCardSender(auth_provider)
-        pipeline.set_card_sender(_card_sender)
+        # ENGINE=langgraph 时 pipeline 是 EngineDispatcher，它没有 set_card_sender
+        # （图路径按设计不发卡片，见 graph.py 的 scope limits）——此前这里会
+        # AttributeError 让**启动直接崩**：配了飞书凭据 + 切引擎即可复现。
+        setter = getattr(pipeline, "set_card_sender", None)
+        if setter is None:
+            logger.warning(
+                "当前编排器(%s)不支持 set_card_sender；HITL 卡片只在 FSM 路径发送",
+                type(pipeline).__name__,
+            )
+        else:
+            setter(_card_sender)
         logger.info("feishu card sender initialized")
     else:
         logger.warning("FEISHU_APP_ID / FEISHU_APP_SECRET not set; HITL cards disabled")

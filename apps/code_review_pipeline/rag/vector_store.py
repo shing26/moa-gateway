@@ -234,12 +234,12 @@ class InMemoryVectorStore:
 
 
 def build_vector_store() -> VectorStore:
-    dsn = (
-        os.getenv("CODE_REVIEW_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-        or os.getenv("POSTGRES_URL")
-        or ""
-    )
+    # DSN 与 app.config.settings 同源（同类分叉第 4 例，2026-09-23）：本模块此前
+    # 只认 CODE_REVIEW_DATABASE_URL/DATABASE_URL/POSTGRES_URL，不认 VECTOR_DB_DSN，
+    # 于是只设后者时网关有库、这里静默回落内存存储。
+    from app.config import settings
+
+    dsn = settings.vector_db_dsn or ""
     if not dsn:
         logger.info("no database URL configured; using in-memory vector store")
         db_path = os.getenv("CODE_REVIEW_VECTOR_DB_PATH")

@@ -106,6 +106,11 @@ class Settings:
         self.vector_db_dsn: str = (
             os.getenv("VECTOR_DB_DSN", "")
             or os.getenv("CODE_REVIEW_DATABASE_URL", "")
+            # 这两条是 code-review 侧历史沿用的名字，一并收编：review_store 过去
+            # 自己读它们而 config 不认，于是只设 DATABASE_URL 的部署在网关上"有库"、
+            # 在 review_store 上静默回落非持久化（同类分叉，2026-09-23）。
+            or os.getenv("DATABASE_URL", "")
+            or os.getenv("POSTGRES_URL", "")
         )
         self.vector_db_table: str = os.getenv("VECTOR_DB_TABLE", "gateway_documents")
         # 维度必须与 db/gateway_schema.sql 中的 vector(N) 一致。

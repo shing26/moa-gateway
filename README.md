@@ -76,7 +76,7 @@ uv run python evals/run_evals.py             # 活体：真实编排 + 真实判
 | Intent 一致性 | 11 条 × 5 次 | 预热后 `stable 1.0 / degraded 0`（55/55 一致） | **模型兜底路径**：同输入重放看是否收敛。**没有期望值**，设计者无法自证 |
 | Guard 守卫对抗 | 50 条 | deny 召回 1.0 / 精确率 1.0 | 策略正则表 |
 | 工具选择 | 17 条 | 准确率 1.0（CI 硬门禁） | **`MockTaskLLM` 的规则表**，不是真实 Agent 的工具选择 |
-| E2E 端到端 | 30 条 | 活体 `run=30 skipped=0`，success 1.0 | 真实编排；judge 均分与均时随机器/模型变化，不写死数字 |
+| E2E 端到端 | 30 条 | 活体 `run=30 skipped=0`，success 1.0；**intent_match 14/30** | 真实编排；judge 均分与均时随机器/模型变化，不写死数字。**`intent_match` 是"与数据集标签的偏离率"，不是"路由准确率"**——标签里 10 例的期望值其实是默认桶 `assistant`（哨兵而非真值），与路由 LLM 的判定天然不一致 |
 | HITL 决策回流 | 4 条 | approve_rate 0.5，介入率 0.0065 | **全部是本地模拟点击的种子**（会话前缀 `probe-*`），n=4 无统计意义 |
 
 > **看这张表的方式**：前三行里有两行测的是"我自己写的规则表"，一行（一致性）测的是模型路径
@@ -246,7 +246,7 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 > - 任务状态机覆盖完整请求生命周期（`INIT→ROUTED→EXECUTING→OUTPUT_READY→COMPLETED`，失败走 `RETRY→SUSPENDED`）；执行期失败带归因重试一次、再失败自动升级人工审批。重试预算由状态机结构决定并有漂移守卫，双引擎事件序列逐字段等价（golden 含失败升级场景）。
 > - 策略守卫 + RBAC + 飞书 HITL 审批闭环，红队 200 条对抗用例召回率/精确率 100%。
 > - 自建 Eval 体系（150 条数据集 + LLM-as-judge），每次改动离线回归出 JSON 报告。
-> - 后端工程：鉴权中间件、Redis 会话存储（对话记忆 / HITL 审批状态 / 健康探活）、审计 WAL、OTel 链路、Docker + CI。
+> - 后端工程：鉴权中间件、Redis 会话存储（对话记忆 / HITL 审批状态 / 健康探活）、审计 WAL（用 ContextVar 把 trace 贯通 16 个调用点）、Docker + CI；OTel 为**预留接口**（未接 exporter，见"已知边界"——别写成"OTel 链路"）。
 > - 支持 FSM / LangGraph 双引擎可切换（`ENGINE`），3 个 golden 场景逐字段等价验证进 CI。
 > - 统一错误契约（`ErrorCode` 枚举贯穿双引擎与路由层）+ per-session 预算拦截（`BUDGET_SESSION_LIMIT_USD`），配置层非法值启动即 fail-fast。
 > - 垂直应用：GitHub PR 多 Agent 代码审查（Triage → 静态分析 → 语义 RAG → 测试覆盖 → 报告）。
@@ -272,6 +272,19 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   `degraded` 计数与警示语打出来。本地模型建议把超时上调到 8000ms 左右，或演示前先预热一次。
 - 微模型那一级（`MICRO_LLM_MODEL`）默认**未配置**，所以本地实际是"正则 → 路由 LLM → 默认意图"
   两级。三级降级的能力在，但要配了 `MICRO_LLM_*` 才真的走三级。
+- **OTel 是预留接口，不是链路**（ADR-007 现状更正）：全仓库只有 2 个 span，
+  `opentelemetry-exporter-otlp` 未声明依赖（`uv.lock` 里 0 次），所以设了
+  `OTEL_EXPORTER_OTLP_ENDPOINT` 也只会落到 console；无 context propagation，OTel trace_id
+  与审计 trace_id 是两套 ID。真接线是标准管道工作（collector 本地 Docker 可跑），未做。
+- **PR 审查是只读审查，不是闭环**：`GitHubClient` 只有 `get_pr` / `get_pr_files`，
+  没有写回（评论 / review state / Checks）；该链路的"需要人工复核"卡片是**通知形态**
+  （不带批准/拒绝按钮，`hitl_kind="notification"`），因为它从不 `store_hitl`——渲染审批按钮
+  等于承诺一个点了必然失效的动作。**要变成闭环需要：写回接口 + HITL 存储与回调 + 该链路的
+  审计**，三件都缺。
+- **以下几项本地无法验收**（不是没做，是缺外部条件）：① 成本量化——`avg_cost_usd` 恒 0，
+  Ollama 不计费，需要付费 provider；② `hitl_feedback` 的 join 率与指标——需要**真实流量**
+  （当前 4 条全是模拟种子，`介入率 0.0065` 无统计意义）；③ 微模型那一级——需要第二个模型端点；
+  ④ 路由冷启动不降级——需要模型常驻（`.env` 的 `ROUTER_LLM_TIMEOUT_MS` 上调到 8000 或先预热）。
 - `app/vectordb` 在未配置 `VECTOR_DB_DSN` 时回退到中文 bigram 关键词检索；配置
   pgvector + embedding 后切换到混合向量检索，并可通过 `/healthz` 观察后端状态。
 - Redis 不可用时回退内存存储，内存回退也支持幂等锁脚本（acquire/release/extend + TTL），但只保证单进程内语义。

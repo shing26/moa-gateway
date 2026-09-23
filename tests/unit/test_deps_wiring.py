@@ -40,3 +40,26 @@ def test_langgraph_orchestrator_gets_the_same_instances() -> None:
     assert graph._budget_guard is deps.budget_guard
     assert graph._context_budget is deps.context_budget
     assert graph._long_term_memory is deps.long_term_memory
+
+
+def test_init_feishu_tolerates_an_orchestrator_without_set_card_sender(monkeypatch) -> None:
+    """ENGINE=langgraph 时 pipeline 是 EngineDispatcher，它没有 set_card_sender。
+
+    回归（2026-09-23）：`init_feishu()` 此前直接 `pipeline.set_card_sender(...)`，
+    于是"配了飞书凭据 + 切到 langgraph"会让**启动直接崩**（AttributeError）。
+    图路径按设计不发卡片（见 graph.py 的 scope limits），所以正确行为是告警跳过，
+    而不是把整个进程带下去。
+    """
+    from app import deps
+
+    class _DispatcherLike:
+        """只有 dispatcher 的方法，没有 set_card_sender。"""
+
+        def describe(self) -> dict[str, str]:
+            return {"engine": "langgraph"}
+
+    monkeypatch.setattr(deps, "pipeline", _DispatcherLike())
+    monkeypatch.setenv("FEISHU_APP_ID", "cli_test")
+    monkeypatch.setenv("FEISHU_APP_SECRET", "test-secret")
+
+    deps.init_feishu()  # 不该抛

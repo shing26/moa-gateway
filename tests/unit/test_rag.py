@@ -234,7 +234,10 @@ def test_build_vector_store_returns_in_memory_when_no_dsn(monkeypatch: pytest.Mo
 def test_build_vector_store_raises_when_dsn_set_but_no_psycopg(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("CODE_REVIEW_DATABASE_URL", "postgres://localhost/test")
+    # DSN 已统一到 settings（见 _build_dsn 的说明），所以这里改它而不是设 env
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "vector_db_dsn", "postgres://localhost/test")
     # Patch sys.modules, not the module attribute: build_vector_store() does a
     # FUNCTION-LOCAL `import psycopg`, so it never reads vector_store.psycopg.
     # A None entry in sys.modules makes the import itself raise ImportError.

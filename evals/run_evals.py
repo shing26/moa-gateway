@@ -275,6 +275,10 @@ async def run_e2e_offline(
         "avg_latency_ms": 0.0,
         "avg_cost_usd": 0.0,
         "success_rate": 0.0,
+        "intent_compared": 0,
+        "intent_matches": 0,
+        "intent_match_rate": 0.0,
+        "intent_mismatches": [],
         "offline_smoke": total,
     }
 
@@ -310,6 +314,9 @@ async def run_e2e_eval(
     latencies: list[float] = []
     costs: list[float] = []
     status_matches = 0
+    intent_compared = 0
+    intent_matches = 0
+    intent_mismatches: list[dict[str, Any]] = []
     try:
         for case in cases:
             event = MoAEvent(
@@ -329,6 +336,31 @@ async def run_e2e_eval(
                 scores.append(0.0)
             else:
                 status_matches += 1
+                # 数据集里声明的 intent 接上比对。此前该字段被写进用例却**从不被读**，
+                # 是装饰字段。2026-09-23 首次比对：预热后 14/30、冷启动 13/30 —— 说明
+                # 这是**结构性偏离**而非环境噪声，成因有两类：① 正则表缺陷（"写一个 X
+                # 示例"不命中 coding、`查询/查找` 抢走编码请求、`代码` 抢 analyze）；
+                # ② 路由 LLM 的系统性偏向（"解释/介绍/推荐某概念"一律判 translate）。
+                #
+                # **它是"与数据集标签的偏离率"，不是"路由准确率"**：10/16 例的期望值是
+                # `assistant`，而那个值其实是**默认桶（哨兵）**而非语义真值——"今天天气
+                # 怎么样"判成 search 反而更合理。要让这个数变成质量指标，得先重写数据集
+                # 标签（把"确实应为 assistant"与"没命中所以是默认值"分开），属独立议题。
+                #
+                # **独立指标，不折进 success_rate**：状态相符与意图相符是两类不同的问题，
+                # 混成一个数就再也分不出是哪一类在退化。
+                exp_intent = expected.get("intent") if isinstance(expected, dict) else None
+                if exp_intent:
+                    intent_compared += 1
+                    if exp_intent == result.intent:
+                        intent_matches += 1
+                    elif len(intent_mismatches) < 10:
+                        intent_mismatches.append({
+                            "id": case.get("id", ""),
+                            "input": str(case.get("input", ""))[:40],
+                            "expected": exp_intent,
+                            "actual": result.intent,
+                        })
                 scores.append(
                     await judge_fn(
                         str(case.get("input", "")),
@@ -344,6 +376,10 @@ async def run_e2e_eval(
         "run": len(cases),
         "skipped": 0,
         "success_rate": _ratio(status_matches, len(cases)),
+        "intent_compared": intent_compared,
+        "intent_matches": intent_matches,
+        "intent_match_rate": _ratio(intent_matches, intent_compared),
+        "intent_mismatches": intent_mismatches,
         "avg_judge_score": round(sum(scores) / len(scores), 4) if scores else 0.0,
         "avg_latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else 0.0,
         "avg_cost_usd": round(sum(costs) / len(costs), 6) if costs else 0.0,
@@ -403,12 +439,22 @@ def build_summary(report: dict[str, Any]) -> str:
         )
     else:
         hitl_part = "hitl cases=0 (未采集)"
+    e2e_part = (
+        f"e2e run={e2e['run']} skipped={e2e['skipped']} "
+        f"success={metrics.get('task_success_rate')}"
+    )
+    # 意图命中率只在真比对过时才显示（离线不跑 e2e，没得比）
+    if e2e.get("intent_compared"):
+        e2e_part += (
+            f" intent_match={e2e.get('intent_match_rate')} "
+            f"({e2e.get('intent_matches')}/{e2e.get('intent_compared')})"
+        )
     return (
         f"intent accuracy={intent['accuracy']} ({intent['correct']}/{intent['total']}), "
         f"{consistency_part}, "
         f"guard deny recall={guard['deny_recall']} precision={guard['deny_precision']}, "
         f"tool_select acc={tool.get('accuracy')} ({tool.get('correct')}/{tool.get('total')}), "
-        f"e2e run={e2e['run']} skipped={e2e['skipped']} success={metrics.get('task_success_rate')}, "
+        f"{e2e_part}, "
         f"{hitl_part}"
     )
 

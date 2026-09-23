@@ -63,6 +63,35 @@
   而 ADR-011 已查明真因是**路由 LLM 超时竞态**（`ROUTER_LLM_TIMEOUT_MS=2000` vs 冷启动
   4.2s → 静默降级到默认意图）。预热后实测 55/55 一致（`stable_rate` 1.0），完整活体跑
   0.9091 且报告自带 `degraded 2` 警示。**该目标既已达到、也不该用这个口径衡量**。
-- 已知未修（同类别但本轮未动）：`review_store._dsn()` 也各自读
-  `CODE_REVIEW_DATABASE_URL / DATABASE_URL / POSTGRES_URL`，未与 config 的 DSN 链统一；
-  守卫目前只覆盖 embedding 与 HITL 两个概念，DSN 未纳入。
+## 补充（同日后续：外部条件类逐项处置 + 收尾）
+
+外部条件类（原"B 类"）逐项核过后，只有两件能当场处置，其余是**决策**或**环境**而非代码：
+
+- **DSN 同类第 4 例，一并统一**。`review_store._build_dsn()` 与
+  `rag/vector_store.py:build_vector_store()` 各自读
+  `CODE_REVIEW_DATABASE_URL / DATABASE_URL / POSTGRES_URL`，而 config 读
+  `VECTOR_DB_DSN / CODE_REVIEW_DATABASE_URL` —— **只设 `VECTOR_DB_DSN` 的部署在网关侧
+  "有库"、在这两处静默回落非持久化**。现在 config 的链收编三组名字，两处只读
+  `settings.vector_db_dsn`；守卫的"检索库 DSN"概念已纳入。
+- **PR 审查卡片不再伪装审批**。该链路从不 `store_hitl`（`apps/` 下 0 处），却渲染带
+  批准/拒绝按钮的 `ApprovalCard` —— 点了必然回"已失效"。新增 `hitl_kind="notification"`
+  渲染形态（无 action 元素），`feishu_notifier._build_approval_card` 随之改名
+  `_build_review_card` 并标注"本卡片为通知，不支持在此批准/拒绝"。**PR 审查的定位明确为
+  "只读审查"**，写回 + HITL 存储 + 审计三件属独立议题。
+- **OTel：更正分类 + 降级表述**。原分类把它放在"需要外部条件"，但 **collector 本地 Docker
+  就能跑**（实测 Docker 29.5.3 可用），所以它不是被外部卡住，只是标准管道工作未做。ADR-007
+  已加"现状更正"注记（依赖缺失 → 设了 endpoint 也只会 console；回退只在构造期异常；仅 2 个
+  span、无 propagation、两套 trace_id），README 与简历条目的"OTel 链路"改为"预留接口"。
+- **langgraph + 飞书凭据启动崩溃已修**。`deps.init_feishu()` 此前无条件调
+  `pipeline.set_card_sender(...)`，而 `ENGINE=langgraph` 时 `pipeline` 是 `EngineDispatcher`
+  （无此方法）→ 启动 AttributeError。改为 `getattr` 探测 + 告警跳过，并由
+  `test_deps_wiring.py` 钉住。
+- **e2e 的 `expected.intent` 首次被真正比对**。该字段写在 30 条用例里却**从不被读**。
+  接上后作为**独立指标**报告（`intent_match_rate` / `intent_mismatches`），**不折进
+  `success_rate`**：状态相符与意图正确是两类不同的问题，混成一个数就再也分不出是哪类在退化。
+  首测 **8/30 与路由不符**，暴露真实缺陷：「写一个 X 示例」完全不命中 `coding` 正则
+  （落 `assistant`）、`查询/查找` 抢走编码请求（落 `search`）、`代码` 命中早于 `analyze`。
+  修路由正则会影响 `intent.jsonl` 与一致性数据集，属独立议题，本轮只把**数字暴露出来**。
+
+- 仍已知未修：路由正则的分类质量（上面 8/30）；HITL 回调的身份校验（`feishu_signature`
+  无 token 即放行）与并发幂等（`IdempotencyLock` 仍只在单测被引用）。

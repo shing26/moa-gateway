@@ -165,3 +165,39 @@ async def test_e2e_dataset_can_expect_a_non_ok_status():
     result = await run_e2e_eval(cases, pipeline=_Pipeline(), judge=_judge, use_store=False)
     assert result["success_rate"] == 1.0
     assert result["avg_judge_score"] == 0.8
+
+
+@pytest.mark.asyncio
+async def test_e2e_reports_intent_match_as_a_separate_metric():
+    """数据集的 ``expected.intent`` 要真的被比对，而且**单独成指标**。
+
+    此前它被写进 30 条用例却从不被读（装饰字段）；2026-09-23 首次接上比对即发现
+    8/30 与路由不符（"写一个 X 示例"不命中 coding、`查询/查找` 抢走编码请求）。
+    这里同时钉住"状态相符率不受意图影响"——两类不同的问题混成一个数就再也分不出
+    是哪一类在退化。
+    """
+    from app.pipeline import PipelineResult
+
+    class _Pipeline:
+        async def run(self, event, *, channel, target):
+            return PipelineResult(
+                trace_id=event.trace_id, state="",
+                intent="coding" if "写" in event.text else "search",
+                text="ok", status="ok",
+            )
+
+    async def _judge(*_args) -> float:
+        return 1.0
+
+    cases = [
+        {"id": "a", "input": "写代码", "expected": {"status": "ok", "intent": "coding"}},
+        {"id": "b", "input": "写文档", "expected": {"status": "ok", "intent": "assistant"}},
+        {"id": "c", "input": "查东西", "expected": {"status": "ok"}},
+    ]
+    result = await run_e2e_eval(cases, pipeline=_Pipeline(), judge=_judge, use_store=False)
+
+    assert result["success_rate"] == 1.0, "状态全相符 → success_rate 不受意图影响"
+    assert result["intent_compared"] == 2, "只有声明了 intent 的用例参与比对"
+    assert result["intent_matches"] == 1
+    assert result["intent_match_rate"] == 0.5
+    assert [m["id"] for m in result["intent_mismatches"]] == ["b"]

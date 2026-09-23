@@ -26,12 +26,16 @@ def _missing_deps() -> list[str]:
 
 
 def _build_dsn() -> str | None:
-    return (
-        os.getenv("CODE_REVIEW_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-        or os.getenv("POSTGRES_URL")
-        or None
-    )
+    """DSN 与 ``app.config.settings`` 同源（同类分叉的第三例，2026-09-23）。
+
+    此前这里读 ``CODE_REVIEW_DATABASE_URL / DATABASE_URL / POSTGRES_URL``，而 config
+    读 ``VECTOR_DB_DSN / CODE_REVIEW_DATABASE_URL`` —— **只设 ``VECTOR_DB_DSN`` 的部署
+    在网关侧"有库"，在这里却拿到 None 而静默回落非持久化**。现在 config 的链已收编
+    三组名字，这里只做单点读取。
+    """
+    from app.config import settings
+
+    return settings.vector_db_dsn or None
 
 
 def _embedding_dim() -> int:

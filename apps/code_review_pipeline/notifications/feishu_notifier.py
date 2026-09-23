@@ -47,7 +47,7 @@ class FeishuReviewNotifier:
             return
 
         if notification.overall_need_human_review:
-            card = self._build_approval_card(notification)
+            card = self._build_review_card(notification)
         else:
             card = self._build_summary_card(notification)
 
@@ -88,7 +88,14 @@ class FeishuReviewNotifier:
         )
 
     @staticmethod
-    def _build_approval_card(notification: ReviewNotification) -> ApprovalCard:
+    def _build_review_card(notification: ReviewNotification) -> ApprovalCard:
+        """需要人工复核时的**通知**卡片——故意不带批准/拒绝按钮。
+
+        这条链路从不 ``store_hitl``（`apps/` 下 0 处），所以按钮点了必然回
+        "该审批已失效"。此前渲染成审批卡片等于承诺一个做不到的动作
+        （2026-09-23 修正为 notification 形态；真要做可审批，得先给这条链路接
+        HITL 存储与回调，那是独立议题）。
+        """
         severity = (notification.findings_by_severity or {}).get("critical", 0) + (notification.findings_by_severity or {}).get("high", 0)
         recommendation = (notification.report.recommendation if getattr(notification, "report", None) else "comment") or "comment"
         content = (
@@ -98,6 +105,7 @@ class FeishuReviewNotifier:
             f"**严重问题**: {severity}\n"
             f"**结论**: {recommendation}\n"
             f"**Trace**: {notification.trace_id}\n"
+            "**需要人工复核**（本卡片为通知，不支持在此批准/拒绝）\n"
         )
         if notification.report is not None:
             summary = str(getattr(notification.report, "summary", "") or "").strip()
@@ -111,6 +119,7 @@ class FeishuReviewNotifier:
             agent_output=content,
             channel="feishu",
             target="",
+            hitl_kind="notification",
         )
 
     @staticmethod
