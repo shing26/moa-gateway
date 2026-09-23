@@ -30,6 +30,10 @@ jobs:
         run: uv run bandit -r app -q -s B105,B107,B110,B112,B324
       - name: Eval smoke
         run: uv run python evals/run_evals.py --offline
+      - name: Redteam baseline
+        # 零网络、约 1 秒。此前该脚本 exit code 恒为 0，README 的"100%"没有约束。
+        # 用例与策略正则同源，所以 100% 是防漂移不变量，不是泛化能力证据。
+        run: uv run python scripts/redteam/run_redteam.py
       - name: Verify imports
         run: uv run python -c "import app.main"
 

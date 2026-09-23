@@ -337,7 +337,9 @@ def test_webhook_debug_text_not_500(monkeypatch) -> None:
         assert res.status_code != 500
 
 
-@pytest.mark.skip(reason="integration test requires real HITL callback env; run manually with full config")
+# 2026-09-23 起不再 skip：它自己 monkeypatch 了网络与 FSM，本就不需要真实环境。
+# 值得记一笔：这条用例走 approve 路径，**本可以**抓到我上一批把 session_state 改名时
+# 漏改拒签分支造成的 NameError——只因为它当时是 skip 而没抓到。
 def test_webhook_callback_approve_logs_hitl_decision_and_duration(monkeypatch) -> None:
     calls = []
 

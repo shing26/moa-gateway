@@ -1,5 +1,10 @@
 # AICoding 架构设计 · 行业调研报告
 
+> ⚠️ **历史文档（2026-08，未按此实施）**：作为**行业调研**，本文档列的是"业界有什么、我们考虑过什么"，
+> 这没有错；但文档内几处 `✅ 已引入` 的完成标记**不成立**——RAGAS / DeepEval / Promptfoo /
+> Prometheus / Grafana 在代码里**没有任何引用**，实际落地的是自研 harness（`evals/`）、审计 WAL
+> 与内置 dashboard。当前口径以 `定位与减法清单.md`、README 与 `docs/adr/` 为准。
+
 > 本文档为《AICoding 架构设计》核心产物之一，定位为**行业调研报告（research_report）**。
 > 上游输入：主理人转交的用户诉求 + `material_digest.md`（G1 已通过，含根因 A~F 与冲突 X1~X4）。
 > 下游输出：驱动 `business-architect`（业务架构师）的行业调研判断，最终落入《高层架构设计》的 §3 行业调研章节。

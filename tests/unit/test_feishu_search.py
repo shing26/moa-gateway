@@ -41,7 +41,7 @@ async def _cleanup() -> None:
         await knowledge_base.delete_doc(doc["id"])
 
 
-@pytest.mark.skip(reason="integration test requires real Feishu/HITL env; run manually with full config")
+# 2026-09-23 起不再 skip：conftest 隔离了 DSN（走内存向量库）与飞书验签凭据。
 def test_feishu_message_injects_knowledge_context(monkeypatch) -> None:
     agent = FakeAgent()
     monkeypatch.setattr(pipeline_module, "get_agent", lambda name: agent)
@@ -57,7 +57,7 @@ def test_feishu_message_injects_knowledge_context(monkeypatch) -> None:
         asyncio.run(_cleanup())
 
 
-@pytest.mark.skip(reason="integration test requires real Feishu/HITL env; run manually with full config")
+# 2026-09-23 起不再 skip：conftest 隔离了 DSN（走内存向量库）与飞书验签凭据。
 def test_feishu_message_writes_request_log(monkeypatch) -> None:
     agent = FakeAgent()
     calls = []

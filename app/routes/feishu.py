@@ -91,6 +91,13 @@ async def _process_hitl_card(
         ctx, expired = await engine.decide_hitl(
             session_id=session_id, trace_id=trace_id, approve=(action == "approve"),
         )
+        # 审计字段 `hitl_duration_ms` 的语义必须与 /webhook/callback 一致：那里算的是
+        # "从挂起到人工决定"的**真实时延**，而这里此前塞的是**回调处理耗时**（毫秒级）
+        # —— 同名两义，且 dashboard 的"人工审批耗时分布"读的正是该字段（2026-09-23 修）。
+        # `duration_ms` 仍保留给日志/outcome，表示本次处理耗时。
+        human_latency_ms = (
+            round((time.time() - hitl.created_at) * 1000, 1) if hitl.created_at > 0 else 0.0
+        )
         if expired:
             # 重启后挂起记录还在、FSM 会话状态已丢：告知并结束（记录已被 pop 消耗）。
             duration_ms = round((time.time() - started) * 1000, 1)
@@ -99,7 +106,7 @@ async def _process_hitl_card(
                 agent_name=hitl.agent_name, intent=hitl.intent,
                 guard_action="hitl_expired", input_text="",
                 output_text=hitl.agent_output[:2000], hitl_decision=action,
-                hitl_duration_ms=duration_ms, hitl_kind=hitl.hitl_kind,
+                hitl_duration_ms=human_latency_ms, hitl_kind=hitl.hitl_kind,
                 hitl_operator=operator_id,
             )
             await _safe_send(
@@ -123,7 +130,7 @@ async def _process_hitl_card(
             agent_name=hitl.agent_name, intent=hitl.intent,
             guard_action=f"hitl_{action}", input_text="",
             output_text=hitl.agent_output[:2000], hitl_decision=action,
-            hitl_duration_ms=duration_ms, hitl_kind=hitl.hitl_kind,
+            hitl_duration_ms=human_latency_ms, hitl_kind=hitl.hitl_kind,
             hitl_operator=operator_id,
         )
         await _safe_send(session_id, body, trace_id)

@@ -27,7 +27,6 @@ class Event(str, Enum):
     DELIVERED = "DELIVERED"
     CANCEL = "CANCEL"
     RESET = "RESET"
-    FALLBACK_APPLIED = "FALLBACK_APPLIED"
 
 
 TRANSITIONS: dict[tuple[State, Event], State] = {

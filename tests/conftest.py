@@ -34,6 +34,17 @@ for name in (
 for name in ("GATEWAY_PORT", "APP_PORT"):
     os.environ[name] = ""
 
+# 飞书回调的验签凭据同理：不置空的话，开发机 .env 里配好的
+# FEISHU_VERIFICATION_TOKEN 会让 /feishu/event 在测试里要求 body 携带 token，
+# 于是 5 条路由用例（构造的是不带 token 的 v2 事件）会 401 —— 这正是它们此前
+# 被 skip 掉的真实原因之一（理由写的是"需要真实环境"，其实是被环境**污染**）。
+# 置空 = 未配置；再显式开 insecure，让这两条路由在测试里可达（策略见
+# app/middleware/auth.py，与 /webhook、/dashboard 共用同一判定）。
+# 验签本身的行为由 test_feishu_signature.py 直接断言，不走 env。
+for name in ("FEISHU_VERIFICATION_TOKEN", "FEISHU_ENCRYPT_KEY"):
+    os.environ[name] = ""
+os.environ["GATEWAY_ALLOW_INSECURE"] = "1"
+
 # 同理，单测不能继承开发者 .env 里的真实 LLM 凭据：意图路由的
 # router_llm 会在测试期间真的发起外网请求，超时取消后还会触发 litellm
 # 的 “coroutine was never awaited” 告警，让结果依赖网络。需要 LLM 配置

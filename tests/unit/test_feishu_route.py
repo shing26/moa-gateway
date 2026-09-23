@@ -49,7 +49,8 @@ def _clear_seen():
     feishu_route._seen_events.clear()
 
 
-@pytest.mark.skip(reason="integration test requires real Feishu/HITL env; run manually with full config")
+# 2026-09-23 起不再 skip：conftest 已隔离 FEISHU_VERIFICATION_TOKEN 并显式开 insecure，
+# 这条用例本来就不需要真实环境（自己 monkeypatch 了 adapter）。
 def test_feishu_command_sends_reply(monkeypatch) -> None:
     _clear_seen()
     adapter = FakeFeishuAdapter()
@@ -68,7 +69,8 @@ def test_feishu_command_sends_reply(monkeypatch) -> None:
     assert msg.trace_id
 
 
-@pytest.mark.skip(reason="integration test requires real Feishu/HITL env; run manually with full config")
+# 2026-09-23 起不再 skip：conftest 已隔离 FEISHU_VERIFICATION_TOKEN 并显式开 insecure，
+# 这条用例本来就不需要真实环境（自己 monkeypatch 了 adapter）。
 def test_feishu_pipeline_review_sends_pending_hint(monkeypatch) -> None:
     _clear_seen()
     adapter = FakeFeishuAdapter()
@@ -92,7 +94,8 @@ def test_feishu_pipeline_review_sends_pending_hint(monkeypatch) -> None:
     assert adapter.sent[0].text == "输出需要人工审批"
 
 
-@pytest.mark.skip(reason="integration test requires real Feishu/HITL env; run manually with full config")
+# 2026-09-23 起不再 skip：conftest 已隔离 FEISHU_VERIFICATION_TOKEN 并显式开 insecure，
+# 这条用例本来就不需要真实环境（自己 monkeypatch 了 adapter）。
 def test_feishu_pipeline_error_sends_friendly_text(monkeypatch) -> None:
     _clear_seen()
     adapter = FakeFeishuAdapter()
@@ -112,7 +115,8 @@ def test_feishu_pipeline_error_sends_friendly_text(monkeypatch) -> None:
     assert "出错了" in adapter.sent[0].text
 
 
-@pytest.mark.skip(reason="integration test requires real Feishu/HITL env; run manually with full config")
+# 2026-09-23 起不再 skip：conftest 已隔离 FEISHU_VERIFICATION_TOKEN 并显式开 insecure，
+# 这条用例本来就不需要真实环境（自己 monkeypatch 了 adapter）。
 def test_feishu_pipeline_blocked_sends_reason(monkeypatch) -> None:
     _clear_seen()
     adapter = FakeFeishuAdapter()
@@ -135,7 +139,8 @@ def test_feishu_pipeline_blocked_sends_reason(monkeypatch) -> None:
     assert "admin role" in adapter.sent[0].text
 
 
-@pytest.mark.skip(reason="integration test requires real Feishu/HITL env; run manually with full config")
+# 2026-09-23 起不再 skip：conftest 已隔离 FEISHU_VERIFICATION_TOKEN 并显式开 insecure，
+# 这条用例本来就不需要真实环境（自己 monkeypatch 了 adapter）。
 def test_feishu_no_adapter_still_returns_ok(monkeypatch) -> None:
     _clear_seen()
     monkeypatch.setattr(feishu_route, "get_adapter", _fake_get_adapter(None))

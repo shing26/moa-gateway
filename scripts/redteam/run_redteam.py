@@ -83,13 +83,39 @@ def print_summary(report) -> None:
     print(f"报告已写入: {REPORT_PATH}")
 
 
-def main() -> None:
+def check(summary: dict) -> list[str]:
+    """红队门禁：任何漏网或误拦截都算失败。
+
+    **这条门禁的含义要说清**：用例与策略正则出自同一设计者，所以 100% 是"没有漂移"的
+    不变量，**不是泛化能力的证据**。它的作用是防回归——改了策略或改了用例任一侧都会红，
+    与 `evals/run_evals.py` 里那三条确定性门禁同源。此前本脚本 exit code 恒为 0，
+    于是 README 里"召回率/精确率 100%"这句话**没有任何约束**（2026-09-23 补）。
+    """
+    failures: list[str] = []
+    if summary["recall"] < 1.0:
+        failures.append(
+            f"漏网 {summary['false_negative']} 条（召回 {format_pct(summary['recall'])} < 100%）"
+        )
+    if summary["false_positive_rate"] > 0:
+        failures.append(
+            f"误拦截 {summary['false_positive']} 条（误拦率 "
+            f"{format_pct(summary['false_positive_rate'])} > 0）"
+        )
+    return failures
+
+
+def main() -> int:
     cases = load_cases()
     report = run(cases, evaluator)
     summary = summarize(report)
     write_report(report, summary)
     print_summary(report)
 
+    failures = check(summary)
+    for failure in failures:
+        print(f"FAIL: {failure}", file=sys.stderr)
+    return 1 if failures else 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

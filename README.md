@@ -102,6 +102,10 @@ uv run python evals/run_evals.py             # 活体：真实编排 + 真实判
 | 正常对照 | 50 条 | 误拦截 0 |
 | 汇总 | 200 条 | 召回率 1.0 / 精确率 1.0 / 误拦截率 0.0 |
 
+> 这三行**进 CI 硬门禁**（`run_redteam.py` 漏网或误拦即非零退出；零网络、约 1 秒）。
+> 口径要说清：**用例与策略正则出自同一设计者**，所以 100% 是"没有漂移"的不变量、
+> **不是泛化能力的证据**——它的作用是防回归，改了策略或改了用例任一侧都会红。
+
 报告写入 `evals/reports/latest.json`，包含 `git_sha`、混淆矩阵、拦截指标和 e2e 均分/延迟/成本；intent 准确率低于 0.9 或 guard deny 召回低于 0.95 时退出码非零。
 
 ## PR 审查垂直应用
@@ -304,7 +308,9 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 - 双引擎模式下的边界：LangGraph 是可选 extra，Docker 镜像默认不带（`ENGINE=langgraph` 会自动回退 FSM 并告警）；
   图的 checkpoint 是进程内的 `InMemorySaver`，与 FSM 的 `_session_states` 同级，都不承诺跨重启恢复。
 - FSM 会话状态保存在进程内（`Engine._session_states`）；`app/redis_state/stack.py` 与 `lock.py` 的 Redis 状态栈 / Lua
-  锁目前只在单测中被调用，**未接入请求路径**，多实例部署前需要先接线。**重启后的语义是"审批失效"**
+  锁目前只在单测中被调用，**未接入请求路径**，多实例部署前需要先接线（`store.py` 是活的，`/healthz` 用）。
+  **注意 HITL 的幂等已不依赖那把锁**：回调改用了挂起记录本身的**原子认领**（`pop_hitl`，GETDEL/Lua），
+  所以未接线的部分只剩"会话状态栈 / 单写者锁"。**重启后的语义是"审批失效"**
   （ADR-012）：`HitlRequest` 在 Redis 而会话状态在进程内，重启后两者不同步，此时点旧卡片会被识别为
   已失效——作废该记录、回复用户重新发起、审计写 `guard_action="hitl_expired"`。此前那条路径是 500 /
   "处理审批时出错了"且重试无效（卡片变成砖）。**挂起中的审批不会跨重启存活，这是有意为之**：
@@ -321,5 +327,14 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 - `app/main.py` 使用 FastAPI lifespan 管理启动/关闭钩子（`on_event` 已迁移）。
 - 配置校验（`Settings.validate()`）只拦截"配置了但非法"的值（维度/端口/超时/池上下界/负预算），空值仍视为未配置；
   `ENGINE` 的未知值保持告警回退 FSM，不做 fail-fast（降级语义见双引擎章节）。
-- 8 条飞书/HITL 集成用例仍会在没有真实测试应用凭据时条件跳过；它们不是失败。
+- 飞书/HITL 的集成用例**已全部进 CI（0 skipped）**（2026-09-23）：此前 8 条被
+  `@pytest.mark.skip` 标成"需要真实环境"，但实测它们**本来就不需要**——真正的原因是
+  `.env` 的 `FEISHU_VERIFICATION_TOKEN` 与 `VECTOR_DB_DSN` 漏进了测试进程（非 hermetic）。
+  `tests/conftest.py` 现在隔离这两个凭据（并显式开 `GATEWAY_ALLOW_INSECURE` 让路由可达），
+  8 条全部真实执行。**这条值得记一笔**：其中一条走 approve 路径，本可以抓到我上批
+  改名时漏改拒签分支造成的 `NameError`——只因为它当时是 skip 而没抓到。
+- **评测没有"本次 vs 上次"的基线对比**：`evals/reports/latest.json` 是覆盖写，且
+  `evals/reports/` 被 `.gitignore` 忽略 → 连历史快照都不入库。所以"指标有没有退化"
+  目前只能靠人肉比对，**评测结论也不回流到任何决策点**（没有机制消费它去改 prompt/策略/路由）。
+  这是"改进闭环"缺失的核心证据，不是遗漏。
 - 所有密钥通过环境变量注入，`.env`、`logs/`、`data/`、`evals/reports/` 不入库。
