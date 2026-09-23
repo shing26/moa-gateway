@@ -26,9 +26,10 @@ async def webhook_callback(request: Request) -> JSONResponse:
     # 卡片回调的审计与最初触发审批的请求共享同一 trace，决策可回流可复盘
     bind_trace(trace_id or session_id)
     hitl_id = trace_id or session_id
-    hitl = engine.session_store.get_hitl(hitl_id)
+    # 原子认领（取走即删除）：并发第二次点击拿不到 payload → 404，不再重复送达 + 双审计
+    hitl = engine.session_store.pop_hitl(hitl_id)
     if hitl is None:
-        logger.warning("hitl request not found hitl_id=%s session=%s", hitl_id, session_id)
+        logger.warning("hitl request not available hitl_id=%s session=%s", hitl_id, session_id)
         return JSONResponse({"error": ErrorCode.HITL_REQUEST_NOT_FOUND.value}, status_code=404)
     if action not in ("approve", "reject"):
         return JSONResponse({"error": f"unknown_action:{action}"}, status_code=400)
@@ -39,9 +40,8 @@ async def webhook_callback(request: Request) -> JSONResponse:
         round((time.time() - hitl.created_at) * 1000, 1) if hitl.created_at > 0 else 0.0
     )
     if expired:
-        # 与 /feishu/event 同一语义：重启后会话状态已丢，作废 + 明确告知。
+        # 与 /feishu/event 同一语义：重启后会话状态已丢，告知并结束（记录已认领）。
         # 此前这里是裸 await，非法迁移会直接 500。
-        engine.session_store.remove_hitl(hitl_id)
         await log_request(
             request, 200, 0, session_id=session_id, agent_name=hitl.agent_name,
             intent=hitl.intent, guard_action="hitl_expired", input_text="",
@@ -53,7 +53,6 @@ async def webhook_callback(request: Request) -> JSONResponse:
             "message": "该审批已失效（审批可能已处理，或服务重启过），请重新发起",
         })
     if action == "approve":
-        engine.session_store.remove_hitl(hitl_id)
         response = adapter.adapt(hitl.agent_output, channel=hitl.channel, target=hitl.target)
         await log_request(
             request, 200, 0, session_id=session_id, agent_name=hitl.agent_name,
@@ -65,7 +64,6 @@ async def webhook_callback(request: Request) -> JSONResponse:
             "trace_id": trace_id, "state": session_context.state.value, "text": response.text, "status": "approved",
         })
     else:
-        engine.session_store.remove_hitl(hitl_id)
         await log_request(
             request, 200, 0, session_id=session_id, agent_name=hitl.agent_name,
             intent=hitl.intent, guard_action=f"hitl_{action}", input_text="",
@@ -73,7 +71,7 @@ async def webhook_callback(request: Request) -> JSONResponse:
             hitl_duration_ms=hitl_duration_ms, hitl_kind=hitl.hitl_kind,
         )
         return JSONResponse({
-            "trace_id": trace_id, "state": session_state.context.state.value, "status": "rejected",
+            "trace_id": trace_id, "state": session_context.state.value, "status": "rejected",
         })
 
 

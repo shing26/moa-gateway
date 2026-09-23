@@ -16,6 +16,7 @@ from app.channels.feishu_event import parse_feishu_event
 from app.channels.feishu_signature import verify_verification_token
 from app.config import settings
 from app.deps import adapter, engine, pipeline
+from app.middleware.auth import insecure_mode_enabled
 from app.middleware.request_logger import bind_trace, log_request
 from app.models.errors import ErrorCode
 from app.fsm.state_machine import Event as FsmEvent
@@ -62,10 +63,16 @@ async def _safe_send(target: str, text: str, trace_id: str) -> None:
     await adp.send(ChannelMessage(channel="feishu", target=target, text=text, trace_id=trace_id))
 
 
-async def _process_hitl_card(action: str, trace_id: str, session_id: str) -> None:
+async def _process_hitl_card(
+    action: str, trace_id: str, session_id: str, operator_id: str = ""
+) -> None:
     """卡片按钮点击后的真实 HITL 闭环，与 /webhook/callback 同一套语义：
-    FSM 推进 HUMAN_APPROVED / HUMAN_REJECTED → 移除挂起请求 → 送达或丢弃
-    输出 → 审计留痕（guard_action=hitl_approve / hitl_reject）。"""
+    认领挂起请求 → FSM 推进 HUMAN_APPROVED / HUMAN_REJECTED → 送达或丢弃
+    输出 → 审计留痕（guard_action=hitl_approve / hitl_reject / hitl_expired）。
+
+    **认领用 `pop_hitl`（原子取走并删除）而非"读 → 判断 → 删"**：那张卡片被连点两次、
+    或两个回调并发到达时，第二个调用者必须拿不到 payload，否则会重复送达 + 写两条审计。
+    """
     hitl_id = trace_id or session_id
     started = time.time()
     # 后台任务在独立上下文中运行：显式绑定，保证决策审计与触发审批的
@@ -74,18 +81,18 @@ async def _process_hitl_card(action: str, trace_id: str, session_id: str) -> Non
     duration_ms = 0.0
     outcome = "hitl_not_found"
     try:
-        hitl = engine.session_store.get_hitl(hitl_id)
+        hitl = engine.session_store.pop_hitl(hitl_id)
         if hitl is None:
-            logger.warning("card_action hitl not found hitl_id=%s", hitl_id)
+            # 不存在 / 已失效 / 已被（并发的另一次点击）认领，三种情况同一处理：
+            # 不送达、不写决策审计。
+            logger.warning("card_action hitl not available hitl_id=%s", hitl_id)
             await _safe_send(session_id, "该审批请求已失效或已被处理", trace_id)
             return
         ctx, expired = await engine.decide_hitl(
             session_id=session_id, trace_id=trace_id, approve=(action == "approve"),
         )
         if expired:
-            # 重启后挂起记录还在、FSM 会话状态已丢：作废 + 明确告知，
-            # 否则这张卡片会点一次错一次（此前回的是"处理审批时出错了"）。
-            engine.session_store.remove_hitl(hitl_id)
+            # 重启后挂起记录还在、FSM 会话状态已丢：告知并结束（记录已被 pop 消耗）。
             duration_ms = round((time.time() - started) * 1000, 1)
             await log_request(
                 None, 200, duration_ms, session_id=session_id,
@@ -93,6 +100,7 @@ async def _process_hitl_card(action: str, trace_id: str, session_id: str) -> Non
                 guard_action="hitl_expired", input_text="",
                 output_text=hitl.agent_output[:2000], hitl_decision=action,
                 hitl_duration_ms=duration_ms, hitl_kind=hitl.hitl_kind,
+                hitl_operator=operator_id,
             )
             await _safe_send(
                 session_id,
@@ -101,14 +109,14 @@ async def _process_hitl_card(action: str, trace_id: str, session_id: str) -> Non
             )
             outcome = "hitl_expired"
             return
-        # 本地格式化先于 remove_hitl：格式化是纯本地操作，若它失败，挂起请求
-        # 不应被消费，用户还能重点一次（网络发送失败同理，故 send 也在其后）。
+        # 本地格式化在送达之前（纯本地操作，不产生副作用）；而挂起记录已在上面的
+        # pop 里认领 —— 若此处格式化或随后发送失败，该记录不会回来，用户需重新发起。
+        # 这是"单次决策"的代价：与之相比重复送达是更坏的语义。
         if action == "approve":
             adapted = adapter.adapt(hitl.agent_output, channel=hitl.channel, target=hitl.target)
             body = "✅ 已批准，以下是输出：\n" + (adapted.text or hitl.agent_output)
         else:
             body = "❌ 已拒绝，输出已按你的选择丢弃"
-        engine.session_store.remove_hitl(hitl_id)
         duration_ms = round((time.time() - started) * 1000, 1)
         await log_request(
             None, 200, duration_ms, session_id=session_id,
@@ -116,6 +124,7 @@ async def _process_hitl_card(action: str, trace_id: str, session_id: str) -> Non
             guard_action=f"hitl_{action}", input_text="",
             output_text=hitl.agent_output[:2000], hitl_decision=action,
             hitl_duration_ms=duration_ms, hitl_kind=hitl.hitl_kind,
+            hitl_operator=operator_id,
         )
         await _safe_send(session_id, body, trace_id)
         outcome = f"hitl_{action}"
@@ -138,7 +147,20 @@ async def feishu_event(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error":"invalid_json"}, status_code=400)
-    if not verify_verification_token(body, settings.feishu_verification_token, settings.feishu_encrypt_key):
+    if not verify_verification_token(
+        body,
+        settings.feishu_verification_token,
+        allow_insecure=insecure_mode_enabled(settings.gateway_allow_insecure),
+    ):
+        # 此前本函数只看顶层 token，而 v2 的 token 在 header.token —— 于是"配了也
+        # 从不比对"，等于这道门一直开着（2026-09-23 修）。拒绝时打点便于现网定位：
+        # 若真实回调被拒，说明平台带的字段位置与我实现的不一致。
+        logger.warning(
+            "feishu_event rejected by token check: has_top_token=%s has_header_token=%s configured=%s",
+            isinstance(body.get("token"), str) and bool(body.get("token")),
+            isinstance(body.get("header"), dict) and bool(body["header"].get("token")),
+            bool(settings.feishu_verification_token),
+        )
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
     header = body.get("header", {}) if isinstance(body.get("header"), dict) else {}
@@ -164,7 +186,9 @@ async def feishu_event(request: Request):
             # 飞书卡片回调有 3 秒响应窗口：真正的 HITL 闭环（FSM 推进、输出
             # 送达、审计留痕）必须异步执行、响应先行——在响应前 await 飞书
             # API 发消息会撑爆窗口，客户端报 200341"出错了，请稍后重试"。
-            task = asyncio.create_task(_process_hitl_card(action, trace_id, session_id))
+            task = asyncio.create_task(
+                _process_hitl_card(action, trace_id, session_id, parsed.get("operator_id") or "")
+            )
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)
         # 卡片回调响应契约：HTTP 200 + 空对象即"已受理"；返回业务结构会被

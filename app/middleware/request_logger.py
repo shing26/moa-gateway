@@ -60,6 +60,7 @@ async def log_request(
     tool_calls: int = 0,
     tool_errors: int = 0,
     route_fallback: str = "",
+    hitl_operator: str = "",
 ) -> None:
     """写一条审计。
 
@@ -109,6 +110,10 @@ async def log_request(
     # 55/55 全部降级成默认意图，而报告里一切正常）。
     if route_fallback:
         extra["route_fallback"] = route_fallback
+    # 谁按的按钮。此前只在响应式地记"guard_action=hitl_approve"，答不出"谁批准的"
+    # ——审批单据的两个基本字段之一是空的（2026-09-23 补）。
+    if hitl_operator:
+        extra["hitl_operator"] = hitl_operator
     entry = AuditEntry(
         trace_id=_current_trace.get() or new_trace_id(),
         session_id=session_id or "unknown",

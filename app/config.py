@@ -96,6 +96,8 @@ class Settings:
         self.micro_llm_timeout_ms: int = int(os.getenv("MICRO_LLM_TIMEOUT_MS", "1000"))
         self.hitl_enabled: bool = _parse_bool(os.getenv("HITL_ENABLED"), False)
         self.feishu_verification_token: str = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
+        # ⚠️ 未实现：加密模式（X-Lark-Signature 的 HMAC / 时间戳防重放）尚未接线，
+        # 配了它事件会被忽略。字段先留着，但**不要在文档里把它当成已生效的保护**（ADR-013）。
         self.feishu_encrypt_key: str = os.getenv("FEISHU_ENCRYPT_KEY", "")
         self.es_hosts: list[str] = _parse_es_hosts(os.getenv("ES_HOSTS", ""))
         self.es_index_prefix: str = os.getenv("ES_INDEX_PREFIX", "moa-audit")

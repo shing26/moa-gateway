@@ -38,6 +38,11 @@ class FakeRedisClient:
         self.lists.pop(key, None)
         self.expires.pop(key, None)
 
+    async def getdel(self, key: str) -> str | None:
+        """原子取走（Redis 6.2+ 原语）。hitl 的"单次决策"认领走的就是它。"""
+        self.expires.pop(key, None)
+        return self.data.pop(key, None)
+
     async def rpush(self, key: str, value: str) -> None:
         self.lists.setdefault(key, []).append(value)
 
@@ -104,6 +109,31 @@ class TestSessionStoreRedis:
     async def test_key_format(self):
         assert RedisHitlStorage.key("trace-1") == "moa:hitl:trace-1"
         assert RedisConversationStorage.key("sess-1") == "moa:mem:sess-1"
+
+    @pytest.mark.asyncio
+    async def test_pop_hitl_is_claim_once(self):
+        """原子认领：第一次拿到 payload，第二次必须 None。
+
+        回归（2026-09-23）：此前是"读 → 判断 → 删"三段，并发连点两次都能通过，
+        于是重复送达 + 写两条审计。现在走 `GETDEL`（原语），只有第一个调用者拿到。
+        """
+        fake = FakeRedisClient()
+        store = SessionStore(storage=RedisHitlStorage(client=fake))
+        req = _hitl()
+        store.store_hitl("sess-1", req)
+
+        assert store.pop_hitl("trace-1") == req
+        assert store.pop_hitl("trace-1") is None, "同一审批只能被认领一次"
+        assert store.get_hitl("trace-1") is None
+
+    @pytest.mark.asyncio
+    async def test_pop_hitl_without_backing_store_is_claim_once(self):
+        """无存储的降级路径同样只认领一次（内存 pop 在事件循环内天然原子）。"""
+        store = SessionStore()
+        store.store_hitl("sess-1", _hitl())
+
+        assert store.pop_hitl("trace-1") is not None
+        assert store.pop_hitl("trace-1") is None
 
     @pytest.mark.asyncio
     async def test_json_payload_roundtrip_preserves_fields(self):

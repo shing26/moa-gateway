@@ -206,6 +206,107 @@ async def test_webhook_callback_expired_hitl_is_invalidated_not_500(monkeypatch)
     assert store.get_hitl("expired-trace") is None, "失效的挂起记录必须被消耗掉"
 
 
+async def _suspended_engine_setup(store, session_id: str, trace_id: str) -> HitlRequest:
+    """把会话推到 SUSPENDED 并放一条挂起记录，返回该记录（否则 decide 会判 expired）。"""
+    import app.routes.webhook as webhook_route
+    from app.fsm.state_machine import Event as FsmEvent
+    from app.models.events import MoAEvent
+
+    engine = webhook_route.engine
+    req = HitlRequest(
+        session_id=session_id, trace_id=trace_id, agent_output="output text",
+        intent="coding", agent_name="coder", channel="feishu", target="chat_1",
+    )
+    store.store_hitl(session_id, req)
+    await engine.handle_event(
+        MoAEvent(
+            trace_id=trace_id, event=FsmEvent.MESSAGE_RECEIVED,
+            session_id=session_id, text="", context={},
+        )
+    )
+    await engine.handle_event(
+        MoAEvent(
+            trace_id=trace_id, event=FsmEvent.NEEDS_HUMAN,
+            session_id=session_id, text="", context={},
+        )
+    )
+    return req
+
+
+def _callback_body(session_id: str, trace_id: str, action: str) -> dict:
+    return {
+        "action": {
+            "value": {"session_id": session_id, "trace_id": trace_id, "action": action}
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_webhook_callback_reject_path_returns_rejected(monkeypatch) -> None:
+    """拒签路径必须能走通。
+
+    回归（2026-09-23 自查发现）：G1 那次把 `session_state` 改名 `session_context`
+    时漏改了这一分支 → NameError → 500，而当时唯一覆盖回调的用例是 skip 的，
+    所以"全绿"掩盖了它。
+    """
+    import app.routes.webhook as webhook_route
+
+    calls = []
+
+    async def fake_log(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(webhook_route, "log_request", fake_log)
+
+    store = webhook_route.engine.session_store
+    session_id, trace_id = "rej-sess", "rej-trace"
+    await _suspended_engine_setup(store, session_id, trace_id)
+
+    try:
+        resp = await webhook_route.webhook_callback(
+            _JsonRequest(_callback_body(session_id, trace_id, "reject"))
+        )
+    finally:
+        store.remove_hitl(trace_id)
+
+    assert resp.status_code == 200
+    payload = json.loads(resp.body)
+    assert payload["status"] == "rejected"
+    assert payload["state"] == "REJECTED"
+    assert calls and calls[0][1]["guard_action"] == "hitl_reject"
+
+
+@pytest.mark.asyncio
+async def test_webhook_callback_second_click_is_rejected_without_double_delivery(monkeypatch) -> None:
+    """连点两次：第一次认领成功，第二次 404 且**不重复写决策审计**。
+
+    此前是"读 → 判断 → 删"三段，两个并发回调都能通过 → 重复送达 + 双审计。
+    """
+    import app.routes.webhook as webhook_route
+
+    calls = []
+
+    async def fake_log(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    monkeypatch.setattr(webhook_route, "log_request", fake_log)
+
+    store = webhook_route.engine.session_store
+    session_id, trace_id = "twice-sess", "twice-trace"
+    await _suspended_engine_setup(store, session_id, trace_id)
+    body = _callback_body(session_id, trace_id, "approve")
+
+    try:
+        first = await webhook_route.webhook_callback(_JsonRequest(body))
+        second = await webhook_route.webhook_callback(_JsonRequest(body))
+    finally:
+        store.remove_hitl(trace_id)
+
+    assert first.status_code == 200
+    assert second.status_code == 404, "同一个挂起请求只能被认领一次"
+    assert len(calls) == 1, "第二次点击不该再写决策审计"
+
+
 def test_webhook_debug_text_not_500(monkeypatch) -> None:
     real_handle = pipeline.engine.handle_event
     _patch_pipeline(monkeypatch, FakeAgent())

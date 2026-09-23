@@ -281,6 +281,17 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   （不带批准/拒绝按钮，`hitl_kind="notification"`），因为它从不 `store_hitl`——渲染审批按钮
   等于承诺一个点了必然失效的动作。**要变成闭环需要：写回接口 + HITL 存储与回调 + 该链路的
   审计**，三件都缺。
+- **HITL 回调的可信度（2026-09-23 补，ADR-013）**：① **验签真的生效了**——此前
+  `verify_verification_token` 只在**顶层**找 token，而 v2 事件把 token 放在 `header.token`，
+  于是"配了 `FEISHU_VERIFICATION_TOKEN` 却从未比对过"（旧行为是刻意 fail-open 且有测试钉住，
+  但后果是**知道 session/trace 就能批准**）；现在配了就必须对（v1 顶层 / v2 `header.token`），
+  没配则只在显式 `GATEWAY_ALLOW_INSECURE=1` 时放行。**加密模式（`FEISHU_ENCRYPT_KEY` /
+  `X-Lark-Signature`）仍未实现**，配了它事件会被忽略。② **单次决策**：回调改为**原子认领**
+  （`pop_hitl`：GETDEL → Lua 兜底 → 内存），连点两次或并发回调只有一个生效，第二次回
+  "已失效或已被处理"——此前是"读→判断→删"三段，会**重复送达 + 写两条审计**。③ **谁批准的**
+  现在进审计（`hitl_operator`，取自 v1 顶层 `open_id` / v2 `event.operator.open_id`）。
+  ⚠️ v2 的 `event.operator` 字段路径**未对着真实卡片点击验证过**（只在单测里构造过）；
+  取不到时留空、不影响审批。若真实回调被 401，看日志里的 `has_header_token`。
 - **以下几项本地无法验收**（不是没做，是缺外部条件）：① 成本量化——`avg_cost_usd` 恒 0，
   Ollama 不计费，需要付费 provider；② `hitl_feedback` 的 join 率与指标——需要**真实流量**
   （当前 4 条全是模拟种子，`介入率 0.0065` 无统计意义）；③ 微模型那一级——需要第二个模型端点；

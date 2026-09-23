@@ -25,6 +25,8 @@ def parse_feishu_event(body):
         "challenge": challenge,
         "message_id": None, "chat_id": None,
         "sender_id": None, "text": None,
+        # 审批人（卡片点击者）——"谁批准了"以前在数据层答不上（2026-09-23 补）
+        "operator_id": None,
     }
 
     if event_type == "url_verification":
@@ -57,6 +59,8 @@ def parse_feishu_event(body):
         result["event_type"] = "card_action"
         result["message_id"] = body.get("open_message_id")
         result["chat_id"] = body.get("open_chat_id")
+        # v1 卡片动作把点击者放在顶层
+        result["operator_id"] = body.get("open_id") or body.get("user_id") or None
         return result
 
     if event_type == "card.action.trigger":
@@ -65,6 +69,12 @@ def parse_feishu_event(body):
         result["message_id"] = event.get("context", {}).get("open_message_id")
         result["chat_id"] = event.get("context", {}).get("open_chat_id")
         result["action"] = event.get("action", {}).get("value", {})
+        # v2 卡片动作：点击者在 event.operator（按 schema 2.0）。
+        # ⚠️ 该字段路径未对着**真实卡片点击**验证过（只在单测里构造过）——
+        # 拿到真实回调日志后应核对一次；取不到时留空，不影响审批本身。
+        operator = event.get("operator", {})
+        if isinstance(operator, dict):
+            result["operator_id"] = operator.get("open_id") or operator.get("user_id") or None
         return result
 
     return result

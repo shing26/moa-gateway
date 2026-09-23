@@ -37,6 +37,18 @@ class HitlRequest:
     hitl_kind: str = "review"
 
 
+# GET+DEL 放在一个 Lua 脚本里做，保证原子（脚本执行期间不会被其它命令插入）。
+# 首选原语是服务端的 GETDEL（Redis 6.2+）；老服务端退到这条。
+_POP_LUA = """
+local key = KEYS[1]
+local value = redis.call('GET', key)
+if value then
+    redis.call('DEL', key)
+end
+return value
+"""
+
+
 class RedisHitlStorage:
     KEY_PREFIX = "moa:hitl"
     DEFAULT_TTL = 3600
@@ -157,6 +169,32 @@ class RedisHitlStorage:
             self._memory.pop(key, None)
             self._written.discard(key)
 
+    def pop(self, key: str) -> str | None:
+        """原子取走并删除，返回旧值（不存在则 None）。
+
+        用于"同一审批只允许一次决策"：并发的第二次点击必须拿到 None，否则会
+        **重复送达 + 两条审计**（此前是"读 → 判断 → 删"三段，窗口里两个请求都能过）。
+        优先 `GETDEL`（Redis 6.2+ 原语，一次往返）；老服务端退到 Lua（GET+DEL 同脚本，
+        同样原子）；两者都不可用（无 Redis）走内存 pop —— 内存路径在事件循环内天然原子。
+        """
+        client = self._resolve()
+        if client is None:
+            self._written.discard(key)
+            return self._memory.pop(key, None)
+        try:
+            value = self._bridge.call(client.getdel(key))
+        except Exception:
+            try:
+                value = self._bridge.call(client.eval(_POP_LUA, 1, key))
+            except Exception as exc:
+                self._fallback(exc)
+                self._written.discard(key)
+                return self._memory.pop(key, None)
+        self._written.discard(key)
+        if isinstance(value, bytes):
+            return value.decode("utf-8", "replace")
+        return value if isinstance(value, str) else None
+
     def clear(self) -> None:
         for key in list(self._written):
             self.delete(key)
@@ -190,6 +228,29 @@ class SessionStore:
             "hitl stored hitl_id=%s session=%s intent=%s",
             hitl_id, session_id, request.intent,
         )
+
+    def pop_hitl(self, hitl_id: str) -> HitlRequest | None:
+        """**原子认领**挂起请求：取走并删除，只有第一个调用者拿得到。
+
+        审核入口用它取代"get 之后再 remove"：那张卡片被连点两次（或两个回调并发到达）
+        时，第二个调用者会拿到 None 并回"已失效或已被处理"，因此不会重复送达输出、
+        也不会写两条审计。代价是认领之后若本地发送失败，该记录已被消耗（不可重试）——
+        与之相比，重复送达是更坏的语义，所以取这一头。
+        """
+        if self._storage is None:
+            request = self._pending_hitl.pop(hitl_id, None)
+        else:
+            raw = self._storage.pop(self._storage.key(hitl_id))
+            if raw is None:
+                return None
+            try:
+                request = HitlRequest(**json.loads(raw))
+            except Exception as exc:
+                logger.warning("hitl payload corrupt hitl_id=%s: %s", hitl_id, exc)
+                return None
+        if request is not None:
+            logger.info("hitl claimed hitl_id=%s", hitl_id)
+        return request
 
     def get_hitl(self, hitl_id: str) -> HitlRequest | None:
         if self._storage is None:
