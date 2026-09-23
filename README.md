@@ -289,11 +289,23 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   `verify_verification_token` 只在**顶层**找 token，而 v2 事件把 token 放在 `header.token`，
   于是"配了 `FEISHU_VERIFICATION_TOKEN` 却从未比对过"（旧行为是刻意 fail-open 且有测试钉住，
   但后果是**知道 session/trace 就能批准**）；现在配了就必须对（v1 顶层 / v2 `header.token`），
-  没配则只在显式 `GATEWAY_ALLOW_INSECURE=1` 时放行。**加密模式（`FEISHU_ENCRYPT_KEY` /
-  `X-Lark-Signature`）仍未实现**，配了它事件会被忽略。② **单次决策**：回调改为**原子认领**
+  没配则只在显式 `GATEWAY_ALLOW_INSECURE=1` 时放行。② **单次决策**：回调改为**原子认领**
   （`pop_hitl`：GETDEL → Lua 兜底 → 内存），连点两次或并发回调只有一个生效，第二次回
   "已失效或已被处理"——此前是"读→判断→删"三段，会**重复送达 + 写两条审计**。③ **谁批准的**
-  现在进审计（`hitl_operator`，取自 v1 顶层 `open_id` / v2 `event.operator.open_id`）。
+  现在进审计（`hitl_operator`，取自 v1 顶层 `open_id` / v2 `event.operator.open_id`）；
+  审批单据的另外两个字段也补上了：**谁申请的**（`HitlRequest.applicant`）与**为什么**
+  （`HitlRequest.reason`，命中原因/失败原因），并渲染在卡片上。**刻意不加"资源/权限/期限"**——
+  那是操作审批的字段，本项目治理的是模型输出，加了就与减法清单的定位冲突。④ **审批人白名单**
+  （`HITL_APPROVER_IDS`，逗号分隔 open_id）：**非空即强制**，名单外的点击 → 403 且**不消耗**
+  挂起记录（校验在认领之前，免得无权限者把待审批点没了）；**留空 = 不校验，同一会话里任何人
+  点一下都能批准**——要防冒充就得配它。⑤ **加密模式明确不做**（2026-09-23 决定）：它需要
+  AES 解密 + `X-Lark-Signature` 校验，而这两件无法对着真实加密回调验证；原先那个
+  `FEISHU_ENCRYPT_KEY` 字段**已删除**（配了它原本也只是被静默 ignored，形同虚设），
+  现在收到加密体一律明确报 `400 encrypted_events_unsupported`。
+- **工具全失败会刹车**（ADR-014）：ReAct 把工具异常降级成 observation 让模型自愈是有意设计，
+  但"**所有**工具都失败、任务却照样返回结果"的答案不该当正常交付。判定是
+  `tool_calls > 0 and tool_errors == tool_calls`（全部失败，不是"有失败"——部分失败仍属模型该
+  自己收敛的情形），触发后走评估器那条已有的刹车进人工；审计里 `tool_calls`/`tool_errors` 可核。
   ⚠️ v2 的 `event.operator` 字段路径**未对着真实卡片点击验证过**（只在单测里构造过）；
   取不到时留空、不影响审批。若真实回调被 401，看日志里的 `has_header_token`。
 - **以下几项本地无法验收**（不是没做，是缺外部条件）：① 成本量化——`avg_cost_usd` 恒 0，
@@ -307,10 +319,11 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 - `app/memory.py` 的 `_SyncBridge` 同步桥是已知技术债：同步线程跑 asyncio loop，测试与运行时都不依赖它做时序保证。
 - 双引擎模式下的边界：LangGraph 是可选 extra，Docker 镜像默认不带（`ENGINE=langgraph` 会自动回退 FSM 并告警）；
   图的 checkpoint 是进程内的 `InMemorySaver`，与 FSM 的 `_session_states` 同级，都不承诺跨重启恢复。
-- FSM 会话状态保存在进程内（`Engine._session_states`）；`app/redis_state/stack.py` 与 `lock.py` 的 Redis 状态栈 / Lua
-  锁目前只在单测中被调用，**未接入请求路径**，多实例部署前需要先接线（`store.py` 是活的，`/healthz` 用）。
-  **注意 HITL 的幂等已不依赖那把锁**：回调改用了挂起记录本身的**原子认领**（`pop_hitl`，GETDEL/Lua），
-  所以未接线的部分只剩"会话状态栈 / 单写者锁"。**重启后的语义是"审批失效"**
+- FSM 会话状态保存在进程内（`Engine._session_states`）→ **重启后审批失效**（见下）。多实例部署前需要把会话状态外部化：
+  `app/redis_state/store.py`（Redis 状态存储 + 内存回退）是活的（`/healthz` 用它），但**没有现成的"状态栈"可用**——
+  2026-09-23 删除了从未接入请求路径的 `stack.py`（状态栈）与 `lock.py`（幂等锁）：HITL 的幂等已改为挂起记录自身的
+  **原子认领**（`pop_hitl`，GETDEL/Lua），留着它们是"看起来有能力"的死代码；真要外部化时按当时的真实需求设计。
+  **重启后的语义是"审批失效"**
   （ADR-012）：`HitlRequest` 在 Redis 而会话状态在进程内，重启后两者不同步，此时点旧卡片会被识别为
   已失效——作废该记录、回复用户重新发起、审计写 `guard_action="hitl_expired"`。此前那条路径是 500 /
   "处理审批时出错了"且重试无效（卡片变成砖）。**挂起中的审批不会跨重启存活，这是有意为之**：

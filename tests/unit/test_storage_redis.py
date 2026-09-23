@@ -140,6 +140,9 @@ class TestSessionStoreRedis:
         fake = FakeRedisClient()
         store = SessionStore(storage=RedisHitlStorage(client=fake))
         req = _hitl(agent_output="secret", target="chat_999")
+        # 审批单据的两个基本字段也要能往返（2026-09-23 补：谁申请的、为什么）
+        req.applicant = "ou_applicant"
+        req.reason = "policy.compliance.no_price_commitment"
         store.store_hitl("sess-1", req)
         payload = json.loads(fake.data["moa:hitl:trace-1"])
         assert payload == {
@@ -147,6 +150,8 @@ class TestSessionStoreRedis:
             "trace_id": "trace-1",
             "agent_output": "secret",
             "intent": "write_file",
+            "applicant": "ou_applicant",
+            "reason": "policy.compliance.no_price_commitment",
             "agent_name": "coder",
             "channel": "feishu",
             "target": "chat_999",

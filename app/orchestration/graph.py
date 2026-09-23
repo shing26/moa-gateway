@@ -101,6 +101,7 @@ from app.pipeline import PipelineResult
 from app.pipeline import FAILURE_ESCALATION_TEXT
 from app.pipeline import _merge_guard  # 复用同一条守卫优先级规则，避免两套运行时漂移
 from app.pipeline import _verdict_from_eval_issues  # 评估器分级同样只有一份定义
+from app.pipeline import _tool_failure_issues  # 工具全失败 → 走同一条刹车
 from app.prompt_registry.canary import CanaryConfig, select_canary_version
 
 logger = logging.getLogger("moa.orchestration.langgraph")
@@ -565,7 +566,13 @@ class LangGraphOrchestrator:
             except Exception:  # noqa: BLE001 - mirrored from MoAPipeline
                 output_verdict = GuardVerdict(action=GuardianAction.ALLOW, reason="ok")
                 policy_ids = ()
-            eval_verdict = _verdict_from_eval_issues(state.get("eval_issues", ()))
+            eval_verdict = _verdict_from_eval_issues(
+                tuple(state.get("eval_issues", ()) or ())
+                + _tool_failure_issues(
+                    int(state.get("tool_calls", 0) or 0),
+                    int(state.get("tool_errors", 0) or 0),
+                )
+            )
             merged = _merge_guard(verdict, output_verdict, eval_verdict)
             if eval_verdict is not None and merged is eval_verdict:
                 hitl_kind = (
@@ -597,6 +604,9 @@ class LangGraphOrchestrator:
             target=state.get("target", ""),
             created_at=time.time(),
             hitl_kind=hitl_kind,
+            applicant=state.get("user_id", ""),
+            # 失败升级时报失败原因（retry_reason）比报"已转人工处理"更有用
+            reason=state.get("retry_reason") or state.get("guard_reason", ""),
         )
         hitl_id = state["trace_id"] or state["session_id"]
         self._session_store.store_hitl(state["session_id"], hitl)

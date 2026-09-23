@@ -264,6 +264,68 @@ def test_verdict_from_eval_issues_classification():
 
 
 @pytest.mark.asyncio
+async def test_all_tool_calls_failed_brakes_into_hitl(monkeypatch):
+    """「所有工具都失败、任务却照样返回结果」不该当正常交付。
+
+    ReAct 把工具异常降级成 observation 让模型自愈是有意设计（ADR-010），但"全失败"
+    的答案长得像成功。此前只做到审计里可见，现在接上已有的评估器刹车 → 人工。
+    """
+    class AllToolsFailedAgent:
+        async def execute(self, envelope):
+            envelope.agent_local_slot["tool_calls_total"] = 2
+            envelope.agent_local_slot["tool_errors_total"] = 2
+            return "工具都没查到，我猜是……"
+
+    patch_agents(monkeypatch, AllToolsFailedAgent())
+    engine = Engine()
+    p = make_pipeline(engine=engine)
+    result = await p.run(make_event(), channel="test", target="s1")
+
+    assert result.status == "pending_review"
+    assert result.hitl_kind == "eval_review"
+    assert result.tool_calls == 2 and result.tool_errors == 2
+    stored = engine.session_store.get_hitl(result.trace_id)
+    assert stored is not None and stored.reason
+
+
+@pytest.mark.asyncio
+async def test_partial_tool_failure_does_not_brake(monkeypatch):
+    """**部分**失败仍属模型该自己收敛的情形——判定必须是"全部失败"而不是"有失败"。"""
+    class PartialFailureAgent:
+        async def execute(self, envelope):
+            envelope.agent_local_slot["tool_calls_total"] = 3
+            envelope.agent_local_slot["tool_errors_total"] = 1
+            return "用成功的两个工具答完了"
+
+    patch_agents(monkeypatch, PartialFailureAgent())
+    p = make_pipeline()
+    result = await p.run(make_event(), channel="test", target="s1")
+
+    assert result.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_review_request_records_applicant_and_reason(monkeypatch):
+    """审批单据要能回答"谁申请的、为什么"。"""
+    # 用真 GuardService + 报价输出，才会真的走到 REVIEW 分支（默认桩 guard 是 ALLOW）
+    patch_agents(monkeypatch, PolicyOutputAgent("优惠价只要 99 元"))
+    engine = Engine()
+    p = make_pipeline(engine=engine, guard=GuardService())
+    event = MoAEvent(
+        trace_id=new_trace_id(), event=FsmEvent.MESSAGE_RECEIVED,
+        session_id="s-applicant", text="给我一份报价",
+        context={"source": "test", "user_id": "ou_applicant"},
+    )
+    result = await p.run(event, channel="test", target="s1")
+
+    assert result.status == "pending_review"
+    stored = engine.session_store.get_hitl(result.trace_id)
+    assert stored is not None
+    assert stored.applicant == "ou_applicant"
+    assert stored.reason, "事由（命中原因）不能为空"
+
+
+@pytest.mark.asyncio
 async def test_command_switch_mode(monkeypatch):
     cmd = FakeCommandMode()
     p = make_pipeline(command_mode=cmd)

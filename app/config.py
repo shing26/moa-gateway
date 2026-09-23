@@ -95,10 +95,20 @@ class Settings:
         self.router_llm_timeout_ms: int = int(os.getenv("ROUTER_LLM_TIMEOUT_MS", "2000"))
         self.micro_llm_timeout_ms: int = int(os.getenv("MICRO_LLM_TIMEOUT_MS", "1000"))
         self.hitl_enabled: bool = _parse_bool(os.getenv("HITL_ENABLED"), False)
+        # 审批人白名单（逗号分隔的 open_id）。**非空即强制**：回调里点击者不在此列则拒绝，
+        # 且**不消耗**挂起记录（不该让他人把待审批点没了）。留空 = 不校验（默认，保持既有行为），
+        # 但那时"聊天里任何人点一下都能批准"——所以 README 与 .env.template 都写明。
+        self.hitl_approver_ids: tuple[str, ...] = tuple(
+            item.strip()
+            for item in os.getenv("HITL_APPROVER_IDS", "").split(",")
+            if item.strip()
+        )
         self.feishu_verification_token: str = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
-        # ⚠️ 未实现：加密模式（X-Lark-Signature 的 HMAC / 时间戳防重放）尚未接线，
-        # 配了它事件会被忽略。字段先留着，但**不要在文档里把它当成已生效的保护**（ADR-013）。
-        self.feishu_encrypt_key: str = os.getenv("FEISHU_ENCRYPT_KEY", "")
+        # ⚠️ 未实现且**已删除字段**：加密模式（X-Lark-Signature 的 HMAC / 时间戳防重放，
+        # 以及加密体的 AES 解密）没有接线，且无法对着真实加密回调验证，所以决定不做
+        # （2026-09-23）。此前留着这个字段会让人以为它生效——实际配了它事件会被静默忽略。
+        # 见 README 已知边界；要支持需：AES 解密 + 签名校验 + 时间戳窗口。
+        self.feishu_encrypt_key: str = ""
         self.es_hosts: list[str] = _parse_es_hosts(os.getenv("ES_HOSTS", ""))
         self.es_index_prefix: str = os.getenv("ES_INDEX_PREFIX", "moa-audit")
 

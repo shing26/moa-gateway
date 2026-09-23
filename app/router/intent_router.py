@@ -27,7 +27,12 @@ class IntentRouter:
         self._regex_map = [
             (re.compile(r"^(hi|hello|hey|你好|您好)$", re.IGNORECASE), "greeting"),
             (re.compile(r"(debug|错误|报错|traceback|exception)", re.IGNORECASE), "debug"),
-            (re.compile(r"(code|代码|函数|class|模块|实现|refactor)", re.IGNORECASE), "coding"),
+            # `写一个/写个/编写` 是实测补上的：此前"写一个单例模式示例""写一个爬虫示例"
+            # 这类**最典型的编码请求完全不命中 coding**，会落到模型兜底甚至默认意图。
+            # 选这三个而非裸 `写`：裸 `写`会把"写一份周报"也吞成 coding。实测（正则层，
+            # 确定性）：e2e 标签命中 23/30 → 29/30，intent 数据集准确率保持 1.00，
+            # 一致性数据集的"必须不命中正则"约束仍 0/20 违反。
+            (re.compile(r"(code|代码|函数|class|模块|实现|refactor|写一个|写个|编写)", re.IGNORECASE), "coding"),
             (re.compile(r"(cancel|取消|重置|reset|stop)", re.IGNORECASE), "control"),
             (re.compile(r"(翻译|translate|英文|中文|english)", re.IGNORECASE), "translate"),
             (re.compile(r"(总结|摘要|summarize|概括|提炼)", re.IGNORECASE), "summarize"),

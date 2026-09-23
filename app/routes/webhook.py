@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.channels.feishu_cards import parse_card_callback
+from app.config import settings
 from app.deps import adapter, engine, logger, pipeline, tracer
 from app.fsm.state_machine import Event as FsmEvent
 from app.limit_providers.rate_limiter import rate_limiter
@@ -26,13 +27,27 @@ async def webhook_callback(request: Request) -> JSONResponse:
     # 卡片回调的审计与最初触发审批的请求共享同一 trace，决策可回流可复盘
     bind_trace(trace_id or session_id)
     hitl_id = trace_id or session_id
+    # **校验全部在认领之前**：非法 action 与无权限的点击都不该消耗挂起记录
+    # （消耗了就代表"这次审批没了"，别人再也批不了）。这条顺序是 2026-09-23 由
+    # test_webhook_callback_refuses_operator_outside_allowlist 逼出来的——
+    # 我最初把白名单校验插在 pop 之后，测试当场指出记录已被消耗。
+    if action not in ("approve", "reject"):
+        return JSONResponse({"error": f"unknown_action:{action}"}, status_code=400)
+    operator_id = str(body.get("open_id") or body.get("user_id") or "")
+    if settings.hitl_approver_ids and operator_id not in settings.hitl_approver_ids:
+        logger.warning(
+            "card callback rejected: operator=%r not allowed (hitl_id=%s)",
+            operator_id or "<unknown>", hitl_id,
+        )
+        return JSONResponse(
+            {"error": ErrorCode.UNAUTHORIZED.value, "message": "没有审批该请求的权限"},
+            status_code=403,
+        )
     # 原子认领（取走即删除）：并发第二次点击拿不到 payload → 404，不再重复送达 + 双审计
     hitl = engine.session_store.pop_hitl(hitl_id)
     if hitl is None:
         logger.warning("hitl request not available hitl_id=%s session=%s", hitl_id, session_id)
         return JSONResponse({"error": ErrorCode.HITL_REQUEST_NOT_FOUND.value}, status_code=404)
-    if action not in ("approve", "reject"):
-        return JSONResponse({"error": f"unknown_action:{action}"}, status_code=400)
     session_context, expired = await engine.decide_hitl(
         session_id=session_id, trace_id=trace_id, approve=(action == "approve"),
     )

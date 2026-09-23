@@ -81,6 +81,17 @@ async def _process_hitl_card(
     duration_ms = 0.0
     outcome = "hitl_not_found"
     try:
+        # 审批人白名单（`HITL_APPROVER_IDS`，非空即强制）。**必须在认领之前判**：
+        # 不能让没有权限的人把待审批记录点掉——那样别人就再也批不了了。
+        # 取不到点击者（平台没带 operator）而白名单非空时同样拒绝：验不了就不放行。
+        if settings.hitl_approver_ids and operator_id not in settings.hitl_approver_ids:
+            logger.warning(
+                "card_action rejected: operator=%r not allowed (hitl_id=%s, configured=%d)",
+                operator_id or "<unknown>", hitl_id, len(settings.hitl_approver_ids),
+            )
+            await _safe_send(session_id, "你没有审批该请求的权限", trace_id)
+            outcome = "hitl_forbidden"
+            return
         hitl = engine.session_store.pop_hitl(hitl_id)
         if hitl is None:
             # 不存在 / 已失效 / 已被（并发的另一次点击）认领，三种情况同一处理：
@@ -154,6 +165,14 @@ async def feishu_event(request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse({"error":"invalid_json"}, status_code=400)
+    if isinstance(body, dict) and body.get("encrypt"):
+        # 加密模式未实现（见 README 已知边界）。此前这种请求落到 "ignored" 分支被**静默丢弃**
+        # ——配了加密后收不到任何事件、日志里也看不出原因。现在明确报错（2026-09-23）。
+        logger.error(
+            "feishu_event 收到加密事件（body.encrypt）但加密模式未实现："
+            "请在开放平台关闭加密，或先实现 AES 解密 + X-Lark-Signature 校验"
+        )
+        return JSONResponse({"error": "encrypted_events_unsupported"}, status_code=400)
     if not verify_verification_token(
         body,
         settings.feishu_verification_token,

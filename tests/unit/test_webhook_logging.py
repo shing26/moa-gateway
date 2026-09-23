@@ -307,6 +307,31 @@ async def test_webhook_callback_second_click_is_rejected_without_double_delivery
     assert len(calls) == 1, "第二次点击不该再写决策审计"
 
 
+@pytest.mark.asyncio
+async def test_webhook_callback_refuses_operator_outside_allowlist(monkeypatch) -> None:
+    """审批人白名单（非空即强制）：名单外的点击 → 403，且**挂起记录不被消耗**。
+
+    与 /feishu/event 同一语义；v1 卡片动作把点击者放在顶层 `open_id`。
+    """
+    import app.routes.webhook as webhook_route
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "hitl_approver_ids", ("ou_allowed",))
+
+    store = webhook_route.engine.session_store
+    session_id, trace_id = "authz-sess", "authz-trace"
+    await _suspended_engine_setup(store, session_id, trace_id)
+
+    body = _callback_body(session_id, trace_id, "approve")
+    body["open_id"] = "ou_outsider"
+    try:
+        resp = await webhook_route.webhook_callback(_JsonRequest(body))
+        assert resp.status_code == 403
+        assert store.get_hitl(trace_id) is not None, "无权限的点击不能消耗挂起记录"
+    finally:
+        store.remove_hitl(trace_id)
+
+
 def test_webhook_debug_text_not_500(monkeypatch) -> None:
     real_handle = pipeline.engine.handle_event
     _patch_pipeline(monkeypatch, FakeAgent())

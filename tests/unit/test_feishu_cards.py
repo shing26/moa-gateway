@@ -100,3 +100,28 @@ def test_code_review_review_card_is_a_notification_not_an_approval():
     assert card.hitl_kind == "notification"
     assert [e for e in card.to_card_payload()["elements"] if e.get("tag") == "action"] == []
     assert "不支持在此批准/拒绝" in card.agent_output
+
+
+def test_card_renders_applicant_and_reason_when_present() -> None:
+    """审批单据的两个基本字段要出现在卡片上：谁申请的、为什么（2026-09-23 补）。"""
+    card = ApprovalCard(
+        session_id="s", trace_id="t", agent_name="coder", intent="coding",
+        agent_output="out", channel="feishu", target="chat",
+        applicant="ou_applicant", reason="policy.compliance.no_price_commitment",
+    )
+    texts = [e.get("content", "") for e in card.to_card_payload()["elements"]]
+
+    assert any("申请人" in t and "ou_applicant" in t for t in texts)
+    assert any("事由" in t and "no_price_commitment" in t for t in texts)
+
+
+def test_card_omits_blank_applicant_and_reason() -> None:
+    """为空时不渲染对应行——既有卡片的外观不能变。"""
+    card = ApprovalCard(
+        session_id="s", trace_id="t", agent_name="coder", intent="coding",
+        agent_output="out", channel="feishu", target="chat",
+    )
+    texts = [e.get("content", "") for e in card.to_card_payload()["elements"]]
+
+    assert not any("申请人" in t for t in texts)
+    assert not any("事由" in t for t in texts)

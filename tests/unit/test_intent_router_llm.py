@@ -82,3 +82,23 @@ async def test_bare_suan_is_not_a_task_trigger() -> None:
     for text in ("算一下 37*89", "算一算这个比例", "记一下明天开会"):
         intent, level = await router._regex_fallback(text)
         assert (intent, level) == ("task", "regex"), text
+
+
+@pytest.mark.asyncio
+async def test_write_style_coding_requests_are_caught() -> None:
+    """「写一个 X 示例」这类**最典型的编码请求**此前完全不命中 coding。
+
+    它会落到模型兜底甚至默认意图 `assistant` —— 与标签无关，这就是漏判。
+    补上 `写一个|写个|编写` 后（实测，正则层确定性）：e2e 标签命中 23/30 → 29/30，
+    而 intent 数据集准确率保持 1.00、一致性数据集的"必须不命中正则"约束仍 0 违反。
+
+    选这三个而非裸 `写`：裸 `写`会把「写一份周报」也吞成 coding —— 下面留着反例。
+    """
+    router = IntentRouter()
+
+    for text in ("写一个单例模式示例", "写一个爬虫示例", "写个二分查找"):
+        intent, level = await router._regex_fallback(text)
+        assert (intent, level) == ("coding", "regex"), text
+
+    intent, level = await router._regex_fallback("写一份周报模板")
+    assert level == "none", "非编码的「写」不该被吞（守住裸 `写` 的误吞）"

@@ -37,12 +37,24 @@ class ApprovalCard:
     # 审批来源：guard 策略判定（"review"）／评估器判定（"eval_review"）／
     # 自动处理失败后的升级（"failure_escalation"）。默认值让既有构造点不变。
     hitl_kind: str = "review"
+    # 审批单据的两个基本字段：谁申请的、为什么（2026-09-23 补，与 HitlRequest 对齐）。
+    # 为空时不渲染对应行，既有卡片外观不变。
+    applicant: str = ""
+    reason: str = ""
 
     def to_card_payload(self) -> dict[str, Any]:
         elements: list[dict[str, Any]] = [
             {"tag": "markdown", "content": f"**Agent**: {self.agent_name}"},
             {"tag": "markdown", "content": f"**Intent**: {self.intent}"},
             {"tag": "markdown", "content": f"**Trace**: {self.trace_id}"},
+        ]
+        if self.applicant:
+            elements.append(
+                {"tag": "markdown", "content": f"**申请人**: {self.applicant}"}
+            )
+        if self.reason:
+            elements.append({"tag": "markdown", "content": f"**事由**: {self.reason}"})
+        elements += [
             {"tag": "hr"},
             {
                 "tag": "markdown",

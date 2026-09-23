@@ -56,41 +56,48 @@ class TestMemoryStateStore:
         assert await store.eval("unknown script", 1, "key", "val", "60") is False
 
     @pytest.mark.asyncio
-    async def test_eval_acquire_release_and_extend_via_lock(self):
-        from app.redis_state.lock import IdempotencyLock
+    async def test_eval_acquire_release_and_extend(self):
+        """内存回退必须模仿 Redis 的 SET NX EX / 条件 DEL / 条件 EXPIRE 语义。
+
+        此前这组断言是**借 `IdempotencyLock` 驱动**的，而那个类在 2026-09-23 被删除
+        （从未接入请求路径）；被测对象其实一直是 `MemoryStateStore.eval`，所以改成
+        直接用脚本常量驱动 —— 覆盖面不变，也不再依赖一个已删的包装类。
+        """
+        from app.redis_state.memory_fallback import (
+            _ACQUIRE_LUA,
+            _EXTEND_LUA,
+            _RELEASE_LUA,
+        )
 
         store = MemoryStateStore()
-        lock = IdempotencyLock(redis=store, key="moa:lock:test", value="v1", ttl=30)
 
-        assert await lock.acquire() is True
-        assert lock.held is True
+        assert await store.eval(_ACQUIRE_LUA, 1, "moa:lock:test", "v1", "30") is True
         assert await store.get("moa:lock:test") == "v1"
-        assert await lock.extend(ttl=120) is True
-        assert await lock.release() is True
+        assert await store.eval(_EXTEND_LUA, 1, "moa:lock:test", "v1", "120") == 1
+        assert await store.eval(_RELEASE_LUA, 1, "moa:lock:test", "v1") == 1
         assert await store.get("moa:lock:test") is None
 
     @pytest.mark.asyncio
-    async def test_eval_blocks_different_lock_value(self):
-        from app.redis_state.lock import IdempotencyLock
+    async def test_eval_acquire_is_exclusive(self):
+        """已存在的 key 再 ACQUIRE 必须失败（NX 语义）——这正是"只允许一次"的基础。"""
+        from app.redis_state.memory_fallback import _ACQUIRE_LUA
 
         store = MemoryStateStore()
-        lock_a = IdempotencyLock(redis=store, key="moa:lock:test", value="v1", ttl=30)
-        lock_b = IdempotencyLock(redis=store, key="moa:lock:test", value="v2", ttl=30)
 
-        assert await lock_a.acquire() is True
-        assert await lock_b.acquire() is False
-        assert lock_b.held is False
+        assert await store.eval(_ACQUIRE_LUA, 1, "k", "v1", "30") is True
+        assert await store.eval(_ACQUIRE_LUA, 1, "k", "v2", "30") is False
+        assert await store.get("k") == "v1", "失败的那次不能覆盖已持有的值"
 
     @pytest.mark.asyncio
     async def test_eval_release_wrong_value_returns_zero(self):
-        from app.redis_state.lock import IdempotencyLock
+        """条件 DEL：值不匹配就不删（避免释放了别人的锁）。"""
+        from app.redis_state.memory_fallback import _ACQUIRE_LUA, _RELEASE_LUA
 
         store = MemoryStateStore()
-        lock = IdempotencyLock(redis=store, key="moa:lock:test", value="v1", ttl=30)
-        await lock.acquire()
+        await store.eval(_ACQUIRE_LUA, 1, "moa:lock:test", "v1", "30")
         await store.set("moa:lock:test", "v2")
 
-        assert await lock.release() is False
+        assert await store.eval(_RELEASE_LUA, 1, "moa:lock:test", "v1") == 0
         assert await store.get("moa:lock:test") == "v2"
 
     @pytest.mark.asyncio

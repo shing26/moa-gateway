@@ -5,9 +5,40 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.redis_state.lock import _ACQUIRE_LUA, _EXTEND_LUA, _RELEASE_LUA
-
 logger = logging.getLogger("moa.redis.memory")
+
+# 内存回退要模仿的 Lua 脚本（与真实 Redis 端同一份语义）。此前它们住在
+# `lock.py`，而那个模块的 `IdempotencyLock`/`LuaLockFactory` 从未接入请求路径
+# （HITL 的幂等改用挂起记录的原子认领 `pop_hitl` 解决），2026-09-23 连同
+# `stack.py` 一起删除，脚本常量搬到这里——它们本来就只有本模块在用。
+_ACQUIRE_LUA = """
+local key = KEYS[1]
+local value = ARGV[1]
+local ttl = tonumber(ARGV[2])
+return redis.call('SET', key, value, 'NX', 'EX', ttl)
+"""
+
+_RELEASE_LUA = """
+local key = KEYS[1]
+local value = ARGV[1]
+local current = redis.call('GET', key)
+if current == value then
+    redis.call('DEL', key)
+    return 1
+end
+return 0
+"""
+
+_EXTEND_LUA = """
+local key = KEYS[1]
+local value = ARGV[1]
+local ttl = tonumber(ARGV[2])
+local current = redis.call('GET', key)
+if current == value then
+    return redis.call('EXPIRE', key, ttl)
+end
+return 0
+"""
 
 
 class MemoryStateStore:

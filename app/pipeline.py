@@ -104,6 +104,20 @@ _EVAL_DENY_PREFIXES = (
 )
 
 
+def _tool_failure_issues(tool_calls: int, tool_errors: int) -> tuple[str, ...]:
+    """工具调用**全部失败**时补一条 issue，让它走评估器那条已有的刹车。
+
+    ReAct 把工具异常降级成 observation 让模型自愈是有意设计（见 ADR-010），但
+    "所有工具都失败、任务却照样返回了结果"的答案**不该当正常交付**——它长得像成功。
+    此前只做到"审计里可见"（`tool_calls`/`tool_errors`），现在接到已有的刹车：
+    issue → REVIEW → 人工。**判定是"全部失败"（`tool_calls > 0 and tool_errors == tool_calls`），
+    不是"有失败"**——部分失败仍属模型该自己收敛的情形。
+    """
+    if tool_calls > 0 and tool_errors == tool_calls:
+        return ("all_tool_calls_failed",)
+    return ()
+
+
 def _verdict_from_eval_issues(issues: Any) -> GuardVerdict | None:
     """把评估器的 issues 变成一个 verdict 来源；干净输出返回 None。
 
@@ -223,6 +237,7 @@ class MoAPipeline:
             session_id=event.session_id, trace_id=event.trace_id, agent_output=digest,
             intent=intent, agent_name=agent_name, channel=channel, target=target,
             created_at=time.time(), hitl_kind="failure_escalation",
+            applicant=self._resolve_user_id(event), reason=reason,
         )
         self.engine.session_store.store_hitl(event.session_id, hitl_request)
         # NEEDS_HUMAN 在 SUSPENDED 上是自环：发它是为了置上 hitl_pending
@@ -238,6 +253,7 @@ class MoAPipeline:
                 session_id=event.session_id, trace_id=event.trace_id, agent_name=agent_name,
                 intent=intent, agent_output=digest, channel=channel, target=target,
                 hitl_kind="failure_escalation",
+                applicant=self._resolve_user_id(event), reason=reason,
             )
             await self.card_sender.send_card(card)
         if request is not None:
@@ -516,7 +532,9 @@ class MoAPipeline:
             except Exception:
                 output_verdict = GuardVerdict(action=GuardianAction.ALLOW, reason="ok")
                 policy_ids = ()
-            eval_verdict = _verdict_from_eval_issues(eval_result.issues)
+            eval_verdict = _verdict_from_eval_issues(
+                eval_result.issues + _tool_failure_issues(tool_calls, tool_errors)
+            )
             merged = _merge_guard(verdict, output_verdict, eval_verdict)
             if eval_verdict is not None and merged is eval_verdict:
                 hitl_kind = (
@@ -531,6 +549,7 @@ class MoAPipeline:
                 session_id=event.session_id, trace_id=event.trace_id, agent_output=raw_output,
                 intent=intent, agent_name=agent_name, channel=channel, target=target,
                 created_at=time.time(), hitl_kind=hitl_kind or "review",
+                applicant=user_id, reason=verdict.reason,
             )
             self.engine.session_store.store_hitl(event.session_id, hitl_request)
             await self.engine.handle_event(MoAEvent(
@@ -543,6 +562,7 @@ class MoAPipeline:
                     session_id=event.session_id, trace_id=event.trace_id, agent_name=agent_name,
                     intent=intent, agent_output=raw_output, channel=channel, target=target,
                     hitl_kind=hitl_kind or "review",
+                    applicant=user_id, reason=verdict.reason,
                 )
                 await self.card_sender.send_card(card)
             if request is not None:
