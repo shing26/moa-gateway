@@ -30,7 +30,7 @@ from apps.code_review_pipeline.routing.github_review_route import github_review_
 async def lifespan(_: FastAPI):
     global tracer
     try:
-        cfg = TraceConfig(otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", ""))
+        cfg = TraceConfig(otlp_endpoint=settings.otel_exporter_otlp_endpoint)
         setup_tracing(cfg)
     except Exception:
         logger.warning("opentelemetry tracing init failed")

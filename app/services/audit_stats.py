@@ -12,9 +12,17 @@ import json
 import pathlib
 from typing import Any
 
+from app.config import settings
+
+
+def _log_dir() -> pathlib.Path:
+    # 与写侧同一来源（settings.log_dir）；此前这里硬编码 "logs"，
+    # 而 .env.template 文档里的 LOG_DIR 无人读取——是个死旋钮。
+    return pathlib.Path(settings.log_dir)
+
 
 def read_recent_logs(count: int = 50) -> list[dict[str, Any]]:
-    log_dir = pathlib.Path("logs")
+    log_dir = _log_dir()
     if not log_dir.exists():
         return []
     files = sorted(log_dir.glob("audit-*.jsonl"), key=lambda p: p.name, reverse=True)[:3]
@@ -35,7 +43,7 @@ def read_recent_logs(count: int = 50) -> list[dict[str, Any]]:
 
 
 def load_audit_entries(days: int = 7) -> list[dict[str, Any]]:
-    log_dir = pathlib.Path("logs")
+    log_dir = _log_dir()
     if not log_dir.exists():
         return []
     today = datetime.date.today()

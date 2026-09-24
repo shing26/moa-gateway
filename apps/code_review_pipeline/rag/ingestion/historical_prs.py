@@ -236,7 +236,9 @@ async def ingest_repo(
     github_token: str | None = None,
 ) -> int:
     repo_obj = _parse_repo(repo)
-    token = github_token or os.getenv("GITHUB_TOKEN", "")
+    from app.config import settings
+
+    token = github_token or settings.github_token
     if not token:
         raise RuntimeError("GITHUB_TOKEN is required for historical PR ingestion")
 

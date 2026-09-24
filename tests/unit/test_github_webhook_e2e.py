@@ -6,6 +6,7 @@ from typing import Any
 import json
 import pytest
 
+from app.config import settings
 from app.main import app
 from apps.code_review_pipeline.rag.embeddings import EmbeddingError
 from apps.code_review_pipeline.routing.github_client import GitHubClient
@@ -72,7 +73,7 @@ def _patch_github_and_llm(monkeypatch: pytest.MonkeyPatch) -> None:
         "apps.code_review_pipeline.agents.report_agent",
     ):
         monkeypatch.setattr(f"{module}.build_code_review_llm", lambda: DummyLLM())
-    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setattr(settings, "github_token", "test-token")
 
 
 def test_github_review_webhook_returns_accepted() -> None:
@@ -105,7 +106,7 @@ def test_github_review_webhook_returns_accepted() -> None:
 
 
 def test_github_review_webhook_degrades_without_token(monkeypatch) -> None:
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(settings, "github_token", "")
     client = app_client(app)
     payload = {
         "action": "opened",
@@ -130,7 +131,7 @@ def test_github_review_webhook_degrades_without_token(monkeypatch) -> None:
 def test_pr_message_in_review_mode_returns_graceful_not_500(monkeypatch) -> None:
     from app.deps import command_mode
 
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(settings, "github_token", "")
     command_mode.set("h2-sess", "review")
     try:
         with app_client(app) as client:

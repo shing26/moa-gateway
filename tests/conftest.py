@@ -10,7 +10,10 @@
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
+import tempfile
 
 DEFAULT_GATEWAY_TOKEN = "test-gateway-token"  # nosec B105
 DEFAULT_DASHBOARD_PASSWORD = "test-dashboard-pw"  # nosec B105
@@ -64,3 +67,17 @@ for name in (
     "OMNIROUTE_API_KEY",
 ):
     os.environ[name] = ""
+
+# GITHUB_TOKEN / 飞书应用凭据同理：settings 在 import 期读取，开发机 .env 里的
+# 真实值若漏进来，"是否已配置"的分支就会依赖开发者的机器（又一种非 hermetic）。
+# 需要凭据的用例各自 monkeypatch settings 对应字段（见 test_review_agent.py）。
+for name in ("GITHUB_TOKEN", "FEISHU_APP_ID", "FEISHU_APP_SECRET", "MOA_DEFAULT_ROLE"):
+    os.environ[name] = ""
+
+# 审计日志同理隔离：request_logger 的 WAL 与 audit_stats 的读取都走 settings.log_dir
+# （LOG_DIR）。不隔离的话，跑一次 pytest 会把测试请求写进开发机真实的 logs/audit-*.jsonl
+# ——而 dashboard 的审计统计读的就是那份文件，等于测试污染面板数字（2026-09-24 实测
+# 42 条 h2-sess / web:test-* 条目混在真实审计里）。
+_TEST_LOG_DIR = tempfile.mkdtemp(prefix="moa-test-audit-")
+os.environ["LOG_DIR"] = _TEST_LOG_DIR
+atexit.register(shutil.rmtree, _TEST_LOG_DIR, ignore_errors=True)

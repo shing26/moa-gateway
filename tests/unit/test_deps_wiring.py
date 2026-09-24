@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+from app.config import settings
+
 
 def test_fsm_pipeline_shares_composition_root_singletons() -> None:
     from app import deps
@@ -59,7 +61,9 @@ def test_init_feishu_tolerates_an_orchestrator_without_set_card_sender(monkeypat
             return {"engine": "langgraph"}
 
     monkeypatch.setattr(deps, "pipeline", _DispatcherLike())
-    monkeypatch.setenv("FEISHU_APP_ID", "cli_test")
-    monkeypatch.setenv("FEISHU_APP_SECRET", "test-secret")
+    # 2026-09-24 收编：飞书凭据的唯一读取点是 app/config.py → patch settings
+    # （setenv 不再有效果，settings 在 import 期就已构建）。
+    monkeypatch.setattr(settings, "feishu_app_id", "cli_test")
+    monkeypatch.setattr(settings, "feishu_app_secret", "test-secret")
 
     deps.init_feishu()  # 不该抛

@@ -38,8 +38,8 @@ async def get_adapter():
     global _adapter
     if _adapter is not None:
         return _adapter
-    app_id = os.environ.get("FEISHU_APP_ID", "")
-    app_secret = os.environ.get("FEISHU_APP_SECRET", "")
+    app_id = settings.feishu_app_id
+    app_secret = settings.feishu_app_secret
     if app_id and app_secret:
         auth = FeishuTokenProvider(FeishuAuthConfig(app_id=app_id, app_secret=app_secret))
         _adapter = FeishuChannelAdapter(FeishuConfig(app_id=app_id, app_secret=app_secret), auth=auth)

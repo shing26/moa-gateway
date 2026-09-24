@@ -47,7 +47,9 @@ class GitHubClient:
 
     @staticmethod
     def from_env() -> GitHubClient:
-        token = os.getenv("GITHUB_TOKEN", "")
+        from app.config import settings
+
+        token = settings.github_token
         if not token:
             raise RuntimeError("GITHUB_TOKEN is required for Code Review Pipeline")
         return GitHubClient(token=token)

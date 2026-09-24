@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse
 
 from app.agents.provider_registry import visible_options
 from app.command_mode import MODES
+from app.config import settings
 from app.guard.policies import policy_engine
 from app.services.audit_stats import (
     hitl_latency_stats,
@@ -23,6 +24,7 @@ from app.services.audit_stats import (
     top_risky_sessions,
     trend_by_day,
 )
+from app.services.llm_status import llm_snapshot
 
 PAGES = [
     ("overview", "概览", "系统状态、运行配置与最近流量"),
@@ -261,9 +263,10 @@ def render_shell(
 
 
 def overview_page() -> str:
-    model = os.environ.get("LLM_MODEL", "").strip() or "未设置"
-    base_url = os.environ.get("LLM_BASE_URL", "").strip() or "未设置"
-    feishu = "已配置" if os.environ.get("FEISHU_APP_ID", "") else "未配置"
+    _llm = llm_snapshot()
+    model = str(_llm["model"]).strip() or "未设置"
+    base_url = str(_llm["base_url"]).strip() or "未设置"
+    feishu = "已配置" if settings.feishu_app_id else "未配置"
     return f"""
 <section class="stat-band" aria-label="核心指标">
   <div class="stat-card"><span class="stat-label">系统状态</span><strong class="stat-value" id="stat-health">—</strong></div>

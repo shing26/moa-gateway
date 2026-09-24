@@ -7,12 +7,15 @@ from contextvars import ContextVar
 from typing import Any
 
 from app.audit.models import AuditEntry
-from app.audit.wal import AsyncWal, LogConfig
+from app.audit.wal import AsyncWal
 from app.models.events import new_trace_id
 
 logger = logging.getLogger("moa.middleware.request_logger")
 
-_wal = AsyncWal(_config=LogConfig(directory="logs", retention_days=90))
+# 目录/保留期跟 settings（LOG_DIR / LOG_RETENTION_DAYS）走；测试在 conftest 里
+# 把 LOG_DIR 指到临时目录，因此**不再污染**开发机真实的 logs/audit-*.jsonl
+# （dashboard 的审计统计读的就是那份文件）。
+_wal = AsyncWal()
 
 # 请求作用域的审计 trace：一次请求内的所有审计条目（含双引擎与后台任务）
 # 共享同一个 trace，否则 review 与后续 hitl_approve/reject 分属两条互不

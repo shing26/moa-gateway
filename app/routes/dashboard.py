@@ -42,6 +42,7 @@ from app.services.audit_stats import (
     top_risky_sessions,
     trend_by_day,
 )
+from app.services.llm_status import llm_snapshot
 
 # 拆分前这批数据函数定义在本模块，test_security_stats.py 直接从这里 import；
 # re-export 保持既有测试与外部引用的契约。
@@ -182,15 +183,11 @@ async def dashboard_ops_config() -> JSONResponse:
         value = await _flag_client.get(name, DEFAULT_FLAGS.get(name, False))
         flags.append({"name": name, "value": value})
     return JSONResponse({
-        "llm": {
-            "provider": os.environ.get("LLM_PROVIDER", "direct"),
-            "model": os.environ.get("LLM_MODEL", ""),
-            "base_url": os.environ.get("LLM_BASE_URL", ""),
-            "api_key_set": bool(os.environ.get("LLM_API_KEY", "")),
-        },
-        "feishu": {"configured": bool(os.environ.get("FEISHU_APP_ID", ""))},
+        # 展示与写入共用同一份快照（llm_snapshot），不再各读各的、各带一套默认值
+        "llm": llm_snapshot(),
+        "feishu": {"configured": bool(settings.feishu_app_id)},
         "redis": {"url": settings.redis_url},
-        "tracing": {"otlp_endpoint": os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")},
+        "tracing": {"otlp_endpoint": settings.otel_exporter_otlp_endpoint},
         "limiter": {"wired": False, "note": "未接入全局限流"},
         "obsidian": obsidian_sync.status(),
         "flags": flags,
@@ -209,12 +206,7 @@ async def dashboard_ops_config_update(body: OpsConfigUpdate) -> JSONResponse:
         os.environ["LLM_API_KEY"] = body.api_key.strip()
     return JSONResponse({
         "ok": True,
-        "llm": {
-            "provider": os.environ.get("LLM_PROVIDER", "direct"),
-            "model": os.environ.get("LLM_MODEL", ""),
-            "base_url": os.environ.get("LLM_BASE_URL", ""),
-            "api_key_set": bool(os.environ.get("LLM_API_KEY", "")),
-        },
+        "llm": llm_snapshot(),
     })
 
 

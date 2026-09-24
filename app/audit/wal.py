@@ -16,10 +16,25 @@ from app.audit.models import AuditEntry
 logger = logging.getLogger("moa.audit.wal")
 
 
+def _default_log_dir() -> str:
+    from app.config import settings
+
+    return settings.log_dir
+
+
+def _default_retention_days() -> int:
+    from app.config import settings
+
+    return settings.log_retention_days
+
+
 @dataclass
 class LogConfig:
-    directory: str = "logs"
-    retention_days: int = 90
+    # 目录与保留期跟 settings（LOG_DIR / LOG_RETENTION_DAYS）走。此前这里写死
+    # "logs"/90，.env.template 文档里的这两个旋钮**没有任何代码读**——是死配置，
+    # 2026-09-24 收编进 app/config.py 时一并复活（测试据此把日志隔离到临时目录）。
+    directory: str = field(default_factory=_default_log_dir)
+    retention_days: int = field(default_factory=_default_retention_days)
     file_prefix: str = "audit"
 
 

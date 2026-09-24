@@ -129,8 +129,10 @@ class FeishuReviewNotifier:
         webhook_url = os.getenv("FEISHU_REVIEW_WEBHOOK")
         default_target = os.getenv("FEISHU_HOME_CHANNEL")
         card_sender = None
-        app_id = os.getenv("FEISHU_APP_ID", "")
-        app_secret = os.getenv("FEISHU_APP_SECRET", "")
+        from app.config import settings
+
+        app_id = settings.feishu_app_id
+        app_secret = settings.feishu_app_secret
         if app_id and app_secret:
             try:
                 from app.channels.feishu_auth import FeishuAuthConfig, FeishuTokenProvider

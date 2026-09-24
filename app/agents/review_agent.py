@@ -5,6 +5,7 @@ import os
 import re
 
 from app.agents.contract import AgentEnvelope
+from app.config import settings
 from app.models.events import MoAEvent
 from apps.code_review_pipeline.agents.code_review_pipeline import CodeReviewPipeline
 from apps.code_review_pipeline.reporting import format_review_summary
@@ -19,7 +20,7 @@ class ReviewAgent:
         return CodeReviewPipeline.from_env()
 
     async def execute(self, envelope: AgentEnvelope) -> str:
-        if not os.getenv("GITHUB_TOKEN"):
+        if not settings.github_token:
             return "PR 审查需要配置 GITHUB_TOKEN；请设置后重试。"
         raw = envelope.user_raw_input.strip()
         body = envelope.agent_local_slot.get("webhook_body")

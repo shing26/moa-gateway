@@ -86,6 +86,7 @@ import app.agents.loader  # noqa: F401  (import for agent registration side effe
 from app.agents.contract import AgentEnvelope, get_agent
 from app.agents.intent_map import resolve_agent_key
 from app.agents.retry import AgentExecutionFailed, execute_with_retry
+from app.config import settings
 from app.context_budget import apply_context_budget
 from app.engine import HitlRequest
 from app.guard.guard_service import GuardianAction, GuardVerdict
@@ -543,7 +544,7 @@ class LangGraphOrchestrator:
         raw_output = state.get("raw_output", "")
         agent_name = state.get("agent_name", "general")
         intent = state.get("intent", "assistant")
-        payload = {"intent": intent, "resource": intent, "role": os.environ.get("MOA_DEFAULT_ROLE", "operator")}
+        payload = {"intent": intent, "resource": intent, "role": settings.default_role}
 
         guard_intent = intent
         hitl_enabled = self._hitl_enabled()

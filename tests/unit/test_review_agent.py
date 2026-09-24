@@ -4,6 +4,7 @@ import pytest
 
 from app.agents.contract import AgentEnvelope
 from app.agents.review_agent import ReviewAgent
+from app.config import settings
 from apps.code_review_pipeline.schemas.pipeline import AgentFindingResult, Finding, PipelineResult
 from apps.code_review_pipeline.schemas.pr_context import PRContext, PRFile
 
@@ -71,7 +72,7 @@ def _envelope(user_input: str, slot: dict | None = None) -> AgentEnvelope:
 
 @pytest.mark.asyncio
 async def test_review_agent_formats_summary(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setattr(settings, "github_token", "test-token")
     monkeypatch.setattr(ReviewAgent, "_build_pipeline", lambda self: DummyPipeline())
 
     output = await ReviewAgent().execute(_envelope("shing26/moa-gateway#1"))
@@ -84,7 +85,7 @@ async def test_review_agent_formats_summary(monkeypatch: pytest.MonkeyPatch) -> 
 
 @pytest.mark.asyncio
 async def test_review_agent_uses_webhook_body_slot(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setattr(settings, "github_token", "test-token")
     monkeypatch.setattr(ReviewAgent, "_build_pipeline", lambda self: DummyPipeline())
     body = {
         "action": "opened",
@@ -100,7 +101,7 @@ async def test_review_agent_uses_webhook_body_slot(monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.asyncio
 async def test_review_agent_graceful_without_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setattr(settings, "github_token", "")
 
     output = await ReviewAgent().execute(_envelope("shing26/moa-gateway#1"))
 
@@ -109,7 +110,7 @@ async def test_review_agent_graceful_without_token(monkeypatch: pytest.MonkeyPat
 
 @pytest.mark.asyncio
 async def test_review_agent_asks_for_pr_reference(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GITHUB_TOKEN", "test-token")
+    monkeypatch.setattr(settings, "github_token", "test-token")
 
     output = await ReviewAgent().execute(_envelope("随便聊聊"))
 

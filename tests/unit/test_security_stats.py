@@ -167,7 +167,11 @@ def test_hitl_latency_stats_empty():
 
 
 def test_load_audit_entries_filters_bad_lines(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    # 2026-09-24 收编：读取侧的目录来自 settings.log_dir（与写侧同源），
+    # 不再 chdir 依赖相对路径 "logs"。
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "log_dir", str(tmp_path / "logs"))
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     today = date.today().isoformat()
@@ -184,7 +188,9 @@ def test_load_audit_entries_filters_bad_lines(tmp_path, monkeypatch):
 
 
 def test_load_audit_entries_skips_old_files(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "log_dir", str(tmp_path / "logs"))
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
     old = (date.today() - timedelta(days=10)).isoformat()
@@ -198,7 +204,9 @@ def test_load_audit_entries_skips_old_files(tmp_path, monkeypatch):
 
 
 def test_load_audit_entries_missing_dir(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "log_dir", str(tmp_path / "logs"))
     assert _load_audit_entries(7) == []
 
 

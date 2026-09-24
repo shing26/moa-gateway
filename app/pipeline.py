@@ -508,7 +508,7 @@ class MoAPipeline:
 
         eval_result = await self.evaluator.score(raw_output, intent)
 
-        payload = {"intent": intent, "resource": intent, "role": os.environ.get("MOA_DEFAULT_ROLE", "operator")}
+        payload = {"intent": intent, "resource": intent, "role": settings.default_role}
         guard_intent = intent
         guard_hitl = settings.hitl_enabled
         if "EXECUTION_REQUIRES_APPROVAL" in raw_output:

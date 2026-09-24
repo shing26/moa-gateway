@@ -50,6 +50,39 @@ SINGLE_SOURCE_CONCEPTS = {
     # 这个概念当时有两个值（stubs 的 3 与 ReActLoop 的 8）。收编进 app/config.py 后，
     # 这个守卫自动开始覆盖它们——再有人从别处读 env 就会红。
     "任务 Agent 后端与步数": ("AGENT_LLM", "AGENT_MAX_STEPS"),
+    # 2026-09-24 第二批收编（扫描发现同类未关完的实例）：以下概念此前散落多处
+    # 各自读 env，其中 config.py 甚至不认 MOA_DEFAULT_ROLE / FEISHU_APP_ID/SECRET /
+    # OTEL_EXPORTER_OTLP_ENDPOINT / GITHUB_TOKEN / LOG_DIR（后两个连同 LOG_RETENTION_DAYS
+    # 是 .env.template 文档里写了却没人读的死旋钮）；LLM_* 那组更进了一步——
+    # dashboard 展示面自带的默认值（""）与客户端工厂的默认（gpt-4o-mini /
+    # api.openai.com）**不一致**，未配置时面板报"未设置"而客户端在用默认模型。
+    "RBAC 兜底角色": ("MOA_DEFAULT_ROLE",),
+    "飞书应用凭据": ("FEISHU_APP_ID", "FEISHU_APP_SECRET"),
+    "OTel 导出端点": ("OTEL_EXPORTER_OTLP_ENDPOINT",),
+    "GitHub 令牌": ("GITHUB_TOKEN",),
+    "审计日志目录": ("LOG_DIR",),
+    "审计日志保留期": ("LOG_RETENTION_DAYS",),
+    "主链路 LLM 配置": ("LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY"),
+    "入口鉴权凭据": ("WEBHOOK_AUTH_TOKEN", "DASHBOARD_PASSWORD"),
+}
+
+# 个别概念按需放行的读者（config.py 对所有概念放行，见 ALLOWED_READERS）。
+# 放行必须给理由——"看起来是第二处读取点"与"语义上必须是活读/工厂"是两回事：
+CONCEPT_ALLOWED_READERS: dict[str, set[str]] = {
+    # LLM_* 有一个**客户端工厂**（LLMConfig.from_env，按前缀动态读 env——字面扫描
+    # 本就看不见它，这里显式记录）与一个**组合根**（deps 构建分类器时判断主模型
+    # 是否已配置）。
+    "主链路 LLM 配置": {
+        "app/agents/provider.py",
+        "app/deps.py",
+        # 展示快照是 ops 面板的唯一读取点：ops/config 的 POST 是运行时可写设施
+        # （直接写 env），展示必须读**活** env 才能反映运行时改动。
+        "app/services/llm_status.py",
+    },
+    # 侧栏的鉴权态是**故意的请求期活读**：AuthMiddleware 在 import 期就固化了
+    # 自己那份，而侧栏要反映运行时改动——test_dashboard_routes 钉住这个差异。
+    # 这是"一处有意的活读"，不是分叉。
+    "入口鉴权凭据": {"app/rendering/dashboard_html.py"},
 }
 
 _ENV_READ = re.compile(r"""(?:os\.getenv|os\.environ\.get)\(\s*["']([A-Z0-9_]+)["']""")
@@ -63,12 +96,13 @@ def _env_reads(path: Path) -> list[tuple[int, str]]:
     return reads
 
 
-def _offenders_for(names: tuple[str, ...]) -> list[str]:
+def _offenders_for(names: tuple[str, ...], concept: str | None = None) -> list[str]:
+    extra = CONCEPT_ALLOWED_READERS.get(concept, set()) if concept else set()
     offenders: list[str] = []
     for rel_dir in SCAN_DIRS:
         for path in (REPO_ROOT / rel_dir).rglob("*.py"):
             rel = path.relative_to(REPO_ROOT).as_posix()
-            if rel in ALLOWED_READERS:
+            if rel in ALLOWED_READERS or rel in extra:
                 continue
             for line_no, name in _env_reads(path):
                 if name in names:
@@ -83,7 +117,7 @@ def test_concept_has_a_single_env_reader(concept: str) -> None:
     允许多处读同一组 env 就等于允许它们**接受集合不同**——那正是上面两例的成因，
     而且分叉时不报错，只是"配了没生效"。
     """
-    offenders = _offenders_for(SINGLE_SOURCE_CONCEPTS[concept])
+    offenders = _offenders_for(SINGLE_SOURCE_CONCEPTS[concept], concept)
 
     assert not offenders, (
         f"{concept} 出现了第二个 env 读取点（应统一走 app.config.settings）: {offenders}"

@@ -159,8 +159,8 @@ pipeline = _select_orchestrator(fsm_pipeline)
 
 def init_feishu() -> None:
     global _feishu_config, _card_sender
-    app_id = os.environ.get("FEISHU_APP_ID", "")
-    app_secret = os.environ.get("FEISHU_APP_SECRET", "")
+    app_id = settings.feishu_app_id
+    app_secret = settings.feishu_app_secret
     if app_id and app_secret:
         _feishu_config = FeishuConfig(app_id=app_id, app_secret=app_secret)
         auth_provider = FeishuTokenProvider(FeishuAuthConfig(app_id=app_id, app_secret=app_secret))

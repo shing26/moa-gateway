@@ -5,6 +5,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+from app.config import settings
 from app.guard.policies import policy_engine
 from app.guard.rbac import (
     GuardianAction,
@@ -99,7 +100,7 @@ class GuardService:
         hitl_enabled: bool = True,
     ) -> tuple[GuardVerdict, tuple[str, ...]]:
         if role is None:
-            role = resolve_role({"role": os.environ.get("MOA_DEFAULT_ROLE", "operator")})
+            role = resolve_role({"role": settings.default_role})
         hits = policy_engine.check(text)
         policy_ids = tuple(hit.policy_id for hit in hits)
         if any(hit.severity == "deny" for hit in hits):

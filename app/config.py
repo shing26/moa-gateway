@@ -190,6 +190,27 @@ class Settings:
         # 裸 int()：端口写错属于启动失败级错误，语义与旧 __main__ 入口一致。
         self.gateway_port: int = int(os.getenv("GATEWAY_PORT") or os.getenv("APP_PORT") or "8081")
 
+        # ── 2026-09-24 收编：此前这些概念散落多处各自读 env（有的 config 根本不认），
+        # 是 ADR-012 那类"同一概念多个读取点"的未关完实例。现在唯一的读取点在这里，
+        # tests/unit/test_config_consistency.py 的守卫自动开始覆盖它们。
+        # RBAC 的兜底角色：payload 未带 role 时的默认（guard / pipeline / graph 三处共用）。
+        # 空串=未配置（与其他配置同一约定）：conftest 用置空来中和开发机的 .env。
+        self.default_role: str = (os.getenv("MOA_DEFAULT_ROLE", "operator") or "operator").strip()
+        # 飞书应用凭据（HITL 卡片 / 事件适配器 / 通知器 / 面板展示共用）。
+        self.feishu_app_id: str = os.getenv("FEISHU_APP_ID", "")
+        self.feishu_app_secret: str = os.getenv("FEISHU_APP_SECRET", "")
+        # OTel 导出端点（tracing 初始化 + 面板展示）。
+        self.otel_exporter_otlp_endpoint: str = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+        # GitHub 令牌（PR 审查链路的唯一凭据来源）。
+        self.github_token: str = os.getenv("GITHUB_TOKEN", "")
+        # 审计日志目录与保留期。此前 .env.template 文档写了 LOG_DIR / LOG_RETENTION_DAYS，
+        # 但**没有任何代码读它们**（wal 硬编码 "logs"/90，audit_stats 也硬编码 "logs"）——
+        # 两个死旋钮，这里复活它们。
+        self.log_dir: str = os.getenv("LOG_DIR", "logs")
+        self.log_retention_days: int = _parse_int(
+            os.getenv("LOG_RETENTION_DAYS"), 90, name="LOG_RETENTION_DAYS"
+        )
+
         # ── 预算拦截（M6）─────────────────────────────────────────────────
         # 0 = 只核算不拦截（默认，行为与未引入预算层完全一致）；
         # >0 = per-session 累计成本达到限额后拒后续请求。
@@ -258,6 +279,8 @@ class Settings:
         ):
             if value < 0:
                 raise ValueError(f"{name} 不能为负（0 表示禁用该预算），得到 {value}")
+        if self.log_retention_days <= 0:
+            raise ValueError(f"LOG_RETENTION_DAYS 必须为正整数，得到 {self.log_retention_days}")
 
     def to_redis_config(self) -> dict[str, Any]:
         return {

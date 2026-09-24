@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+from app.config import settings
 from app.guard.guard_service import guard_service
 from app.guard.rbac import GuardianAction, Role
 
@@ -39,18 +40,21 @@ class TestEvaluateOutput:
             "policy.security.secret_leak",
         }
 
-    def test_default_role_resolved_from_env(self, monkeypatch):
-        monkeypatch.setenv("MOA_DEFAULT_ROLE", "admin")
+    def test_default_role_resolved_from_settings(self, monkeypatch):
+        # 2026-09-24 收编：MOA_DEFAULT_ROLE 的唯一读取点是 app/config.py，
+        # 测试改 patch settings（env 直读已删除，setenv 不再有效果）。
+        monkeypatch.setattr(settings, "default_role", "admin")
         verdict, _ = guard_service.evaluate_output("今天天气不错")
         assert verdict.role == Role.ADMIN
 
-    def test_default_role_falls_back_to_operator(self, monkeypatch):
-        monkeypatch.delenv("MOA_DEFAULT_ROLE", raising=False)
+    def test_default_role_falls_back_to_operator(self):
+        # conftest 把 MOA_DEFAULT_ROLE 置空 → settings.default_role 是默认值，
+        # 不依赖开发者 .env（非 hermetic 防线与其它凭据同一套）。
         verdict, _ = guard_service.evaluate_output("今天天气不错")
         assert verdict.role == Role.OPERATOR
 
-    def test_explicit_role_overrides_env(self, monkeypatch):
-        monkeypatch.setenv("MOA_DEFAULT_ROLE", "viewer")
+    def test_explicit_role_overrides_settings(self, monkeypatch):
+        monkeypatch.setattr(settings, "default_role", "viewer")
         verdict, _ = guard_service.evaluate_output("今天天气不错", role=Role.ADMIN)
         assert verdict.role == Role.ADMIN
 
