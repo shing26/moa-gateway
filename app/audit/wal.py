@@ -91,29 +91,12 @@ class AsyncWal:
 
     def _write_disk(self, entry: AuditEntry, path: str) -> None:
         try:
-            line = json.dumps({
-                "trace_id": entry.trace_id,
-                "session_id": entry.session_id,
-                "agent_name": entry.agent_name,
-                "intent": entry.intent,
-                "timestamp": entry.timestamp.isoformat(),
-                "agent_output_len": len(entry.agent_output),
-                "eval_score": entry.eval_score,
-                "eval_issues": list(entry.eval_issues),
-                "guard_action": entry.guard_action,
-                "guard_reason": entry.guard_reason,
-                # 命中策略清单：人工审批回流评测需要知道"哪条策略触发了这次拦截"
-                "policy_hits": list(entry.policy_hits or ()),
-                "hitl_decision": entry.hitl_decision,
-                "input_preview": entry.extra.get("input_preview", ""),
-                "output_preview": entry.extra.get("output_preview", ""),
-                "status": entry.extra.get("status"),
-                "duration_ms": entry.extra.get("duration_ms"),
-                "llm_model": entry.extra.get("llm_model", ""),
-                "cost_usd": entry.extra.get("cost_usd", 0.0),
-                "llm_latency_ms": entry.extra.get("llm_latency_ms", 0.0),
-                "fallback_used": entry.extra.get("fallback_used", ""),
-            }, ensure_ascii=False)
+            # 字段集合由 AuditEntry.to_audit_dict() 单一提供（此前这里手写白名单，
+            # 导致新字段落盘时被静默丢弃）。WAL 与 ES 的唯一表示差异是：
+            # 日志行不落 agent_output 全文（只留 agent_output_len）以控制体积。
+            record = entry.to_audit_dict()
+            record.pop("agent_output", None)
+            line = json.dumps(record, ensure_ascii=False)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
         except OSError as exc:

@@ -79,25 +79,13 @@ class EsWriter:
         lines: list[str] = []
         for entry in entries:
             action = json.dumps({"index": {"_index": self.config.index_prefix}}, ensure_ascii=False)
-            doc = json.dumps({
-                "@timestamp": entry.timestamp.isoformat(),
-                "trace_id": entry.trace_id,
-                "session_id": entry.session_id,
-                "agent_name": entry.agent_name,
-                "intent": entry.intent,
-                "agent_output": entry.agent_output,
-                "eval_score": entry.eval_score,
-                "eval_issues": list(entry.eval_issues),
-                "guard_action": entry.guard_action,
-                "guard_reason": entry.guard_reason,
-                # N4：与 WAL 落盘字段对齐，成本核算在 ES 侧不再静默丢失
-                "llm_model": entry.extra.get("llm_model", ""),
-                "cost_usd": entry.extra.get("cost_usd", 0.0),
-                "llm_latency_ms": entry.extra.get("llm_latency_ms", 0.0),
-                "fallback_used": entry.extra.get("fallback_used", ""),
-            }, ensure_ascii=False)
+            # 字段集合与 WAL 同源（AuditEntry.to_audit_dict()）。此前 ES 侧另有一份
+            # 手写清单，比 WAL 还少 policy_hits/hitl_decision/status/duration_ms/previews，
+            # 两个 sink 的审计数据因此不一致。ES 保留 agent_output 全文以便检索。
+            doc = entry.to_audit_dict()
+            doc["@timestamp"] = doc["timestamp"]  # ES 约定字段名
             lines.append(action)
-            lines.append(doc)
+            lines.append(json.dumps(doc, ensure_ascii=False))
         return ("\n".join(lines) + "\n").encode("utf-8")
 
     async def _get_client(self) -> httpx.AsyncClient:

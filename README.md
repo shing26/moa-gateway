@@ -350,4 +350,12 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   `evals/reports/` 被 `.gitignore` 忽略 → 连历史快照都不入库。所以"指标有没有退化"
   目前只能靠人肉比对，**评测结论也不回流到任何决策点**（没有机制消费它去改 prompt/策略/路由）。
   这是"改进闭环"缺失的核心证据，不是遗漏。
+- **审计字段的单一来源**（2026-09-24）：字段集合由 `AuditEntry.to_audit_dict()` 唯一提供，
+  WAL 与 ES 两个 sink 都从它取。此前两处**各自手写白名单**，于是新加的字段在落盘时被静默
+  丢弃——`route_fallback` / `tool_calls` / `tool_errors` / `context_budget` / `retry_count` /
+  `retry_reason` / `hitl_kind` / `hitl_operator` 全部只进了内存对象，而本文档已声称它们可查
+  （`app/services/audit_stats.py` 甚至一直在读从未落盘的 `violation` / `hitl_duration_ms`）。
+  `tests/unit/test_audit_field_coverage.py` 现在守住"每个字段都落盘"，并自测该守卫会红。
+  两个 sink 的**唯一**表示差异：WAL 日志行不落 `agent_output` 全文（只留 `agent_output_len`）
+  以控制体积，ES 保留全文以便检索。
 - 所有密钥通过环境变量注入，`.env`、`logs/`、`data/`、`evals/reports/` 不入库。

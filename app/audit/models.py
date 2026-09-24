@@ -25,3 +25,36 @@ class AuditEntry:
     violation: str = ""
     hitl_decision: str = ""
     hitl_duration_ms: float = 0.0
+
+    def to_audit_dict(self) -> dict[str, Any]:
+        """审计条目的**唯一**序列化出口，WAL 与 ES 都从这里取字段。
+
+        此前两个 sink 各自手写一份字段清单，于是新加的字段（``route_fallback`` /
+        ``tool_calls`` / ``context_budget`` / ``retry_count`` / ``hitl_kind`` …）
+        只进了内存对象，落盘时被静默丢弃——而 README 已声称它们可查。字段集合
+        从此只在这里维护；``tests/unit/test_audit_field_coverage.py`` 会强制每个
+        ``AuditEntry`` 字段与每个 ``extra`` 键都出现在输出里。
+
+        输出是**扁平**的（``extra`` 的键平铺到顶层）：这是审计 JSONL 的既定约定，
+        ``app/services/audit_stats.py`` 与 ``scripts/collect_hitl_feedback.py``
+        都按顶层键读取。
+        """
+        typed: dict[str, Any] = {
+            "trace_id": self.trace_id,
+            "session_id": self.session_id,
+            "agent_name": self.agent_name,
+            "intent": self.intent,
+            "timestamp": self.timestamp.isoformat(),
+            "agent_output": self.agent_output,
+            "agent_output_len": len(self.agent_output),
+            "eval_score": self.eval_score,
+            "eval_issues": list(self.eval_issues),
+            "guard_action": self.guard_action,
+            "guard_reason": self.guard_reason,
+            "policy_hits": list(self.policy_hits or ()),
+            "violation": self.violation,
+            "hitl_decision": self.hitl_decision,
+            "hitl_duration_ms": self.hitl_duration_ms,
+        }
+        # extra 先铺开、类型化字段后覆盖：同名时以 dataclass 上的值为准（确定性）。
+        return {**self.extra, **typed}
