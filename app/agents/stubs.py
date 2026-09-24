@@ -7,10 +7,9 @@ from typing import Any
 from app.agents.contract import AgentEnvelope, SubAgent, register_agent
 from app.agents.provider import LLMClient, LLMConfig
 from app.agents.tools import tool_registry
+from app.config import settings
 
 logger = logging.getLogger("moa.agents")
-
-MAX_TOOL_ROUNDS = 3
 
 
 def _default_llm() -> LLMClient:
@@ -53,7 +52,7 @@ async def _execute_with_tools(
         return await llm.chat(messages)
     schemas = tool_registry.list_schemas()
     result = await chat_with_tools(messages, schemas)
-    for _ in range(MAX_TOOL_ROUNDS):
+    for _ in range(settings.agent_max_steps):
         if not result.tool_calls:
             break
         for call in result.tool_calls:

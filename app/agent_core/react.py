@@ -36,11 +36,17 @@ class ReActLoop:
         self,
         llm: TaskLLM,
         tools: ToolRegistry,
-        max_steps: int = 8,
+        max_steps: int | None = None,
         session_id: str = "",
     ) -> None:
         self._llm = llm
         self._tools = tools
+        # 默认跟随 settings.agent_max_steps（工具轮次/步数的唯一上限）。
+        # 此前这里写死 8，而 app/agents/stubs.py 是 3 —— 同一概念两个值。
+        if max_steps is None:
+            from app.config import settings
+
+            max_steps = settings.agent_max_steps
         self._max_steps = max_steps
         self._session_id = session_id
 

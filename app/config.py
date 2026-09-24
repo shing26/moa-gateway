@@ -94,6 +94,19 @@ class Settings:
         self.redis_enable_fallback: bool = _parse_bool(os.getenv("REDIS_ENABLE_FALLBACK"), True)
         self.router_llm_timeout_ms: int = int(os.getenv("ROUTER_LLM_TIMEOUT_MS", "2000"))
         self.micro_llm_timeout_ms: int = int(os.getenv("MICRO_LLM_TIMEOUT_MS", "1000"))
+
+        # ── 任务 Agent（拆解 / ReAct）──────────────────────────────────────
+        # AGENT_LLM：任务 Agent 的拆解后端。mock（默认，正则切分，离线可跑）或
+        # litellm（真模型，复用 LLM_* 配置）。此前它由 app/agent_core/task_agent.py
+        # **直读 env**、且 .env.template 完全没记录，于是"有真拆解"这件事没人知道
+        # 怎么打开——收编进这里，并进 test_config_consistency 的单一来源守卫。
+        self.agent_llm: str = (os.getenv("AGENT_LLM", "mock") or "mock").strip().lower()
+        # AGENT_MAX_STEPS：工具轮次 / ReAct 步数的**唯一**上限。此前同一概念有两个
+        # 值——app/agents/stubs.py 的 MAX_TOOL_ROUNDS=3 与 ReActLoop(max_steps=8)——
+        # 而 README 的架构图写的是"工具循环 <=3 轮"。统一到这里，默认取更严的 3。
+        self.agent_max_steps: int = _parse_int(
+            os.getenv("AGENT_MAX_STEPS"), 3, name="AGENT_MAX_STEPS"
+        )
         self.hitl_enabled: bool = _parse_bool(os.getenv("HITL_ENABLED"), False)
         # 审批人白名单（逗号分隔的 open_id）。**非空即强制**：回调里点击者不在此列则拒绝，
         # 且**不消耗**挂起记录（不该让他人把待审批点没了）。留空 = 不校验（默认，保持既有行为），
@@ -224,9 +237,10 @@ class Settings:
         for name, value in (
             ("ROUTER_LLM_TIMEOUT_MS", self.router_llm_timeout_ms),
             ("MICRO_LLM_TIMEOUT_MS", self.micro_llm_timeout_ms),
+            ("AGENT_MAX_STEPS", self.agent_max_steps),
         ):
             if value <= 0:
-                raise ValueError(f"{name} 必须为正整数毫秒，得到 {value}")
+                raise ValueError(f"{name} 必须为正整数，得到 {value}")
         if self.vector_db_pool_min_size > self.vector_db_pool_max_size:
             raise ValueError(
                 "VECTOR_DB_POOL_MIN_SIZE 不能大于 VECTOR_DB_POOL_MAX_SIZE "

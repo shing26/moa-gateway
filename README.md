@@ -15,7 +15,7 @@ flowchart LR
   C --> D[IntentRouter 三级降级]
   D --> E[Agent 注册表 Coder/General/Review]
   E --> F[LiteLLM Provider + fallback]
-  E --> G[工具循环 <=3 轮]
+  E --> G[工具循环上限 AGENT_MAX_STEPS 默认 3 轮]
   F --> H[GuardService ALLOW/REVIEW/DENY]
   H --> I[HITL 飞书审批]
   H --> J[Audit WAL / ES]
@@ -306,12 +306,24 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   但"**所有**工具都失败、任务却照样返回结果"的答案不该当正常交付。判定是
   `tool_calls > 0 and tool_errors == tool_calls`（全部失败，不是"有失败"——部分失败仍属模型该
   自己收敛的情形），触发后走评估器那条已有的刹车进人工；审计里 `tool_calls`/`tool_errors` 可核。
+- **工具轮次 / ReAct 步数的上限由 `AGENT_MAX_STEPS` 单一提供**（默认 3，2026-09-24）：此前
+  这个概念有两个值——stub 工具循环写死 3，而 TaskAgent 的 ReAct 默认 8——架构图写的却是
+  "<=3 轮"。现在两处都读同一个设置，`AGENT_LLM`（拆解后端，默认 `mock`）也一并收编进
+  `app/config.py`，不再由 `task_agent.py` 直读 env；两者都进了配置单一来源守卫。
   ⚠️ v2 的 `event.operator` 字段路径**未对着真实卡片点击验证过**（只在单测里构造过）；
   取不到时留空、不影响审批。若真实回调被 401，看日志里的 `has_header_token`。
 - **以下几项本地无法验收**（不是没做，是缺外部条件）：① 成本量化——`avg_cost_usd` 恒 0，
   Ollama 不计费，需要付费 provider；② `hitl_feedback` 的 join 率与指标——需要**真实流量**
   （当前 4 条全是模拟种子，`介入率 0.0065` 无统计意义）；③ 微模型那一级——需要第二个模型端点；
   ④ 路由冷启动不降级——需要模型常驻（`.env` 的 `ROUTER_LLM_TIMEOUT_MS` 上调到 8000 或先预热）。
+- **活体评测路径有一条上游警告**（2026-09-24 定位，未修）：真跑 `evals/run_evals.py`（非
+  `--offline`）时 stdout 抛 `RuntimeWarning: coroutine 'OpenAIChatCompletion.acompletion'
+  was never awaited`，而测试套件 0 warning——正是"绿信号掩盖真问题"。**与我们的代码无关**：
+  3 行复现（只有 `litellm.acompletion` + `asyncio.wait_for`）即可触发，成因是 litellm 1.96.2
+  被**外部取消**时留下未 await 的内部协程，触发点是 `app/router/intent_router.py:93` 的路由
+  超时。**已验证的替代方案**：改用 litellm 自身的 `timeout`（传超时进去，而不是从外部取消），
+  实测干净抛 `litellm.Timeout` 且无该警告；本轮**不做**——那要给共享的 `LLMClient` 加超时参数
+  并改变路由超时语义，而路由超时正是 ADR-011 记录过"意图摆动"真因的敏感区，需独立一轮验证。
 - `app/vectordb` 在未配置 `VECTOR_DB_DSN` 时回退到中文 bigram 关键词检索；配置
   pgvector + embedding 后切换到混合向量检索，并可通过 `/healthz` 观察后端状态。
 - Redis 不可用时回退内存存储，内存回退也支持幂等锁脚本（acquire/release/extend + TTL），但只保证单进程内语义。

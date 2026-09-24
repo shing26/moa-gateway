@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import logging
-import os
 
 from app.agent_core.mock_llm import MockTaskLLM
 from app.agent_core.react import ReActLoop, TaskLLM
 from app.agent_core.types import TaskResult
 from app.agents.contract import AgentEnvelope, register_agent
 from app.agents.tools import tool_registry
+from app.config import settings
 
 # 注册扩展工具（calculator / list_documents / add_note / get_notes）：
 # 该模块在 import 时即执行注册，必须显式导入，否则生产环境拿不到这些工具。
@@ -15,11 +15,11 @@ import app.agent_core.tools_extra  # noqa: F401
 
 logger = logging.getLogger("moa.agent_core.task_agent")
 
-_MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "8"))
-
 
 def _build_task_llm() -> TaskLLM:
-    mode = os.environ.get("AGENT_LLM", "mock").lower()
+    # 后端与步数上限都从 app/config.py 取（此前直读 os.environ，绕过配置层，
+    # 且与 app/agents/stubs.py 的 MAX_TOOL_ROUNDS 是两个值）。
+    mode = settings.agent_llm
     if mode == "litellm":
         try:
             from app.agent_core.litellm_llm import LiteLLMTaskLLM
@@ -41,10 +41,12 @@ class TaskAgent:
     """
 
     def __init__(
-        self, llm: TaskLLM | None = None, max_steps: int = _MAX_STEPS
+        self, llm: TaskLLM | None = None, max_steps: int | None = None
     ) -> None:
         self._llm = llm or _build_task_llm()
-        self._max_steps = max_steps
+        # 不在这里给字面默认值：唯一来源是 settings.agent_max_steps，
+        # 免得又出现"同一概念两个值"（此前这里是 8，stubs 是 3）。
+        self._max_steps = settings.agent_max_steps if max_steps is None else max_steps
 
     @staticmethod
     def _metrics_payload(spent: dict[str, float], model_used: str) -> dict[str, object]:

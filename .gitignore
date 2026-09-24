@@ -11,6 +11,8 @@ build
 !.gitignore
 !.env.template
 !.dockerignore
+# 领域术语表：`/*` 会忽略所有根文件，必须逐个放行（与 .env.template 同理）
+!CONTEXT.md
 cloudflared.exe
 
 # 工具/会话产物。必须放在 !/*/ 之后：那条负向规则会 un-ignore 所有顶层目录，

@@ -45,6 +45,11 @@ SINGLE_SOURCE_CONCEPTS = {
     "检索库 DSN": (
         "VECTOR_DB_DSN", "CODE_REVIEW_DATABASE_URL", "DATABASE_URL", "POSTGRES_URL",
     ),
+    # 2026-09-24：任务 Agent 的后端与步数上限。此前两者都由
+    # app/agent_core/task_agent.py 直读 os.environ，绕过配置层；而"工具轮次上限"
+    # 这个概念当时有两个值（stubs 的 3 与 ReActLoop 的 8）。收编进 app/config.py 后，
+    # 这个守卫自动开始覆盖它们——再有人从别处读 env 就会红。
+    "任务 Agent 后端与步数": ("AGENT_LLM", "AGENT_MAX_STEPS"),
 }
 
 _ENV_READ = re.compile(r"""(?:os\.getenv|os\.environ\.get)\(\s*["']([A-Z0-9_]+)["']""")
