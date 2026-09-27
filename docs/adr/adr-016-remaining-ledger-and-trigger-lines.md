@@ -62,7 +62,7 @@
    | 微模型那一级路由 | 有第二个模型端点 |
    | 路由冷启动不降级 | 模型常驻，或演示前预热（操作说明已在 README） |
    | 多实例化（会话状态/预算累计器/限流器外部化） | 真要跑多实例（`redis_state/store.py` 是活的，按当时需求设计） |
-   | 评测 judge 错误处理：provider 中途死亡时 `evals/judge.py:23` 的裸 `chat` 让异常穿透评测 CLI、报告不写 | **能落码、小时级，待立项**（第十二轮验收时实测发现，2026-09-27；agent 链路本身优雅降级，只有 judge 是裸调） |
+   | ~~评测 judge 错误处理~~ **已完成（2026-09-27）**：provider 中途死亡时 judge 失败被逐条剔除计数（`judge_failures` 字段 + summary ⚠️ 标记），评测照常完成、报告照写；**绝不静默计 0**——0 分是"模型输出差"，judge 挂了是"量具没读数"，剔除让两者分得开 | ✓ 已销项（第十二轮验收时实测发现并立项，同日完成；用例 `test_judge_failure_is_counted_not_fatal_and_never_scored_zero` 钉住语义） |
 
 ## 后果
 

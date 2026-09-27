@@ -112,6 +112,59 @@ async def test_e2e_eval_aggregates_cost_and_judge_score() -> None:
 
 
 @pytest.mark.asyncio
+async def test_judge_failure_is_counted_not_fatal_and_never_scored_zero() -> None:
+    """provider 中途死亡时 judge 挂掉：评测必须照常完成、报告照写。
+
+    回归（2026-09-27 实测）：Ollama 进程死亡时 ``judge.score`` 的裸 ``chat`` 让
+    InternalServerError 一路穿透评测 CLI——整个评测崩溃、报告都不写（agent 链路
+    自己是优雅降级的，只有 judge 是裸调）。
+
+    语义钉死两件事：① judge 失败**不计 0 分**（0 分是"模型输出差"，judge 挂了是
+    "量具没读数"，静默计 0 会污染指标）；② 均分只在"读到了数"的用例上计算，
+    ``judge_failures`` 让剔除可见（summary 里也会带 ⚠️ 标记）。
+    """
+    cases = [
+        {"id": "ok-1", "input": "hi", "expected": {"status": "ok"}, "judge_criteria": "x"},
+        {"id": "dead", "input": "yo", "expected": {"status": "ok"}, "judge_criteria": "x"},
+        {"id": "ok-2", "input": "hey", "expected": {"status": "ok"}, "judge_criteria": "x"},
+    ]
+
+    class FakePipeline:
+        async def run(self, event, *, channel, target):
+            return PipelineResult(
+                trace_id=event.trace_id, state="ROUTED", intent="assistant",
+                text="fake output", status="ok", cost_usd=0.0,
+            )
+
+    async def flaky_judge(input_text, output_text, criteria) -> float:
+        if input_text == "yo":
+            raise RuntimeError("litellm.InternalServerError: Connection error.")
+        return 0.6
+
+    report = await run_e2e_eval(
+        cases, pipeline=FakePipeline(), judge=flaky_judge, use_store=False,
+    )
+
+    assert report["run"] == 3
+    assert report["judge_failures"] == 1
+    # 只算读到了数的 2 条：均值 0.6。若错误地计 0 分会变成 0.4，若崩溃则根本没有报告。
+    assert report["avg_judge_score"] == 0.6
+    # summary 里必须看得见剔除（否则均分 0.6 会被误读成 3 条全被评过）
+    from evals.run_evals import build_summary
+
+    full_report = {
+        "intent": {"accuracy": 1.0, "correct": 1, "total": 1},
+        "guard": {"deny_recall": 1.0, "deny_precision": 1.0},
+        "tool_selection": {"accuracy": 1.0, "correct": 1, "total": 1},
+        "hitl_feedback": {"available": False},
+        "agent_metrics": {"task_success_rate": 1.0},
+        "intent_consistency": {"skipped": 1},
+        "e2e": report,
+    }
+    assert "judge_failures=1" in build_summary(full_report)
+
+
+@pytest.mark.asyncio
 async def test_e2e_eval_store_lifecycle_is_explicit(monkeypatch) -> None:
     """真实存储的启停必须是显式开关，不能从 ``pipeline is None`` 推断。
 

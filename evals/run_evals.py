@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import subprocess
 import sys
 import time
@@ -18,6 +19,8 @@ from app.guard.guard_service import guard_service
 from app.models.events import MoAEvent
 from app.pipeline import PipelineResult
 from app.router.intent_router import IntentRouter
+
+logger = logging.getLogger("moa.evals.runner")
 
 
 def load_dataset(path: Path) -> list[dict[str, Any]]:
@@ -272,6 +275,7 @@ async def run_e2e_offline(
         "run": 0,
         "skipped": total,
         "avg_judge_score": 0.0,
+        "judge_failures": 0,
         "avg_latency_ms": 0.0,
         "avg_cost_usd": 0.0,
         "success_rate": 0.0,
@@ -314,6 +318,7 @@ async def run_e2e_eval(
     latencies: list[float] = []
     costs: list[float] = []
     status_matches = 0
+    judge_failures = 0
     intent_compared = 0
     intent_matches = 0
     intent_mismatches: list[dict[str, Any]] = []
@@ -361,13 +366,24 @@ async def run_e2e_eval(
                             "expected": exp_intent,
                             "actual": result.intent,
                         })
-                scores.append(
-                    await judge_fn(
+                try:
+                    judge_score = await judge_fn(
                         str(case.get("input", "")),
                         result.text,
                         str(case.get("judge_criteria", "")),
                     )
-                )
+                except Exception as exc:
+                    # judge 失败 ≠ 得 0 分：0 分是"模型输出差"，judge 挂了是"量具没读数"。
+                    # 剔除出均分并单独计数——既不能让 provider 一死整个评测崩溃、报告都不写
+                    # （2026-09-27 实测：Ollama 进程死亡时 judge 的裸 chat 让
+                    # InternalServerError 一路穿透 CLI，agent 链路自己倒是优雅降级了），
+                    # 也绝不静默计 0 污染指标。judge_failures 字段让"没读数"可见。
+                    judge_failures += 1
+                    logger.warning(
+                        "judge failed for case %s: %s", case.get("id", "?"), exc,
+                    )
+                else:
+                    scores.append(judge_score)
     finally:
         if use_store:
             await vector_client.close()
@@ -381,6 +397,7 @@ async def run_e2e_eval(
         "intent_match_rate": _ratio(intent_matches, intent_compared),
         "intent_mismatches": intent_mismatches,
         "avg_judge_score": round(sum(scores) / len(scores), 4) if scores else 0.0,
+        "judge_failures": judge_failures,
         "avg_latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else 0.0,
         "avg_cost_usd": round(sum(costs) / len(costs), 6) if costs else 0.0,
     }
@@ -449,6 +466,10 @@ def build_summary(report: dict[str, Any]) -> str:
             f" intent_match={e2e.get('intent_match_rate')} "
             f"({e2e.get('intent_matches')}/{e2e.get('intent_compared')})"
         )
+    # judge 挂了几条必须写在脸上：avg_judge_score 只算"读到了数"的用例，
+    # 不写这个标记的话，"均分 0.8"会让人误以为 30 条全被评过。
+    if e2e.get("judge_failures"):
+        e2e_part += f" ⚠️ judge_failures={e2e['judge_failures']}"
     return (
         f"intent accuracy={intent['accuracy']} ({intent['correct']}/{intent['total']}), "
         f"{consistency_part}, "
