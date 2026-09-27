@@ -24,7 +24,14 @@ class LLMIntentClassifier:
         self._max_tokens = max_tokens
         self._temperature = temperature
 
-    async def classify(self, text: str) -> str:
+    async def classify(self, text: str, *, timeout_s: float | None = None) -> str:
+        """把一段输入路由到意图标签。
+
+        ``timeout_s`` 传给 LLM 客户端自身（litellm 的 timeout），而**不是**由路由层
+        从外部取消——``asyncio.wait_for`` 的外部取消会让 litellm 留下未 await 的内部
+        协程（``RuntimeWarning``，2026-09-24 定位为上游缺陷且 1.102.1 仍未修），且取消
+        会让本地小模型一直热不起来。见 ADR-016/第十二轮。
+        """
         prompt = [
             {
                 "role": "system",
@@ -40,6 +47,7 @@ class LLMIntentClassifier:
                 prompt,
                 max_tokens=self._max_tokens,
                 temperature=self._temperature,
+                timeout=timeout_s,
             )
         ).strip().lower()
         for token in re.split(r"[\s,，。.!！]+", reply):

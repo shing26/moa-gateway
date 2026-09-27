@@ -13,9 +13,13 @@ class FakeClassifier:
         self.delay = delay
         self.calls = 0
 
-    async def classify(self, text: str) -> str:
+    async def classify(self, text: str, *, timeout_s: float | None = None) -> str:
         self.calls += 1
         if self.delay:
+            # 第十二轮起超时由 LLM 客户端执行、路由层不再 wait_for 外部取消——
+            # 桩按 litellm 的行为模拟：超过 timeout 就抛 TimeoutError。
+            if timeout_s is not None and self.delay > timeout_s:
+                raise TimeoutError("fake litellm timeout")
             await asyncio.sleep(self.delay)
         return self.intent
 

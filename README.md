@@ -269,9 +269,9 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 - 评估器判定进 HITL 会让**更多**请求走人工：`empty_output`、`output_too_long` 这类原本直接返回的
   输出现在需要批准。这是语义正确的代价；若演示体验优先，可把 `empty_output` 排除出 `review`。
 - 意图路由的兜底层需要模型是**热的**：`ROUTER_LLM_TIMEOUT_MS` 默认 2000ms，而本地小模型冷启动
-  首次调用实测约 4.2s；`asyncio.wait_for` 超时会取消请求，模型因此热不起来，后续每次都超时——
-  **所有非正则输入静默降级成默认意图 `assistant`**，而审计里只有 intent、看不出降级
-  （2026-09-22 实测：不预热时 55/55 全降级，预热后 55/55 走 `router_llm`）。现在审计新增
+  首次调用实测约 4.2s；超时到期连接断开、那次调用拿不到判定，就会**降级成默认意图 `assistant`**
+  （2026-09-27 起（ADR-017）超时由 LLM 客户端内执行，不再用 `asyncio.wait_for` 外部取消——
+  取消会泄漏 litellm 协程，见上条；但"冷启动首次调用仍会降级"这一点不变）。审计里
   `route_fallback` 字段记录路由层级（`none` = 降级到默认），`intent_consistency` 维度也会把
   `degraded` 计数与警示语打出来。本地模型建议把超时上调到 8000ms 左右，或演示前先预热一次。
 - 微模型那一级（`MICRO_LLM_MODEL`）默认**未配置**，所以本地实际是"正则 → 路由 LLM → 默认意图"
@@ -316,15 +316,12 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   Ollama 不计费，需要付费 provider；② `hitl_feedback` 的 join 率与指标——需要**真实流量**
   （当前 4 条全是模拟种子，`介入率 0.0065` 无统计意义）；③ 微模型那一级——需要第二个模型端点；
   ④ 路由冷启动不降级——需要模型常驻（`.env` 的 `ROUTER_LLM_TIMEOUT_MS` 上调到 8000 或先预热）。
-- **活体评测路径有一条上游警告**（2026-09-24 定位，未修）：真跑 `evals/run_evals.py`（非
-  `--offline`）时 stdout 抛 `RuntimeWarning: coroutine 'OpenAIChatCompletion.acompletion'
-  was never awaited`，而测试套件 0 warning——正是"绿信号掩盖真问题"。**与我们的代码无关**：
-  3 行复现（只有 `litellm.acompletion` + `asyncio.wait_for`）即可触发，成因是 litellm 1.96.2
-  被**外部取消**时留下未 await 的内部协程，触发点是 `app/router/intent_router.py:93` 的路由
-  超时。**已验证的替代方案**：改用 litellm 自身的 `timeout`（传超时进去，而不是从外部取消），
-  实测干净抛 `litellm.Timeout` 且无该警告；本轮**不做**——那要给共享的 `LLMClient` 加超时参数
-  并改变路由超时语义，而路由超时正是 ADR-011 记录过"意图摆动"真因的敏感区，需独立一轮验证
-  （方案与验收标准已写死在 ADR-016）。
+- **路由超时在 LLM 客户端内执行**（2026-09-27，ADR-017）：此前路由层用 `asyncio.wait_for`
+  从外部取消 litellm 调用——litellm（含最新 1.102.1）被外部取消时会留下未 await 的内部协程
+  （真跑 e2e 每次 100 条 `RuntimeWarning`），且取消让本地小模型热不起来。现在超时作为参数
+  传进 `LLMClient`（`litellm.Timeout` 走同一降级路径，**对外语义不变**），两处外部取消点已删。
+  验收：真跑 e2e 0 警告；一致性维度 degraded 100/100 → **0**（stable 0.95 / agreement 0.99，
+  从"全降级下的假稳定"变成真测量）；798 passed。
 - `app/vectordb` 在未配置 `VECTOR_DB_DSN` 时回退到中文 bigram 关键词检索；配置
   pgvector + embedding 后切换到混合向量检索，并可通过 `/healthz` 观察后端状态。
 - Redis 不可用时回退内存存储，内存回退也支持幂等锁脚本（acquire/release/extend + TTL），但只保证单进程内语义。

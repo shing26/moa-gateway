@@ -149,12 +149,14 @@ class LLMClient:
         model: str | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        timeout: float | None = None,
     ) -> str:
         response, _ = await self._acompletion(
             messages=messages,
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
+            timeout=timeout,
         )
         choice = _get_attr(response, "choices", [None])[0] if _get_attr(response, "choices", None) else None
         message = _get_attr(choice, "message", None)
@@ -168,6 +170,7 @@ class LLMClient:
         model: str | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        timeout: float | None = None,
     ) -> ChatResult:
         response, _ = await self._acompletion(
             messages=messages,
@@ -175,6 +178,7 @@ class LLMClient:
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
+            timeout=timeout,
         )
         choice = _get_attr(response, "choices", [None])[0] if _get_attr(response, "choices", None) else None
         message = _get_attr(choice, "message", None)
@@ -197,6 +201,7 @@ class LLMClient:
         model: str | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        timeout: float | None = None,
     ) -> tuple[Any, str]:
         primary = model or self.config.model
         candidates = [primary, *self.config.fallback_models]
@@ -210,6 +215,7 @@ class LLMClient:
                     tools,
                     max_tokens,
                     temperature,
+                    timeout,
                 )
                 litellm_module = _get_litellm()
                 response = await litellm_module.acompletion(**kwargs)
@@ -230,6 +236,7 @@ class LLMClient:
         tools: list[dict] | None,
         max_tokens: int | None,
         temperature: float | None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "model": model,
@@ -237,7 +244,10 @@ class LLMClient:
             "max_tokens": max_tokens or self.config.max_tokens,
             "temperature": temperature if temperature is not None else self.config.temperature,
             "stream": False,
-            "timeout": self.config.timeout,
+            # 调用方可覆盖单次超时（意图路由用它把超时"传进去"而不是从外部取消——
+            # 外部取消会让 litellm 留下未 await 的内部协程，见 ADR-016/第十二轮）。
+            # 注意语义：timeout 是**每次尝试**的上限，fallback 链最坏 (1+N)*timeout。
+            "timeout": timeout if timeout is not None else self.config.timeout,
         }
         custom_provider = self._custom_provider_for(model)
         if custom_provider:

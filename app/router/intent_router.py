@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import re
 from dataclasses import dataclass
 from typing import Protocol
@@ -9,7 +8,8 @@ from app.fsm.state_machine import Event, State
 
 
 class RouterLLM(Protocol):
-    async def classify(self, text: str) -> str: ...
+    # timeout_s 由实现方传给 LLM 客户端自身；路由层不做外部取消（见 llm_classifier 的说明）。
+    async def classify(self, text: str, *, timeout_s: float | None = None) -> str: ...
 
 
 class IntentRouter:
@@ -76,10 +76,10 @@ class IntentRouter:
         if self.micro_llm is None:
             return self.default_intent, "none"
         try:
-            intent = await asyncio.wait_for(
-                self.micro_llm.classify(text),
-                timeout=self.micro_timeout_ms / 1000,
-            )
+            # 超时在 LLM 客户端内部执行（litellm.Timeout 同样走下面的 except 降级），
+            # 不再用 asyncio.wait_for 外部取消——外部取消会让 litellm 留下未 await 的
+            # 内部协程（RuntimeWarning），且取消会让本地小模型热不起来（ADR-011/016）。
+            intent = await self.micro_llm.classify(text, timeout_s=self.micro_timeout_ms / 1000)
             if intent and intent != self.default_intent:
                 return intent, "micro_llm"
         except Exception:
@@ -90,10 +90,9 @@ class IntentRouter:
         if self.router_llm is None:
             return self.default_intent, "none"
         try:
-            intent = await asyncio.wait_for(
-                self.router_llm.classify(text),
-                timeout=self.router_timeout_ms / 1000,
-            )
+            intent = await self.router_llm.classify(text, timeout_s=self.router_timeout_ms / 1000)
             return intent or self.default_intent, "router_llm"
         except Exception:
+            # 含 litellm.Timeout：超时 = 没拿到判定 = 降级到默认意图（route_fallback "none"），
+            # 与此前 wait_for 超时的对外语义一致（ADR-011 的可见性字段不受影响）。
             return self.default_intent, "none"

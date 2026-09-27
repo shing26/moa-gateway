@@ -25,6 +25,15 @@ async def test_classify_returns_valid_intent() -> None:
 
 
 @pytest.mark.asyncio
+async def test_classify_passes_timeout_into_llm_call() -> None:
+    """超时必须"传进去"而不是路由层外部取消（litellm 被外部取消会泄漏协程，ADR-016）。"""
+    llm = FakeLLM(" coding")
+    classifier = LLMIntentClassifier(llm)
+    await classifier.classify("帮我写代码", timeout_s=2.5)
+    assert llm.calls[0][1]["timeout"] == 2.5
+
+
+@pytest.mark.asyncio
 async def test_classify_falls_back_to_assistant_on_noise() -> None:
     llm = FakeLLM("我不确定，可能是 general")
     classifier = LLMIntentClassifier(llm)

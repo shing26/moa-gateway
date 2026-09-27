@@ -28,6 +28,8 @@
      想跟进 Ubuntu 26 时改那一行即可。
 
 2. **litellm 未 await 协程：独立一轮（第十二轮），方案与验收先写死**。
+   （**已完成，实施记录与验收结果见 ADR-017**；升级优先方案经 1.102.1 实验证伪，
+   自修方案落地，四条验收全部满足。）
    现状：真跑 `evals/run_evals.py`（非 offline）时 stdout 抛
    `RuntimeWarning: coroutine 'OpenAIChatCompletion.acompletion' was never awaited`；
    已定位为 litellm 1.96.2 被**外部取消**时留下未 await 的内部协程（3 行复现、无本项目代码），
@@ -60,6 +62,7 @@
    | 微模型那一级路由 | 有第二个模型端点 |
    | 路由冷启动不降级 | 模型常驻，或演示前预热（操作说明已在 README） |
    | 多实例化（会话状态/预算累计器/限流器外部化） | 真要跑多实例（`redis_state/store.py` 是活的，按当时需求设计） |
+   | 评测 judge 错误处理：provider 中途死亡时 `evals/judge.py:23` 的裸 `chat` 让异常穿透评测 CLI、报告不写 | **能落码、小时级，待立项**（第十二轮验收时实测发现，2026-09-27；agent 链路本身优雅降级，只有 judge 是裸调） |
 
 ## 后果
 
