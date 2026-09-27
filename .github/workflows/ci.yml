@@ -8,12 +8,15 @@ on:
     branches: [main, master]
 
 jobs:
+  # 显式钉住 runner 版本（2026-09-24）：GitHub 公告 ubuntu-latest 自 2026-10-19 起
+  # 迁移到 Ubuntu 26——钉住等于沿用今天的 ubuntu-24.04，迁移日不会出现"没改任何东西
+  # 但 CI 环境变了"的意外；想跟进 Ubuntu 26 时改这一行即可。
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install uv
@@ -40,12 +43,12 @@ jobs:
   docker:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Log in to ghcr.io

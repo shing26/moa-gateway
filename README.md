@@ -323,7 +323,8 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   被**外部取消**时留下未 await 的内部协程，触发点是 `app/router/intent_router.py:93` 的路由
   超时。**已验证的替代方案**：改用 litellm 自身的 `timeout`（传超时进去，而不是从外部取消），
   实测干净抛 `litellm.Timeout` 且无该警告；本轮**不做**——那要给共享的 `LLMClient` 加超时参数
-  并改变路由超时语义，而路由超时正是 ADR-011 记录过"意图摆动"真因的敏感区，需独立一轮验证。
+  并改变路由超时语义，而路由超时正是 ADR-011 记录过"意图摆动"真因的敏感区，需独立一轮验证
+  （方案与验收标准已写死在 ADR-016）。
 - `app/vectordb` 在未配置 `VECTOR_DB_DSN` 时回退到中文 bigram 关键词检索；配置
   pgvector + embedding 后切换到混合向量检索，并可通过 `/healthz` 观察后端状态。
 - Redis 不可用时回退内存存储，内存回退也支持幂等锁脚本（acquire/release/extend + TTL），但只保证单进程内语义。
@@ -345,8 +346,9 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 - 上下文预算（`CONTEXT_HISTORY_BUDGET` / `CONTEXT_SUMMARY_BUDGET`，启发式估算 CJK 按字）**只裁剪随会话增长的两块
   ——历史与摘要**：系统提示与工具描述是固定开销、不计入，因此它不承诺"总上下文绝不溢出"。默认 1024 对该窗口以下
   的模型（如本机演示模型的 1024）仍应下调到 ~384。被裁掉的旧对话会压成一条省略摘要，不会整段失忆；
-  0 表示禁用（与引入前行为一致）。每次请求的裁剪决策（kept/dropped/elided/tokens）写入审计的
-  `context_budget` 字段，可按 trace 查询。
+  0 表示禁用（与引入前行为一致）。每次请求的裁剪决策写入审计的 `context_budget`
+  字段（实际键：`enabled` / `history_in` / `history_kept` / `history_dropped` /
+  `elided` / `summary_tokens` / `summary_truncated` / `budget`），可按 trace 查询。
 - 错误码语义（`app/models/errors.py`）在 webhook / chat / dashboard 三个路由统一为 `{"error": code, "message"}`；
   **飞书事件回调例外**——平台契约要求一律 HTTP 200，错误只体现在回复文案与日志中。
 - `app/main.py` 使用 FastAPI lifespan 管理启动/关闭钩子（`on_event` 已迁移）。
