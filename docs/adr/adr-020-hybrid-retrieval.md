@@ -76,6 +76,69 @@
 4. **维度不符启动即失败**，不再静默丢弃。
 5. HNSW 索引（`:50-51`）与 metadata GIN（`:41-42`）不动；零回归。
 
+## 实施记录（2026-09-28）
+
+落地：`app/vectordb/keywords.py`（`tokenize_for_index` / `tsquery_text`）、
+`app/vectordb/pgvector_client.py`（`rrf_scores` 取代 `fuse`、`_sparse_candidates`、两腿 `search`、
+`start()` 的维度校验与回填）、`db/gateway_schema.sql`（`tokens` 列 + GIN 索引）、
+`tests/unit/test_pgvector_client.py`、`tests/unit/test_knowledge_store.py`。
+
+### 对着真实 PostgreSQL 验过，不只断言 SQL 字符串
+
+本地 `moa-gateway-postgres-1`（pgvector/pg16）上端到端跑通：
+
+- 迁移建出 `tokens` 列与 `gateway_documents_tokens_idx`，索引表达式为
+  `gin (to_tsvector('simple'::regconfig, tokens))`；
+- 启动回填 **7/7 行**完成（`tokens IS NULL` 归零），中文被切成 bigram
+  （`数据库连接池…` → `数据 据库 库连 连接 接池 …`）；
+- `search('连接池')` → `emb-doc-1`、`search('pgvector')` → 对应分片、编造词 → 空；
+- 分数 `0.016393 = 1/(60+1)`，正是 RRF 名次分。
+
+**实施前先用真库探了两个决定设计成立与否的点**（值得记，否则下次还要重探）：
+`to_tsvector('simple', 'redis 连接 接超 超时')` 把每个 bigram 切成**独立词元**，
+`@@ to_tsquery('simple', 'redis | 连接')` 能命中——**中文 bigram 在 `simple` 配置下可用**；
+并且该表达式**确实能建索引**（两参形式是 IMMUTABLE，单参不行）。
+
+### 决策里没写、但影响正确性的选择
+
+- **已存在的表必须显式 `ALTER TABLE … ADD COLUMN IF NOT EXISTS tokens`。**
+  `CREATE TABLE IF NOT EXISTS` 对**已建好的表不会补列**——漏了这一句，老库升级后 `tokens`
+  永远是 NULL、稀疏腿永远空，而且是**静默**空。这是决策 1 漏掉的一步。
+- **tsquery 用 `|`（或）而非 AND**：bigram 做 AND 太严，中文长查询几乎不可能让全部 bigram
+  出现，召回会塌。排名交给 `ts_rank`。
+- **维度 fail-fast 放在"启动不炸"的 `except` 之外**，故意让它逃出去——放进去会被兜底吞成
+  "降级"，fail-fast 就失效了。
+- **回填分批（5000/次）+ best-effort**：失败只让稀疏腿不完整，不该拖垮启动；余量写进日志。
+- **第三条腿保留**：稠密候选不足 `top_k` 时补一次有界词法扫描，覆盖"无向量**且**未回填 tokens"
+  的行。区别是它现在**作为第三条腿参与 RRF**，不再自己算一套加权分（那正是量纲要小心处理之处）。
+- `VECTOR_WEIGHT` / `KEYWORD_WEIGHT` / `fuse` **删除**，`__all__` 换成 `rrf_scores`。
+
+### 决策 6（宣称对齐）的结论
+
+README 的"混合向量检索"此前是过度声明，而本次实现**让它变成真的**，所以 README **不需要改**；
+要改的是模块 docstring（已重写为"两条腿 + RRF"），并把原先"八处 B608 抑制标记"的硬编码计数
+改成不带数字的表述——本轮新增 3 处站点，硬编码数字是维护陷阱。
+
+### 验收实测
+
+- 单测：本 ADR 落地时 **844 passed**（新增 RRF 与两腿用例、改写旧的加权和断言）。
+  `test_knowledge_store.py` 的 `[postgres]` 参数是**复刻 SQL 语义的内存假后端**（不是真连库），
+  加列后必须同步改它——本次有 14 条用例在此红过。
+- 真库：迁移 / 回填 / 检索 / 分数四项见上。
+- 维度 fail-fast：单测覆盖；真库上配置 768 与建表 768 一致，正常启动。
+
+### 残留（如实记）
+
+- **决策 4 只堵住了"配置 vs 建表"的维度不一致；provider 返回错维向量是另一扇门。**
+  `_embed_batch` 对每条不符的向量仍只打 **warning** 然后丢弃 → 稠密腿永远空 → 检索静默退化
+  成纯稀疏。启动校验抓不到它（配置与表都是 768，错的是模型），表现与"没配 embedding"几乎
+  一样，只有日志里一条 warning。**这是一处仍未堵的静默降级**，最省的修法是把该 warning
+  升为 error 并计数，或首次不符即 fail-fast。
+- **验收 3（gold set 上的 Hit@k / MRR 前后对比）未做**：`evals/datasets/retrieval_gold.jsonl`
+  还不存在，标注者也不该与分块器作者同一人。所以"RRF 更准"这句**目前没有数字支撑**，
+  只有"稀疏腿确实独立召回"这一条结构性证据（真库上的词命中 + 单测里的两腿融合与排序）。
+  按 ADR-015 的口径：**不许宣称更准。**
+
 ## 后果
 
 - 新增一列 + 一个 GIN 索引 + 写入侧分词。复用 `query_tokens` 是刻意的：**避免第二套分词
