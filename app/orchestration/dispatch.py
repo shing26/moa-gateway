@@ -128,6 +128,7 @@ class EngineDispatcher:
             eval_issues=result.eval_issues,
             tool_calls=result.tool_calls,
             tool_errors=result.tool_errors,
+            tool_arg_rejections=result.tool_arg_rejections,
             route_fallback=result.fallback,
         )
 

@@ -269,6 +269,10 @@ async def test_all_tool_calls_failed_brakes_into_hitl(monkeypatch):
 
     ReAct 把工具异常降级成 observation 让模型自愈是有意设计（ADR-010），但"全失败"
     的答案长得像成功。此前只做到审计里可见，现在接上已有的评估器刹车 → 人工。
+
+    注意这里的 2/2 是**两次尝试、两次失败**——`tool_calls` 是尝试数（2026-09-28 修正）。
+    在此之前它记的是成功数，于是这个数据组合实际表示"2 成功 + 2 失败"，而真·全失败
+    （tool_calls=0）反而不触发刹车：判据与文档相反。
     """
     class AllToolsFailedAgent:
         async def execute(self, envelope):
@@ -289,6 +293,30 @@ async def test_all_tool_calls_failed_brakes_into_hitl(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_all_tool_calls_rejected_brakes_into_hitl(monkeypatch):
+    """参数**全部被拒**同样算"一次都没成功"，要刹车（ADR-018）。
+
+    模型连着填错参数时 handler 从未被调用过，所以 tool_errors 是 0——只看 tool_errors
+    会以为"没失败"，把靠瞎猜拼出来的答案当正常交付。
+    """
+    class AllRejectedAgent:
+        async def execute(self, envelope):
+            envelope.agent_local_slot["tool_calls_total"] = 3
+            envelope.agent_local_slot["tool_errors_total"] = 0
+            envelope.agent_local_slot["tool_arg_rejections_total"] = 3
+            return "参数我一直填不对，就随便答了"
+
+    patch_agents(monkeypatch, AllRejectedAgent())
+    engine = Engine()
+    p = make_pipeline(engine=engine)
+    result = await p.run(make_event(), channel="test", target="s1")
+
+    assert result.status == "pending_review"
+    assert result.hitl_kind == "eval_review"
+    assert result.tool_arg_rejections == 3
+
+
+@pytest.mark.asyncio
 async def test_partial_tool_failure_does_not_brake(monkeypatch):
     """**部分**失败仍属模型该自己收敛的情形——判定必须是"全部失败"而不是"有失败"。"""
     class PartialFailureAgent:
@@ -302,6 +330,58 @@ async def test_partial_tool_failure_does_not_brake(monkeypatch):
     result = await p.run(make_event(), channel="test", target="s1")
 
     assert result.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_no_tool_activity_does_not_brake(monkeypatch):
+    """没有工具活动就不该刹车——判据要求"有尝试"（`tool_calls > 0`）。"""
+    class NoToolAgent:
+        async def execute(self, envelope):
+            return "直接回答，没有调用任何工具"
+
+    patch_agents(monkeypatch, NoToolAgent())
+    p = make_pipeline()
+    result = await p.run(make_event(), channel="test", target="s1")
+
+    assert result.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_task_llm_degradation_brakes_into_hitl(monkeypatch):
+    """task-LLM 崩了却照常返回结果 → 不该当正常交付（ADR-018 决策 7）。
+
+    端到端：真的 `TaskAgent` + 真的 `ReActLoop`，只有 LLM 是假的。此前这条路径上
+    `litellm_llm.decide` 吞掉异常后返回 `action="finish"`，于是"决策失败: …"会以
+    `status=ok` 交付——ADR-011 修过图路径的同类问题，task-LLM 这条当时漏了。
+    """
+    from app.agent_core.task_agent import TaskAgent
+    from app.agent_core.types import ReActDecision
+
+    class DegradingTaskLLM:
+        async def plan(self, *, task, on_degrade=None):
+            if on_degrade is not None:
+                on_degrade("plan 调用失败: provider down")
+            return [task]
+
+        async def decide(self, *, task, subtask, observations):
+            return ReActDecision(
+                action="finish",
+                final_answer="决策失败: provider down",
+                degraded_reason="decide 调用失败: provider down",
+            )
+
+        async def summarize(self, *, task, plan, results, on_degrade=None):
+            return "答案是完成了的样子"
+
+    patch_agents(monkeypatch, TaskAgent(llm=DegradingTaskLLM(), max_steps=2))
+    engine = Engine()
+    p = make_pipeline(engine=engine)
+    result = await p.run(make_event(), channel="test", target="s1")
+
+    assert result.status == "pending_review"
+    assert result.hitl_kind == "eval_review"
+    stored = engine.session_store.get_hitl(result.trace_id)
+    assert stored is not None and stored.reason
 
 
 @pytest.mark.asyncio

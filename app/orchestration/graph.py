@@ -103,6 +103,7 @@ from app.pipeline import FAILURE_ESCALATION_TEXT
 from app.pipeline import _merge_guard  # 复用同一条守卫优先级规则，避免两套运行时漂移
 from app.pipeline import _verdict_from_eval_issues  # 评估器分级同样只有一份定义
 from app.pipeline import _tool_failure_issues  # 工具全失败 → 走同一条刹车
+from app.pipeline import _task_degradation_issues  # task-LLM 降级兜底 → 同一条刹车
 from app.prompt_registry.canary import CanaryConfig, select_canary_version
 
 logger = logging.getLogger("moa.orchestration.langgraph")
@@ -149,10 +150,14 @@ class GraphState(TypedDict, total=False):
     retry_count: int
     retry_reason: str
     hitl_kind: str
-    # 工具活动：tool_calls=3/tool_errors=3 表示"三个工具全失败却仍返回了结果"，
-    # 用来把"完成"与"优雅失败"分开（与 MoAPipeline 写进审计的同名字段对齐）。
+    # 工具活动：tool_calls 是**尝试数**，tool_calls=3/tool_errors=3 表示"三个工具
+    # 全失败却仍返回了结果"，用来把"完成"与"优雅失败"分开（与 MoAPipeline 写进
+    # 审计的同名字段对齐）。被拒与执行失败分开记（ADR-018）。
     tool_calls: int
     tool_errors: int
+    tool_arg_rejections: int
+    # task-LLM 的降级原因（ADR-018 决策 7）。空缺 = 这次没降级。
+    task_degradation_reasons: list[str]
     # Reducer demo: LangGraph appends instead of overwriting, which is how you
     # get an execution trace for free without bolting on a tracer.
     node_path: Annotated[list[str], operator.add]
@@ -523,6 +528,12 @@ class LangGraphOrchestrator:
             "retry_count": attempts - 1,
             "tool_calls": int(envelope.agent_local_slot.get("tool_calls_total", 0) or 0),
             "tool_errors": int(envelope.agent_local_slot.get("tool_errors_total", 0) or 0),
+            "tool_arg_rejections": int(
+                envelope.agent_local_slot.get("tool_arg_rejections_total", 0) or 0
+            ),
+            "task_degradation_reasons": list(
+                envelope.agent_local_slot.get("task_degradation_reasons") or []
+            ),
             "llm_model": str(metrics.get("model_used", "")),
             "cost_usd": float(metrics.get("cost_usd", 0.0)),
             "llm_latency_ms": float(metrics.get("llm_latency_ms", 0.0)),
@@ -572,6 +583,10 @@ class LangGraphOrchestrator:
                 + _tool_failure_issues(
                     int(state.get("tool_calls", 0) or 0),
                     int(state.get("tool_errors", 0) or 0),
+                    int(state.get("tool_arg_rejections", 0) or 0),
+                )
+                + _task_degradation_issues(
+                    tuple(state.get("task_degradation_reasons", ()) or ())
                 )
             )
             merged = _merge_guard(verdict, output_verdict, eval_verdict)
@@ -796,6 +811,7 @@ class LangGraphOrchestrator:
             eval_issues=tuple(state.get("eval_issues", ()) or ()),
             tool_calls=int(state.get("tool_calls", 0) or 0),
             tool_errors=int(state.get("tool_errors", 0) or 0),
+            tool_arg_rejections=int(state.get("tool_arg_rejections", 0) or 0),
         )
 
     async def run(

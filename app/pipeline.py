@@ -63,10 +63,13 @@ class PipelineResult:
     # ——这个区分是 2026-09-22 接 eval_score 到审计时定下的语义。
     eval_score: float | None = None
     eval_issues: tuple[str, ...] = ()
-    # 工具活动：tool_calls=3 / tool_errors=3 表示"三个工具全失败但任务仍返回了结果"。
-    # 没有这两个数，"任务完成"与"优雅失败"在审计里长得一样。
+    # 工具活动。tool_calls 是**尝试数**（口径见 TaskResult 的字段注释）；
+    # tool_calls=3 / tool_errors=3 表示"三个工具全失败但任务仍返回了结果"。
+    # 没有这三个数，"任务完成"与"优雅失败"在审计里长得一样。
     tool_calls: int = 0
     tool_errors: int = 0
+    # 参数被拒：与 tool_errors 分开记，用来区分"模型填错参数"与"环境挂了"（ADR-018）。
+    tool_arg_rejections: int = 0
 
 
 def _merge_guard(
@@ -104,17 +107,36 @@ _EVAL_DENY_PREFIXES = (
 )
 
 
-def _tool_failure_issues(tool_calls: int, tool_errors: int) -> tuple[str, ...]:
-    """工具调用**全部失败**时补一条 issue，让它走评估器那条已有的刹车。
+def _tool_failure_issues(
+    tool_calls: int, tool_errors: int, tool_arg_rejections: int = 0
+) -> tuple[str, ...]:
+    """工具调用**一次都没成功**时补一条 issue，让它走评估器那条已有的刹车。
 
     ReAct 把工具异常降级成 observation 让模型自愈是有意设计（见 ADR-010），但
     "所有工具都失败、任务却照样返回了结果"的答案**不该当正常交付**——它长得像成功。
     此前只做到"审计里可见"（`tool_calls`/`tool_errors`），现在接到已有的刹车：
-    issue → REVIEW → 人工。**判定是"全部失败"（`tool_calls > 0 and tool_errors == tool_calls`），
-    不是"有失败"**——部分失败仍属模型该自己收敛的情形。
+    issue → REVIEW → 人工。
+
+    **判定是"一次都没成功"，不是"有失败"**——部分成功仍属模型该自己收敛的情形。
+    `tool_calls` 是**尝试数**（见 `TaskResult` 的字段注释），所以"没成功"等于
+    `tool_errors + tool_arg_rejections == tool_calls`。
+    参数被拒也算没成功：那是模型连着填错参数，同样不该把结果当正常交付（ADR-018）。
     """
-    if tool_calls > 0 and tool_errors == tool_calls:
+    if tool_calls > 0 and tool_errors + tool_arg_rejections == tool_calls:
         return ("all_tool_calls_failed",)
+    return ()
+
+
+def _task_degradation_issues(degraded_reasons: tuple[str, ...] | None) -> tuple[str, ...]:
+    """task-LLM 降级兜底时补一条 issue → 转人工（ADR-018 决策 7）。
+
+    降级意味着这次答案是**兜底**而不是模型判断：`decide` 调用失败会让 ReAct 以
+    "决策失败: …" 收尾，`plan` / `summarize` 失败会退化成"单子任务" / "拼接文本"。
+    此前这些一律以 `status=ok` 交付——在用户看来，"基础设施崩了"和"模型答完了"
+    长得一模一样。这条路径和 ADR-011 修过的图路径降级是两件事，当时漏了这里。
+    """
+    if degraded_reasons:
+        return ("task_llm_degraded",)
     return ()
 
 
@@ -498,10 +520,18 @@ class MoAPipeline:
         cost_usd = float(llm_metrics.get("cost_usd", 0.0))
         llm_latency_ms = float(llm_metrics.get("llm_latency_ms", 0.0))
         fallback_used = str(llm_metrics.get("fallback_used", ""))
-        # 工具活动：只有真调工具且真的报告了的 agent（当前是 TaskAgent）会写这两个键。
-        # tool_calls=3/tool_errors=3 就是"三个工具全失败却仍返回了结果"。
+        # 工具活动：只有真调工具且真的报告了的 agent（当前是 TaskAgent）会写这三个键。
+        # tool_calls 是尝试数；tool_calls=3/tool_errors=3 就是"三个工具全失败却仍
+        # 返回了结果"。
         tool_calls = int(envelope.agent_local_slot.get("tool_calls_total", 0) or 0)
         tool_errors = int(envelope.agent_local_slot.get("tool_errors_total", 0) or 0)
+        tool_arg_rejections = int(
+            envelope.agent_local_slot.get("tool_arg_rejections_total", 0) or 0
+        )
+        # task-LLM 的降级原因（ADR-018 决策 7）。缺席 = 这次没降级。
+        task_degradations = tuple(
+            envelope.agent_local_slot.get("task_degradation_reasons") or ()
+        )
         # M6：调用后累计真实成本（超限影响的是该会话的"下一次"请求）
         if self.budget_guard is not None and cost_usd > 0:
             self.budget_guard.record(event.session_id, cost_usd)
@@ -533,7 +563,9 @@ class MoAPipeline:
                 output_verdict = GuardVerdict(action=GuardianAction.ALLOW, reason="ok")
                 policy_ids = ()
             eval_verdict = _verdict_from_eval_issues(
-                eval_result.issues + _tool_failure_issues(tool_calls, tool_errors)
+                eval_result.issues
+                + _tool_failure_issues(tool_calls, tool_errors, tool_arg_rejections)
+                + _task_degradation_issues(task_degradations)
             )
             merged = _merge_guard(verdict, output_verdict, eval_verdict)
             if eval_verdict is not None and merged is eval_verdict:
@@ -580,6 +612,7 @@ class MoAPipeline:
                     hitl_kind=hitl_kind,
                     tool_calls=tool_calls,
                     tool_errors=tool_errors,
+                    tool_arg_rejections=tool_arg_rejections,
                     route_fallback=fallback,
                 )
             return PipelineResult(
@@ -592,6 +625,7 @@ class MoAPipeline:
                 eval_score=eval_result.score, eval_issues=eval_result.issues,
                 hitl_kind=hitl_kind or "review",
                 tool_calls=tool_calls, tool_errors=tool_errors,
+                tool_arg_rejections=tool_arg_rejections,
             )
 
         if verdict.action == GuardianAction.DENY:
@@ -610,6 +644,7 @@ class MoAPipeline:
                     hitl_kind=hitl_kind,
                     tool_calls=tool_calls,
                     tool_errors=tool_errors,
+                    tool_arg_rejections=tool_arg_rejections,
                     route_fallback=fallback,
                 )
             return PipelineResult(
@@ -621,6 +656,7 @@ class MoAPipeline:
                 eval_score=eval_result.score, eval_issues=eval_result.issues,
                 hitl_kind=hitl_kind,
                 tool_calls=tool_calls, tool_errors=tool_errors,
+                tool_arg_rejections=tool_arg_rejections,
             )
 
         response = self.adapter.adapt(raw_output, channel=channel, target=target)
@@ -651,6 +687,7 @@ class MoAPipeline:
                 retry_count=retry_count,
                 tool_calls=tool_calls,
                 tool_errors=tool_errors,
+                tool_arg_rejections=tool_arg_rejections,
                 route_fallback=fallback,
             )
         return PipelineResult(
@@ -664,4 +701,5 @@ class MoAPipeline:
             retry_count=retry_count,
             eval_score=eval_result.score, eval_issues=eval_result.issues,
             tool_calls=tool_calls, tool_errors=tool_errors,
+            tool_arg_rejections=tool_arg_rejections,
         )

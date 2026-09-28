@@ -302,10 +302,19 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   AES 解密 + `X-Lark-Signature` 校验，而这两件无法对着真实加密回调验证；原先那个
   `FEISHU_ENCRYPT_KEY` 字段**已删除**（配了它原本也只是被静默 ignored，形同虚设），
   现在收到加密体一律明确报 `400 encrypted_events_unsupported`。
-- **工具全失败会刹车**（ADR-014）：ReAct 把工具异常降级成 observation 让模型自愈是有意设计，
-  但"**所有**工具都失败、任务却照样返回结果"的答案不该当正常交付。判定是
-  `tool_calls > 0 and tool_errors == tool_calls`（全部失败，不是"有失败"——部分失败仍属模型该
-  自己收敛的情形），触发后走评估器那条已有的刹车进人工；审计里 `tool_calls`/`tool_errors` 可核。
+- **工具全失败会刹车**（ADR-014，2026-09-28 修正判据）：ReAct 把工具异常降级成 observation
+  让模型自愈是有意设计，但"**所有**工具都失败、任务却照样返回结果"的答案不该当正常交付。
+  判定是 **`tool_calls > 0 and tool_errors + tool_arg_rejections == tool_calls`**（一次都没
+  成功，不是"有失败"——部分成功仍属模型该自己收敛的情形），触发后走评估器那条已有的刹车
+  进人工；审计里 `tool_calls`/`tool_errors`/`tool_arg_rejections` 可核。
+  ⚠️ `tool_calls` 是**尝试数**（见 `TaskResult` 字段注释）：此前它被实现成**成功数**，
+  于是判据 `tool_errors == tool_calls` 反而在真·全失败时不成立——这条声称了三轮的刹车
+  在 2026-09-28 之前**从未按文档触发**过。
+- **task-LLM 降级也会刹车**（ADR-018 决策 7，2026-09-28）：`decide` / `plan` / `summarize`
+  在 LLM 调用失败或输出不是合法 JSON 时会兜底，此前这些兜底以 `status=ok` 交付——
+  "基础设施崩了"和"模型答完了"在用户看来一样。现在降级原因一路传到 pipeline，
+  走同一条评估器刹车进人工。⚠️ 这是 ADR-011 修过的**图路径**降级之外的**另一条**路径，
+  当时漏了；两条路径现在都可见。
 - **工具轮次 / ReAct 步数的上限由 `AGENT_MAX_STEPS` 单一提供**（默认 3，2026-09-24）：此前
   这个概念有两个值——stub 工具循环写死 3，而 TaskAgent 的 ReAct 默认 8——架构图写的却是
   "<=3 轮"。现在两处都读同一个设置，`AGENT_LLM`（拆解后端，默认 `mock`）也一并收编进

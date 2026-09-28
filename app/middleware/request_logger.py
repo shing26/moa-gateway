@@ -62,6 +62,7 @@ async def log_request(
     hitl_kind: str = "",
     tool_calls: int = 0,
     tool_errors: int = 0,
+    tool_arg_rejections: int = 0,
     route_fallback: str = "",
     hitl_operator: str = "",
 ) -> None:
@@ -103,10 +104,12 @@ async def log_request(
         extra["hitl_kind"] = hitl_kind
     # 工具活动只在真的发生时写：tool_calls=3 / tool_errors=3 表示"三个工具全失败
     # 但任务仍返回了结果"，这正是"完成"与"优雅失败"的分界；无工具活动的请求
-    # 不写这两个字段，保持条目形状不变。
-    if tool_calls or tool_errors:
+    # 不写这三个字段，保持条目形状不变。tool_calls 是**尝试数**，被拒与执行失败
+    # 分开记——前者是模型填错参数、后者是环境问题（ADR-018）。
+    if tool_calls or tool_errors or tool_arg_rejections:
         extra["tool_calls"] = tool_calls
         extra["tool_errors"] = tool_errors
+        extra["tool_arg_rejections"] = tool_arg_rejections
     # 路由降级层级：`none` 表示微模型/路由 LLM 那一层没给出判定（未配置、超时或
     # 报错），intent 因此是默认值。此前审计只记 intent 不记层级，于是"路由一直在
     # 超时"这件事在数据里完全看不见（2026-09-22 实测：冷启动首次 4.2s > 2s 超时，

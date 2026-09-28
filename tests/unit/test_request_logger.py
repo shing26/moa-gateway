@@ -120,7 +120,8 @@ class TestLogRequestPolicyFields:
 class TestOptionalExtraFields:
     """只在真的发生时才写进 extra —— 既有审计条目的字段形状不能变。
 
-    retry_count / retry_reason / hitl_kind / tool_calls / tool_errors 都是这样：
+    retry_count / retry_reason / hitl_kind / tool_calls / tool_errors /
+    tool_arg_rejections 都是这样：
     缺席本身有含义（"没重试""没有工具活动"），无脑写 0 会把这个区分抹掉。
     """
 
@@ -138,7 +139,7 @@ class TestOptionalExtraFields:
         entry = await self._one_entry(monkeypatch, tmp_path)
         for key in (
             "retry_count", "retry_reason", "hitl_kind", "tool_calls", "tool_errors",
-            "route_fallback",
+            "tool_arg_rejections", "route_fallback",
         ):
             assert key not in entry.extra, f"{key} 不该在没发生时出现"
 
@@ -165,9 +166,24 @@ class TestOptionalExtraFields:
         assert entry.extra["retry_count"] == 1
         assert entry.extra["retry_reason"] == "RuntimeError: boom"
         assert entry.extra["hitl_kind"] == "failure_escalation"
-        # 3 次调用 3 次失败 = "所有工具都失败但任务仍返回了结果"
+        # 3 次尝试、3 次失败 = "所有工具都失败但任务仍返回了结果"
         assert entry.extra["tool_calls"] == 3
         assert entry.extra["tool_errors"] == 3
+        # 被拒是独立一维：有工具活动就写出来（这里为 0），与"没工具活动"区分开
+        assert entry.extra["tool_arg_rejections"] == 0
+
+    @pytest.mark.asyncio
+    async def test_arg_rejections_are_recorded(self, monkeypatch, tmp_path):
+        """参数被拒必须与执行失败分开落盘（ADR-018 决策 3）。
+
+        合成一个数就分不出"模型在瞎猜参数"与"后端挂了"——那是两种完全不同的处置。
+        """
+        entry = await self._one_entry(
+            monkeypatch, tmp_path, tool_calls=3, tool_errors=0, tool_arg_rejections=3
+        )
+        assert entry.extra["tool_calls"] == 3
+        assert entry.extra["tool_errors"] == 0
+        assert entry.extra["tool_arg_rejections"] == 3
 
     @pytest.mark.asyncio
     async def test_tool_errors_alone_are_recorded(self, monkeypatch, tmp_path):

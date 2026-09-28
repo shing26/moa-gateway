@@ -66,6 +66,7 @@ REQUEST_LOGGER_EXTRA_KEYS = {
     "hitl_kind",
     "tool_calls",
     "tool_errors",
+    "tool_arg_rejections",
     "route_fallback",
     "hitl_operator",
 }
@@ -149,6 +150,7 @@ async def test_wal_persists_every_field(monkeypatch, tmp_path):
         hitl_kind="review",
         tool_calls=3,
         tool_errors=3,
+        tool_arg_rejections=2,
         route_fallback="none",
         hitl_operator="ou_approver",
     )
@@ -170,6 +172,7 @@ async def test_wal_persists_every_field(monkeypatch, tmp_path):
     assert record["route_fallback"] == "none"
     assert record["context_budget"]["tokens"] == 512
     assert record["tool_calls"] == 3 and record["tool_errors"] == 3
+    assert record["tool_arg_rejections"] == 2
     assert record["hitl_operator"] == "ou_approver"
     assert record["violation"] == "no-price-commitment"
     assert record["hitl_duration_ms"] == 42.0
