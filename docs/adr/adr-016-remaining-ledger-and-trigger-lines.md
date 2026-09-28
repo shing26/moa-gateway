@@ -95,9 +95,18 @@
   `_OfflinePipeline` 连 pipeline 都不构造，CI 的 offline smoke **从未跑过业务链路**。
   **缺陷修，功能不立项**——修的是"CI 的 smoke 没冒烟到真链路"，不是"加上 delta 门禁"。
 - **`hitl_feedback` join 率**：触发线"有真实流量"——**未开**（`real_cases=0`，没有真实用户，
-  这是事实不是欠债）。同样区分缺陷与功能：`app/channels/feishu.py:80` 在 trace 为空时用
-  `session_id` 顶替，导致 `unmatched_decisions=89`，这是**错的实现**，该修；
-  join **率指标**不立项。
+  这是事实不是欠债）。join **率指标**不立项。
+
+  **〔2026-09-28 更正本条的自述〕** 本行原先写"`app/channels/feishu.py` 在 trace 为空时用
+  `session_id` 顶替，**导致** `unmatched_decisions=89`，这是错的实现，该修"。**复核后这个因果
+  不成立**：`scripts/collect_hitl_feedback.py` 自己的注释就写着那 89 条是"②a（审计 trace 贯通）
+  **之前**的历史决策无法关联"，是**数据窗口产物**；而卡片本来就嵌了 `trace_id`
+  （`app/channels/feishu_cards.py:76,82`），正常点击能 join。用当前日志实测亦为
+  `matched=0 / unmatched=89` 且**总数未增长**——自 2026-09-21 起就没有新的决策进来。
+  所以**不存在"trace 兜底缺陷"**，无需修；原先的转述是错的，记录在此免得以后照着改一个
+  不存在的东西。（顺带做了一次加固：回调不带 `trace_id` 时现在会打 warning，让"这次审批
+  进不了评测"是可见的，见 `routes/feishu.py` / `routes/webhook.py`。）
+
 - **多实例化（会话态外置）**：触发线"真要跑多实例"——**未开**。
 
 **三、本表口径不变**：新增五行均为"明确不做 + 触发线"，到线之前不是待办。

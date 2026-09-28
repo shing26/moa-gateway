@@ -25,6 +25,31 @@ def insecure_mode_enabled(raw: str | None) -> bool:
     return (raw or "").strip().lower() in _INSECURE_TRUTHY
 
 
+def approver_gate_error(
+    operator_id: str, allowlist: tuple[str, ...], *, raw_insecure: str | None
+) -> str | None:
+    """审批人闸门。返回拒绝原因（进日志）；``None`` = 放行。
+
+    与 ``insecure_mode_enabled`` 同一套 fail-closed 姿势，三态：
+
+    * **配了白名单** → 只有白名单里的 operator 放行；取不到 operator（平台没带）一律拒。
+    * **没配白名单但显式 `GATEWAY_ALLOW_INSECURE=1`** → 放行（本地/演示的逃生口）。
+    * **没配白名单也没显式 insecure** → **拒绝**。
+
+    最后那条是 2026-09-28 修的洞：此前判定写成 ``if allowlist and operator not in allowlist``，
+    空白名单等于**门开着**——任何能看到卡片的人点一下都能批准，于是"审批"不具备任何权威性，
+    "谁批的"也答不出来。签名 token 那道门早就是 fail-closed（见 ``insecure_mode_enabled``
+    的注释），白名单这道却是 fail-open；同一个模块里两种姿势本身就是坏味道。
+    """
+    if operator_id and operator_id in allowlist:
+        return None
+    if allowlist:
+        return f"operator {operator_id or '<unknown>'!r} 不在审批人白名单内"
+    if insecure_mode_enabled(raw_insecure):
+        return None
+    return "未配置 HITL_APPROVER_IDS，且未显式 GATEWAY_ALLOW_INSECURE=1：审批被拒绝"
+
+
 def _secret_eq(supplied: str | None, expected: str) -> bool:
     """常量时间比较，避免按字符提前返回带来的时序侧信道。"""
     return hmac.compare_digest((supplied or "").encode("utf-8"), expected.encode("utf-8"))
@@ -104,4 +129,4 @@ class AuthMiddleware(BaseHTTPMiddleware):
         return user == _DASHBOARD_USER and _secret_eq(password, self._dashboard_password)
 
 
-__all__ = ["AuthMiddleware", "insecure_mode_enabled"]
+__all__ = ["AuthMiddleware", "approver_gate_error", "insecure_mode_enabled"]

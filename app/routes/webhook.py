@@ -9,6 +9,7 @@ from app.config import settings
 from app.deps import adapter, engine, logger, pipeline, tracer
 from app.fsm.state_machine import Event as FsmEvent
 from app.limit_providers.rate_limiter import rate_limiter
+from app.middleware.auth import approver_gate_error
 from app.middleware.request_logger import bind_trace, log_request
 from app.models.errors import ErrorCode
 from app.models.events import MoAEvent, PlatformEvent, new_trace_id
@@ -27,6 +28,10 @@ async def webhook_callback(request: Request) -> JSONResponse:
     # 卡片回调的审计与最初触发审批的请求共享同一 trace，决策可回流可复盘
     bind_trace(trace_id or session_id)
     hitl_id = trace_id or session_id
+    if not trace_id:
+        logger.warning(
+            "card callback 未携带 trace_id，本次决策无法按 trace 回流评测（hitl_id=%s）", hitl_id
+        )
     # **校验全部在认领之前**：非法 action 与无权限的点击都不该消耗挂起记录
     # （消耗了就代表"这次审批没了"，别人再也批不了）。这条顺序是 2026-09-23 由
     # test_webhook_callback_refuses_operator_outside_allowlist 逼出来的——
@@ -34,11 +39,13 @@ async def webhook_callback(request: Request) -> JSONResponse:
     if action not in ("approve", "reject"):
         return JSONResponse({"error": f"unknown_action:{action}"}, status_code=400)
     operator_id = str(body.get("open_id") or body.get("user_id") or "")
-    if settings.hitl_approver_ids and operator_id not in settings.hitl_approver_ids:
-        logger.warning(
-            "card callback rejected: operator=%r not allowed (hitl_id=%s)",
-            operator_id or "<unknown>", hitl_id,
-        )
+    gate_error = approver_gate_error(
+        operator_id,
+        settings.hitl_approver_ids,
+        raw_insecure=settings.gateway_allow_insecure,
+    )
+    if gate_error is not None:
+        logger.warning("card callback rejected: %s (hitl_id=%s)", gate_error, hitl_id)
         return JSONResponse(
             {"error": ErrorCode.UNAUTHORIZED.value, "message": "没有审批该请求的权限"},
             status_code=403,
@@ -62,6 +69,7 @@ async def webhook_callback(request: Request) -> JSONResponse:
             intent=hitl.intent, guard_action="hitl_expired", input_text="",
             output_text=hitl.agent_output[:2000], hitl_decision=action,
             hitl_duration_ms=hitl_duration_ms, hitl_kind=hitl.hitl_kind,
+            hitl_operator=operator_id,
         )
         return JSONResponse({
             "trace_id": trace_id, "status": "expired",
@@ -74,6 +82,7 @@ async def webhook_callback(request: Request) -> JSONResponse:
             intent=hitl.intent, guard_action=f"hitl_{action}", input_text="",
             output_text=hitl.agent_output[:2000], hitl_decision=action,
             hitl_duration_ms=hitl_duration_ms, hitl_kind=hitl.hitl_kind,
+            hitl_operator=operator_id,
         )
         return JSONResponse({
             "trace_id": trace_id, "state": session_context.state.value, "text": response.text, "status": "approved",
@@ -84,6 +93,7 @@ async def webhook_callback(request: Request) -> JSONResponse:
             intent=hitl.intent, guard_action=f"hitl_{action}", input_text="",
             output_text=hitl.agent_output[:2000], hitl_decision=action,
             hitl_duration_ms=hitl_duration_ms, hitl_kind=hitl.hitl_kind,
+            hitl_operator=operator_id,
         )
         return JSONResponse({
             "trace_id": trace_id, "state": session_context.state.value, "status": "rejected",

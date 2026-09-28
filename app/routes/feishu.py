@@ -16,7 +16,7 @@ from app.channels.feishu_event import parse_feishu_event
 from app.channels.feishu_signature import verify_verification_token
 from app.config import settings
 from app.deps import adapter, engine, pipeline
-from app.middleware.auth import insecure_mode_enabled
+from app.middleware.auth import approver_gate_error, insecure_mode_enabled
 from app.middleware.request_logger import bind_trace, log_request
 from app.models.errors import ErrorCode
 from app.fsm.state_machine import Event as FsmEvent
@@ -78,17 +78,26 @@ async def _process_hitl_card(
     # 后台任务在独立上下文中运行：显式绑定，保证决策审计与触发审批的
     # 请求共享同一 trace（人工决策因此可按 trace 回流评测）
     bind_trace(trace_id or session_id)
+    if not trace_id:
+        # 没带 trace_id 时 bind_trace 退化成拿 session_id 当 trace：决策本身仍能按会话
+        # 查到，但它**join 不回**触发它的那条拦截（collect_hitl_feedback 按 trace 对齐）。
+        # 留一条 warning，让"这次审批进不了评测"是可见的，而不是无声的。
+        logger.warning(
+            "card_action 未携带 trace_id，本次决策无法按 trace 回流评测（hitl_id=%s）", hitl_id
+        )
     duration_ms = 0.0
     outcome = "hitl_not_found"
     try:
-        # 审批人白名单（`HITL_APPROVER_IDS`，非空即强制）。**必须在认领之前判**：
-        # 不能让没有权限的人把待审批记录点掉——那样别人就再也批不了了。
-        # 取不到点击者（平台没带 operator）而白名单非空时同样拒绝：验不了就不放行。
-        if settings.hitl_approver_ids and operator_id not in settings.hitl_approver_ids:
-            logger.warning(
-                "card_action rejected: operator=%r not allowed (hitl_id=%s, configured=%d)",
-                operator_id or "<unknown>", hitl_id, len(settings.hitl_approver_ids),
-            )
+        # 审批人闸门（`HITL_APPROVER_IDS`）。**必须在认领之前判**：不能让没有权限的人
+        # 把待审批记录点掉——那样别人就再也批不了了。白名单为空时 fail-closed
+        # （除非显式 `GATEWAY_ALLOW_INSECURE=1`），见 middleware.auth.approver_gate_error。
+        gate_error = approver_gate_error(
+            operator_id,
+            settings.hitl_approver_ids,
+            raw_insecure=settings.gateway_allow_insecure,
+        )
+        if gate_error is not None:
+            logger.warning("card_action rejected: %s (hitl_id=%s)", gate_error, hitl_id)
             await _safe_send(session_id, "你没有审批该请求的权限", trace_id)
             outcome = "hitl_forbidden"
             return

@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from app.config import settings
 from app.deps import _retriever, pipeline, vector_client
+from app.middleware.auth import insecure_mode_enabled
 import logging
 import time
 from typing import Any
@@ -49,10 +50,23 @@ async def healthz() -> dict[str, object]:
     # all_healthy 的取值集合。
     describe = getattr(pipeline, "describe", None)
     engine_name = str(describe().get("engine", "fsm")) if callable(describe) else "fsm"
+    # 审批链路的状态必须可见（2026-09-28）：`HITL_ENABLED` 的默认值是 **false**
+    # （app/config.py），而审批人白名单为空时走 fail-closed——"审批根本没生效"
+    # 和"谁能批"这两件事此前在运行时完全看不见，只能去读 .env 才知道。
+    # 放在 checks 之外：它们是**配置事实**，不是健康项，不该把 status 拉成 degraded。
+    if not settings.hitl_enabled:
+        hitl_state = "disabled(HITL_ENABLED=false)：输出不会被挂起等人工"
+    elif settings.hitl_approver_ids:
+        hitl_state = f"enabled(审批人白名单 {len(settings.hitl_approver_ids)} 人)"
+    elif insecure_mode_enabled(settings.gateway_allow_insecure):
+        hitl_state = "enabled(⚠️ 无白名单且 GATEWAY_ALLOW_INSECURE=1：能看到卡片的人都能批)"
+    else:
+        hitl_state = "enabled(⚠️ 无白名单且非 insecure：所有审批都会被拒)"
     result = {
         "status": "healthy" if all_healthy else "degraded",
         "checks": checks,
         "engine": engine_name,
+        "hitl": hitl_state,
     }
     _healthz_cache["at"] = now
     _healthz_cache["result"] = result
