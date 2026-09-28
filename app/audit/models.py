@@ -25,6 +25,13 @@ class AuditEntry:
     violation: str = ""
     hitl_decision: str = ""
     hitl_duration_ms: float = 0.0
+    # 审计链（ADR-019）。prev_hash 是上一条已写入记录的 entry_hash（当日文件内连续），
+    # entry_hash 覆盖"本条实际写下的字段"。由 `AsyncWal` 在写入时填；ES 侧读同一个
+    # 对象，因此两个 sink 的这两个字段一致。
+    # 能做到的是 **tamper-evident**（被动过能被发现），**不是** tamper-proof——
+    # 有磁盘权限的人仍可整条重写。对外措辞必须一致，别再说"不可篡改"。
+    prev_hash: str = ""
+    entry_hash: str = ""
 
     def to_audit_dict(self) -> dict[str, Any]:
         """审计条目的**唯一**序列化出口，WAL 与 ES 都从这里取字段。
@@ -55,6 +62,8 @@ class AuditEntry:
             "violation": self.violation,
             "hitl_decision": self.hitl_decision,
             "hitl_duration_ms": self.hitl_duration_ms,
+            "prev_hash": self.prev_hash,
+            "entry_hash": self.entry_hash,
         }
         # extra 先铺开、类型化字段后覆盖：同名时以 dataclass 上的值为准（确定性）。
         return {**self.extra, **typed}

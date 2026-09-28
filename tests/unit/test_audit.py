@@ -46,13 +46,21 @@ class TestAsyncWal:
         assert wal.size == 0
 
     @pytest.mark.asyncio
-    async def test_estimated_bytes(self):
-        wal = AsyncWal()
+    async def test_buffered_bytes_counts_written_bytes(self, tmp_path):
+        """容量口径必须是**实际写入行**的字节数（ADR-019 决策 3）。
+
+        此前这个属性叫 `estimated_bytes`，求的是 `len(agent_output)`——既不是写入量
+        （落盘时该字段被 pop 掉），也不是字节（`len(str)` 是字符数）。这条用中文内容
+        把"字节"和"字符"分开，两个错法都会让它红。
+        """
+        wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
         await wal.append(AuditEntry(
             trace_id="t1", session_id="s1", agent_name="coder",
-            agent_output="hello world", intent="coding", eval_score=1.0,
+            agent_output="你好世界", intent="coding", eval_score=1.0,
         ))
-        assert wal.estimated_bytes > 0
+        line = next(iter(tmp_path.glob("audit-*.jsonl"))).read_text(encoding="utf-8").strip()
+        assert wal.buffered_bytes == len(line.encode("utf-8"))
+        assert wal.buffered_bytes > len("你好世界"), "字节数必须大于字符数（中文）"
 
     @pytest.mark.asyncio
     async def test_replay_empty_returns_empty(self):
