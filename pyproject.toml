@@ -7,6 +7,9 @@ dependencies = [
   "fastapi>=0.111",
   "python-multipart>=0.0.9",
   "pydantic>=2.7",
+  # 工具参数校验（ADR-018）。此前只由 litellm 传递提供，代码若 import 它
+  # 就是隐式依赖第三方的依赖树——显式声明后 litellm 换树也不会静默碎。
+  "jsonschema>=4.26",
   "redis>=5.0",
   "httpx>=0.27",
   "opentelemetry-api>=1.25",

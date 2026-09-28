@@ -6,6 +6,7 @@ from typing import Any
 
 from app.agents.contract import AgentEnvelope, SubAgent, register_agent
 from app.agents.provider import LLMClient, LLMConfig
+from app.agents.tool_contract import call_tool
 from app.agents.tools import tool_registry
 from app.config import settings
 
@@ -62,9 +63,21 @@ async def _execute_with_tools(
             else:
                 try:
                     arguments = json.loads(call["function"].get("arguments") or "{}")
-                    output = await tool.handler(**arguments)
-                except Exception as exc:
-                    output = f'{{"error": "{exc}"}}'
+                except json.JSONDecodeError as exc:
+                    output = f'{{"error": "参数不是合法 JSON: {exc}"}}'
+                else:
+                    # 与 ReActLoop 共用同一份契约（ADR-018）：注入 session_id（覆盖式，
+                    # 模型自带的值作废）→ 校验 → 执行。此前这条路径既不注入也不校验，
+                    # 模型带上 session_id 就能直达 handler。
+                    outcome = await call_tool(
+                        tool, arguments, session_id=envelope.session_id
+                    )
+                    if outcome.kind == "ok":
+                        output = outcome.detail
+                    elif outcome.kind == "rejected":
+                        output = f'{{"error": "参数被拒：{outcome.detail}"}}'
+                    else:
+                        output = f'{{"error": "{outcome.detail}"}}'
             result.messages.append(
                 {"role": "tool", "tool_call_id": call["id"], "content": output}
             )

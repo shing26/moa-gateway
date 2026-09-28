@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ast
 import logging
 import operator
@@ -24,6 +25,31 @@ _ALLOWED_OPS = {
     ast.UAdd: operator.pos,
 }
 
+# 上界（ADR-018 决策 5）。此前 calculator 没有任何界：`9**9**9` 会让 _eval_node
+# 在事件循环里同步算出天文数字级的整数，把整个进程卡住——它既是 DoS，又是
+# "async 函数里跑纯 CPU" 的典型坏味道。
+_MAX_EXPRESSION_LEN = 200
+_MAX_POW_EXPONENT = 64
+# 幂运算结果位数上限。只限指数不够：`(9**64)**64` 的指数是 64，但结果是 9**4096。
+_MAX_RESULT_BITS = 4096
+
+
+def _check_pow(left: Any, right: Any) -> None:
+    """在真正求值**之前**判幂运算是否会爆炸。
+
+    先估位数再算，是这里唯一可行的顺序——等算出来再判就已经挂住了。
+    """
+    if not isinstance(right, int) or isinstance(right, bool):
+        return
+    if abs(right) > _MAX_POW_EXPONENT:
+        raise ValueError(
+            f"幂运算指数 {right} 超过上限 {_MAX_POW_EXPONENT}"
+        )
+    if isinstance(left, int) and not isinstance(left, bool) and abs(left) > 1:
+        predicted_bits = left.bit_length() * max(right, 1)
+        if predicted_bits > _MAX_RESULT_BITS:
+            raise ValueError(f"幂运算结果约 {predicted_bits} 位，超过上限 {_MAX_RESULT_BITS}")
+
 
 def _eval_node(node: ast.AST) -> Any:
     if isinstance(node, ast.Constant):
@@ -39,11 +65,17 @@ def _eval_node(node: ast.AST) -> Any:
         op = _ALLOWED_OPS.get(type(node.op))
         if op is None:
             raise ValueError(f"不支持的运算符: {type(node.op).__name__}")
-        return op(_eval_node(node.left), _eval_node(node.right))
+        left = _eval_node(node.left)
+        right = _eval_node(node.right)
+        if op is operator.pow:
+            _check_pow(left, right)
+        return op(left, right)
     raise ValueError(f"不支持的节点: {type(node).__name__}")
 
 
 async def _calculator_handler(expression: str) -> str:
+    if len(expression) > _MAX_EXPRESSION_LEN:
+        return f"表达式过长（上限 {_MAX_EXPRESSION_LEN} 字符）: {expression[:_MAX_EXPRESSION_LEN]}…"
     try:
         tree = ast.parse(expression.strip(), mode="eval")
     except SyntaxError:
@@ -51,7 +83,8 @@ async def _calculator_handler(expression: str) -> str:
     if not isinstance(tree, ast.Expression):
         return "无效表达式"
     try:
-        result = _eval_node(tree.body)
+        # 丢到线程里算：这是纯 CPU 工作，直接 await 会占住事件循环（ADR-018 决策 5）。
+        result = await asyncio.to_thread(_eval_node, tree.body)
         return f"{expression} = {result}"
     except Exception as exc:
         return f"计算失败: {exc}"
