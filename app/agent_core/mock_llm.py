@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from app.agent_core.types import ReActDecision, TaskResult
+from app.agent_core.types import DegradeCallback, ReActDecision, TaskResult
 
 # 规则：(正则, 工具名, 参数名 或 "")
 # 匹配到就调用对应工具；参数名非空时把匹配组 2 作为参数值。
@@ -87,8 +87,13 @@ class MockTaskLLM:
             note="无法匹配工具，直接回复",
         )
 
-    async def plan(self, *, task: str) -> list[str]:
-        """将任务拆解为有序子任务列表（按连接词/标点切分）。"""
+    async def plan(
+        self, *, task: str, on_degrade: DegradeCallback | None = None
+    ) -> list[str]:
+        """将任务拆解为有序子任务列表（按连接词/标点切分）。
+
+        ``on_degrade`` 只是协议兼容：Mock 是确定性的，永远不会降级，所以不调用它。
+        """
         parts = [task]
         for sep in _SPLIT_SEPARATORS:
             if len(parts) <= 1:
@@ -97,7 +102,12 @@ class MockTaskLLM:
         return cleaned or [task]
 
     async def summarize(
-        self, *, task: str, plan: list[str], results: list[TaskResult]
+        self,
+        *,
+        task: str,
+        plan: list[str],
+        results: list[TaskResult],
+        on_degrade: DegradeCallback | None = None,
     ) -> str:
         lines = [f"## 任务完成报告\n\n**任务**: {task}"]
         if plan:

@@ -95,9 +95,13 @@ class TaskAgent:
             spent["llm_latency_ms"] += float(metrics.get("llm_latency_ms", 0.0) or 0.0)
             model_used = str(metrics.get("model_used", "")) or model_used
 
+        # 降级原因收集器：每请求一个。`self._llm` 是进程内单例（模块导入时构造一次），
+        # 把降级原因挂在它身上会被并发请求互相踩，所以只能随本次调用走
+        # （ADR-018 决策 7）。
+        degradations: list[str] = []
         try:
             # 1. 规划
-            plan = await self._llm.plan(task=task)
+            plan = await self._llm.plan(task=task, on_degrade=degradations.append)
             _collect()
             envelope.agent_local_slot["plan"] = list(plan)
             logger.info("task agent plan=%s", plan)
@@ -113,10 +117,16 @@ class TaskAgent:
                 )
                 result = await loop.run(task=task, subtask=subtask)
                 _collect()
+                # 子任务内部的决策降级由 ReActLoop 带回来（LLM 调用失败 / 输出不是
+                # 合法 JSON 时它以 finish 兜底，但那不是模型决定收尾）。
+                degradations.extend(result.degraded_reasons)
                 results.append(result)
 
             # 3. 汇总
-            answer = await self._llm.summarize(task=task, plan=plan, results=results)
+            answer = await self._llm.summarize(
+                task=task, plan=plan, results=results,
+                on_degrade=degradations.append,
+            )
             _collect()
             envelope.agent_local_slot["task_results"] = [
                 [
@@ -133,13 +143,23 @@ class TaskAgent:
             ]
             total_tools = sum(r.tool_calls for r in results)
             total_tool_errors = sum(r.tool_errors for r in results)
+            # 参数被拒与被执行失败分开记（ADR-018 决策 3）：前者是模型填错、后者是
+            # 环境问题，合成一个数就分不出"模型在瞎猜参数"与"后端挂了"。
+            total_rejections = sum(r.tool_arg_rejections for r in results)
             envelope.agent_local_slot["tool_calls_total"] = total_tools
             # 工具失败必须留下计数：否则"任务真的完成"与"所有工具都失败但优雅降级"
             # 在审计里长得一模一样（2026-09-22 外部评估指出的可观测性缺口）。
             envelope.agent_local_slot["tool_errors_total"] = total_tool_errors
+            envelope.agent_local_slot["tool_arg_rejections_total"] = total_rejections
+            # 只在真降级时写：这个键的缺席本身有含义（"这次没降级"），与写空列表
+            # 不同——pipeline 据此补一条 issue 转人工（ADR-018 决策 7）。
+            if degradations:
+                envelope.agent_local_slot["task_degradation_reasons"] = list(degradations)
             logger.info(
-                "task agent done trace=%s tool_calls=%d tool_errors=%d cost_usd=%s",
-                envelope.trace_id, total_tools, total_tool_errors, spent["cost_usd"],
+                "task agent done trace=%s tool_calls=%d tool_errors=%d "
+                "tool_arg_rejections=%d degraded=%d cost_usd=%s",
+                envelope.trace_id, total_tools, total_tool_errors, total_rejections,
+                len(degradations), spent["cost_usd"],
             )
             return answer
         finally:
