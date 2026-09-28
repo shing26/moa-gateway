@@ -22,16 +22,15 @@ import pytest
 
 from app.vectordb import VectorDBClient, VectorDocument, build_vector_client
 from app.vectordb.pgvector_client import (
-    KEYWORD_WEIGHT,
     MIN_CANDIDATES,
-    VECTOR_WEIGHT,
+    RRF_K,
     PgVectorClient,
     VectorStoreUnavailable,
     _validate_identifier,
     _vector_literal,
-    fuse,
-    split_statements,
+    rrf_scores,
     render_schema,
+    split_statements,
 )
 
 
@@ -205,22 +204,34 @@ class TestRenderSchema:
             render_schema("embedding vector(1536)", 0)
 
 
-class TestFuse:
-    def test_weights_are_07_vector_03_keyword(self):
-        assert VECTOR_WEIGHT == pytest.approx(0.7)
-        assert KEYWORD_WEIGHT == pytest.approx(0.3)
-        assert VECTOR_WEIGHT + KEYWORD_WEIGHT == pytest.approx(1.0)
+class TestRrfScores:
+    """融合换成了 RRF（ADR-020）：只用名次，不再有量纲要校准。"""
 
-    def test_fuse_mixes_both_signals(self):
-        assert fuse(0.5, 0.0) == pytest.approx(0.35)
-        assert fuse(0.0, 1.0) == pytest.approx(0.3)
-        assert fuse(1.0, 1.0) == pytest.approx(1.0)
-        assert fuse(0.0, 0.0) == pytest.approx(0.0)
+    def test_single_ranking_gives_descending_reciprocal_ranks(self):
+        fused = rrf_scores([["a", "b"]])
+        assert fused["a"] == pytest.approx(1 / (RRF_K + 1))
+        assert fused["b"] == pytest.approx(1 / (RRF_K + 2))
+        assert fused["a"] > fused["b"]
 
-    def test_fuse_clamps_negative_cosine_to_zero(self):
-        # pgvector 的 <=> 余弦距离域是 0..2，1 - distance 可能为负。
-        assert fuse(-0.5, 0.0) == pytest.approx(0.0)
-        assert fuse(-0.5, 1.0) == pytest.approx(0.3)
+    def test_document_found_by_both_legs_outranks_single_leg_hits(self):
+        """两条腿都召回 → 分数累加，排在只有一条腿支持的文档之前。"""
+        fused = rrf_scores([["shared", "dense-only"], ["shared", "sparse-only"]])
+        assert fused["shared"] == pytest.approx(2 / (RRF_K + 1))
+        assert fused["shared"] > fused["dense-only"]
+        assert fused["shared"] > fused["sparse-only"]
+
+    def test_rank_within_a_leg_is_the_only_input(self):
+        """名次是唯一输入：各腿的第 1 名**同分**——不存在跨腿的量纲问题。
+
+        这正是 RRF 取代加权和的理由：不用在余弦分与关键词分之间做任何校准。
+        """
+        fused = rrf_scores([["a", "b"], ["c"]])
+        assert fused["a"] == pytest.approx(fused["c"])
+        assert fused["b"] < fused["a"]
+
+    def test_empty_rankings_are_harmless(self):
+        assert rrf_scores([]) == {}
+        assert rrf_scores([[], []]) == {}
 
 
 class TestVectorLiteral:
@@ -282,37 +293,62 @@ class TestLifecycle:
 # ── search ──────────────────────────────────────────────────────────────────
 
 
-class TestSearchKeywordFallback:
+class TestSearchSparseLeg:
+    """没有 embedding provider 时，稠密腿为空，**稀疏腿独立承担召回**（ADR-020）。
+
+    这与旧行为不同：以前退回 O(N) 的全表词法扫描，且"关键词"只是给稠密候选重排。
+    现在稀疏腿走 GIN 索引，是正常检索路径而不是降级兜底；全表扫描只在**两条腿都空**
+    时兜底。
+    """
+
     @pytest.mark.asyncio
-    async def test_no_provider_takes_keyword_path(self):
-        client, run, _ = make_client(keyword_scan_limit=7)
-        run.rows = [
-            ("k1", "redis 连接超时", {"source": "knowledge"}),
-            ("k2", "完全无关的内容", {"source": "knowledge"}),
-        ]
+    async def test_no_provider_uses_the_sparse_leg(self):
+        client, run, _ = make_client()
+        run.queue = [[
+            ("k1", "redis 连接超时", {"source": "knowledge"}, 0.9),
+            ("k2", "完全无关的内容", {"source": "knowledge"}, 0.1),
+        ]]
         result = await client.search("redis", top_k=5, filter_metadata={"source": "knowledge"})
 
-        assert [doc.id for doc in result.documents] == ["k1"]
-        assert result.documents[0].score > 0
+        assert [doc.id for doc in result.documents] == ["k1", "k2"]
 
-        call = run.one("SELECT id, content, metadata FROM")
-        assert "metadata @> %s::jsonb" in call.sql
+        call = run.one("to_tsquery")
+        assert "ts_rank" in call.sql
+        assert "to_tsvector('simple', tokens)" in call.sql
+        assert "tokens IS NOT NULL" in call.sql
         assert "(metadata->>'searchable') IS DISTINCT FROM 'false'" in call.sql
-        assert call.params[0] == json.dumps({"source": "knowledge"}, ensure_ascii=False)
-        assert call.params[1] == 7
+        assert call.params[0] == "redis", "查询侧分词与写入侧同源"
+        assert json.loads(call.params[1]) == {"source": "knowledge"}
+        assert call.params[3] == max(5 * 4, MIN_CANDIDATES)
         assert call.fetch is True
         run.none("<=>")
 
     @pytest.mark.asyncio
-    async def test_no_provider_and_no_filter_sends_empty_json_object(self):
+    async def test_sparse_query_uses_or_not_and_for_cjk_bigrams(self):
+        """中文查询必须拆成 bigram 并**用 OR 连接**——AND 会让长查询召回塌掉。"""
         client, run, _ = make_client()
-        await client.search("redis", top_k=3)
-        assert run.one("SELECT").params[0] == "{}"
+        run.queue = [[("k1", "连接超时", {}, 0.5)]]
+        await client.search("连接超时", top_k=3)
+
+        call = run.one("to_tsquery")
+        assert call.params[0] == "连接 | 接超 | 超时"
 
     @pytest.mark.asyncio
-    async def test_disabled_provider_also_takes_keyword_path(self):
+    async def test_both_legs_empty_falls_back_to_the_bounded_scan(self):
+        client, run, _ = make_client(keyword_scan_limit=7)
+        run.queue = [[], [("k1", "redis 连接超时", {"source": "knowledge"})]]
+        result = await client.search("redis", top_k=5, filter_metadata={"source": "knowledge"})
+
+        assert [doc.id for doc in result.documents] == ["k1"]
+        call = run.one("SELECT id, content, metadata FROM")
+        assert "metadata @> %s::jsonb" in call.sql
+        assert call.params[1] == 7
+        run.none("<=>")
+
+    @pytest.mark.asyncio
+    async def test_disabled_provider_also_uses_the_sparse_leg(self):
         client, run, _ = make_client(dim=4, embedding=DisabledEmbedding([0.1, 0.2, 0.3, 0.4]))
-        run.rows = [("k1", "redis 连接超时", {})]
+        run.queue = [[("k1", "redis 连接超时", {}, 0.9)]]
         result = await client.search("redis", top_k=5)
         assert [doc.id for doc in result.documents] == ["k1"]
         run.none("<=>")
@@ -348,31 +384,55 @@ class TestSearchVectorPath:
         assert call.params[3] == max(1 * 4, MIN_CANDIDATES)
         assert provider.calls == [["redis"]]
 
-        # pool_best 归一化后两个候选的关键词分都是 1.0，故最终分 = 0.7*cos + 0.3
+        # 只有稠密腿有结果，分数就是它的 RRF 名次分。
         assert [doc.id for doc in result.documents] == ["v1"]
-        assert result.documents[0].score == pytest.approx(fuse(0.9, 1.0))
+        assert result.documents[0].score == pytest.approx(1 / (RRF_K + 1))
 
     @pytest.mark.asyncio
-    async def test_vector_candidates_are_reordered_by_fused_score(self):
+    async def test_two_legs_fuse_by_rank_and_both_leg_hit_wins(self):
+        """两条腿独立召回 + RRF：**只有稀疏腿能找到的文档也能浮上来**。
+
+        这正是旧实现做不到的事——那时"关键词"只是在稠密候选池内重排，稠密 top-k 之外
+        的文档永远看不见。
+        """
         provider = FakeEmbedding([0.1, 0.2, 0.3, 0.4])
-        client, run, _ = make_client(dim=4, embedding=provider)
-        # v2 向量分更高，但 v1 关键词命中更多：融合后 v1 应反超。
+        client, run, _ = make_client(dim=4, embedding=provider, keyword_scan_limit=0)
         run.queue = [
-            [
-                ("v2", "redis", {"source": "knowledge"}, 0.95),
-                ("v1", "redis redis redis", {"source": "knowledge"}, 0.80),
-            ]
+            [("v1", "redis", {}, 0.95), ("v2", "redis cache", {}, 0.90)],
+            [("v3", "exact-identifier", {}, 0.7), ("v1", "redis", {}, 0.6)],
         ]
-        result = await client.search("redis", top_k=2)
-        assert [doc.id for doc in result.documents] == ["v1", "v2"]
-        assert result.documents[0].score == pytest.approx(fuse(0.80, 1.0))
-        assert result.documents[1].score == pytest.approx(fuse(0.95, 1 / 3))
+        result = await client.search("redis", top_k=3)
+
+        # v1 被两条腿都召回（名次 1 + 2）→ 累加后最高；v3 只被稀疏腿召回（名次 1），
+        # 但仍排在只被稠密腿召回、名次更低的 v2 之前。
+        assert [doc.id for doc in result.documents] == ["v1", "v3", "v2"]
+        assert result.documents[0].score == pytest.approx(1 / (RRF_K + 1) + 1 / (RRF_K + 2))
+        assert result.documents[1].score == pytest.approx(1 / (RRF_K + 1))
+        assert result.documents[2].score == pytest.approx(1 / (RRF_K + 2))
 
     @pytest.mark.asyncio
-    async def test_wrong_dimensionality_falls_back_to_keyword_without_raising(self):
+    async def test_equal_scores_still_produce_a_stable_order(self):
+        """融合分并列很常见（各被一条腿以同名次召回），必须有确定的次级键。"""
+        provider = FakeEmbedding([0.1, 0.2, 0.3, 0.4])
+        client, run, _ = make_client(dim=4, embedding=provider, keyword_scan_limit=0)
+        run.queue = [
+            [("b", "x", {}, 0.9)],
+            [("a", "x", {}, 0.5)],
+        ]
+        result = await client.search("x", top_k=2)
+
+        assert [doc.id for doc in result.documents] == ["a", "b"], "同分按 id 兜底"
+
+    @pytest.mark.asyncio
+    async def test_wrong_provider_dimensionality_falls_back_without_raising(self):
+        """provider 返回的维度不对 → 稠密腿为空，**由稀疏腿兜住**，不抛异常。
+
+        与启动时的表维度校验分工不同：那条管"配置 vs 建表"（直接拒绝启动），
+        这条管"模型这次返回了不对的向量"（本进程继续服务）。
+        """
         provider = FakeEmbedding([0.1, 0.2, 0.3])  # 3 != dim 4
         client, run, _ = make_client(dim=4, embedding=provider)
-        run.rows = [("k1", "redis 连接超时", {})]
+        run.queue = [[("k1", "redis 连接超时", {}, 0.9)]]
         result = await client.search("redis", top_k=5)
         assert [doc.id for doc in result.documents] == ["k1"]
         run.none("<=>")
@@ -381,19 +441,21 @@ class TestSearchVectorPath:
     async def test_provider_raising_falls_back_to_keyword_without_raising(self):
         provider = ExplodingEmbedding([0.1, 0.2, 0.3, 0.4])
         client, run, _ = make_client(dim=4, embedding=provider)
-        run.rows = [("k1", "redis 连接超时", {})]
+        run.queue = [[("k1", "redis 连接超时", {}, 0.9)]]
         result = await client.search("redis", top_k=5)
         assert [doc.id for doc in result.documents] == ["k1"]
         run.none("<=>")
 
     @pytest.mark.asyncio
-    async def test_empty_vector_result_falls_back_to_keyword(self):
+    async def test_empty_vector_result_is_carried_by_the_sparse_leg(self):
         provider = FakeEmbedding([0.1, 0.2, 0.3, 0.4])
-        client, run, _ = make_client(dim=4, embedding=provider)
-        run.queue = [[], [("k1", "redis 连接超时", {})]]
+        client, run, _ = make_client(dim=4, embedding=provider, keyword_scan_limit=0)
+        run.queue = [[], [("k1", "redis 连接超时", {}, 0.9)], []]
         result = await client.search("redis", top_k=5)
-        assert len(run.calls) == 2
+
         assert [doc.id for doc in result.documents] == ["k1"]
+        # 稠密空（0 < top_k）→ 第三条腿仍会跑一次；它只负责"两条腿都看不见的行"。
+        assert len([c for c in run.calls if "to_tsquery" in c.sql]) == 1
 
     @pytest.mark.asyncio
     async def test_degraded_pool_returns_empty_result_without_raising(self):
@@ -403,42 +465,38 @@ class TestSearchVectorPath:
         assert isinstance(result.documents, list)
 
     @pytest.mark.asyncio
-    async def test_top_up_skips_ids_already_returned(self):
+    async def test_lexical_third_leg_skips_ids_already_known(self):
+        """第三条腿（有界词法扫描）不得把前两条腿已召回的文档再塞一份。"""
         provider = FakeEmbedding([0.1, 0.2, 0.3, 0.4])
         client, run, _ = make_client(dim=4, embedding=provider)
         run.queue = [
             [("v1", "redis alpha", {"source": "knowledge"}, 0.9)],
             [
-                ("v1", "redis alpha", {"source": "knowledge"}),
-                ("k1", "redis beta", {"source": "knowledge"}),
+                ("v1", "redis alpha", {"source": "knowledge"}, 0.9),
+                ("k1", "redis beta", {"source": "knowledge"}, 0.5),
             ],
+            [],
         ]
         result = await client.search("redis", top_k=3)
+
         assert [doc.id for doc in result.documents] == ["v1", "k1"]
-        assert len(run.calls) == 2
+        assert len([doc for doc in result.documents if doc.id == "v1"]) == 1
 
     @pytest.mark.asyncio
-    async def test_topped_up_rows_use_comparable_scales_and_stay_sorted(self):
-        """补齐行必须与向量候选统一量纲并参与最终排序。
-
-        修复前：融合分恒在 0..1，关键词补充分是"词元命中次数"（无上界），
-        两者直接拼表且不重排，导致 documents 非降序、调用方取 documents[0] 出错。
-        修复后：以覆盖全部候选的 pool_best 做归一化，最终按 score 降序。
-        """
+    async def test_documents_come_back_sorted_by_fused_score(self):
+        """返回必须按融合分降序——调用方取 documents[0] 就是最高分。"""
         provider = FakeEmbedding([0.1, 0.2, 0.3, 0.4])
-        client, run, _ = make_client(dim=4, embedding=provider)
+        client, run, _ = make_client(dim=4, embedding=provider, keyword_scan_limit=0)
         run.queue = [
-            [("v1", "redis", {"source": "knowledge"}, 0.9)],
-            [("k1", "redis redis redis", {"source": "knowledge"})],
+            [("v1", "redis", {}, 0.9), ("v2", "redis", {}, 0.8)],
+            [("k1", "redis", {}, 0.7)],
         ]
-        result = await client.search("redis", top_k=2)
+        result = await client.search("redis", top_k=3)
 
-        # 返回顺序必须按相关度降序，且每条分数都在 0..1 的同一量纲内。
         scores = [doc.score for doc in result.documents]
         assert scores == sorted(scores, reverse=True)
-        assert all(0.0 <= s <= 1.0 for s in scores)
-        # v1 有向量（余弦 0.9）+ 关键词，k1 只有关键词，因此 v1 应排在前。
-        assert [doc.id for doc in result.documents] == ["v1", "k1"]
+        assert all(score > 0 for score in scores), "RRF 分恒正（1/(K+rank)）"
+        assert len(result.documents) == 3
 
 
 # ── 写入 ────────────────────────────────────────────────────────────────────
@@ -453,18 +511,21 @@ class TestUpsert:
         )
 
         sql, rows = many.calls[0]
-        assert "INSERT INTO gateway_documents (id, content, metadata, embedding)" in sql
-        assert "VALUES (%s, %s, %s::jsonb, %s::vector)" in sql
+        assert "INSERT INTO gateway_documents (id, content, metadata, embedding, tokens)" in sql
+        assert "VALUES (%s, %s, %s::jsonb, %s::vector, %s)" in sql
         assert "ON CONFLICT (id) DO UPDATE" in sql
         # 关键：embedding 冲突时不得被 NULL 覆盖，否则一次 embedding 故障就会
         # 静默抹掉已建好的语义索引。
         assert "embedding = COALESCE(EXCLUDED.embedding, gateway_documents.embedding)" in sql
+        assert "tokens = EXCLUDED.tokens" in sql
         assert "updated_at = now()" in sql
 
-        doc_id, content, metadata, vector = rows[0]
+        doc_id, content, metadata, vector, tokens = rows[0]
         assert (doc_id, content) == ("d1", "你好")
         assert isinstance(vector, str) and vector == "[1,2,3]"
         assert json.loads(metadata) == {"source": "knowledge", "title": "标题"}
+        # 稀疏腿的分词列与查询侧同源；这里是中文 → bigram
+        assert tokens == "你好"
 
     @pytest.mark.asyncio
     async def test_upsert_delegates_to_batch(self):

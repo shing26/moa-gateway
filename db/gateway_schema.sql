@@ -33,9 +33,17 @@ CREATE TABLE IF NOT EXISTS gateway_documents (
     content     TEXT        NOT NULL,
     metadata    JSONB       NOT NULL DEFAULT '{}'::jsonb,
     embedding   vector(1536),
+    -- 稀疏腿的预分词形式（ADR-020）：写入时由 app/vectordb/keywords.query_tokens
+    -- 生成、空格分隔。**必须预分词**——PG 默认 FTS 不切中文，直接拿 content 建
+    -- tsvector 会让中文查询静默返回空结果（不报错，只是查不到）。
+    tokens      TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- 已存在的表加列：上面的 CREATE TABLE IF NOT EXISTS 对**已建好的表**不会补列，
+-- 所以迁移必须显式写这一句，否则老库升级后 tokens 永远是 NULL、稀疏腿永远空。
+ALTER TABLE gateway_documents ADD COLUMN IF NOT EXISTS tokens TEXT;
 
 -- metadata 过滤对应 `metadata @> %s::jsonb`，GIN 是唯一能用上它的索引类型。
 CREATE INDEX IF NOT EXISTS gateway_documents_metadata_idx
@@ -49,3 +57,10 @@ CREATE INDEX IF NOT EXISTS gateway_documents_metadata_idx
 --    模型导致维度变化，需重建本列与索引。
 CREATE INDEX IF NOT EXISTS gateway_documents_embedding_idx
     ON gateway_documents USING hnsw (embedding vector_cosine_ops);
+
+-- 稀疏腿索引（ADR-020）。必须用 to_tsvector 的**两参形式**：带 regconfig 字面量时
+-- 它是 IMMUTABLE，能进索引；单参形式是 STABLE，建不了表达式索引。
+-- 配置用 'simple'（不做 stemming/停用词），因为列里存的已经是 bigram 词元——
+-- 再词干化会把 bigram 拆坏。
+CREATE INDEX IF NOT EXISTS gateway_documents_tokens_idx
+    ON gateway_documents USING gin (to_tsvector('simple', tokens));

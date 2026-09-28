@@ -9,25 +9,49 @@ they are talking to. Two deliberate exceptions:
 
 * ``count`` is a coroutine here (``acount()``) because it needs a round trip.
   The in-memory client still exposes a synchronous property for its tests.
-* ``search`` gains real hybrid ranking (see below).
+* ``search`` runs two independent recall legs and fuses them (see below).
 
-Hybrid ranking (root cause C)
------------------------------
+Retrieval: two legs + RRF (ADR-020)
+-----------------------------------
 Vector similarity alone is weak on exact identifiers — error codes, config
 keys, proper nouns — where lexical matching is strong, and vice versa. So
-``search`` fetches vector candidates, then re-scores them with the shared
-BD-01 keyword scorer and fuses the two signals:
+``search`` runs two **independent** recall legs and fuses their rankings:
 
-    final = 0.7 * cosine + 0.3 * normalised_keyword
+* **dense** — HNSW over ``embedding`` (cosine distance);
+* **sparse** — ``ts_rank`` over the pre-tokenised ``tokens`` column, matched by
+  ``to_tsvector('simple', tokens) @@ to_tsquery('simple', …)``.
 
-When no embedding provider is configured (or it is circuit-broken, or it
-returns the wrong dimensionality) the vector leg is skipped entirely and we
-degrade to a bounded keyword scan. That path is *correct but degraded*, not a
-stub: it is the same scorer the in-memory store has always used.
+Fusion is Reciprocal Rank Fusion, ``sum(1 / (RRF_K + rank))``. Rank-only fusion
+is deliberate. The previous implementation fused *scores*
+(``0.7 * cosine + 0.3 * normalised_keyword``) after min-max normalising the
+keyword term **against the dense candidate pool** — so the ordering depended on
+the pool, and the "keyword leg" could only ever reorder documents the dense leg
+had already found: a lexically-matching document outside the dense top-k was
+unreachable. RRF removes both problems at once — no scale to calibrate, and a
+document the dense leg never retrieved can still surface on the sparse leg.
 
-The keyword scan has a row cap (``keyword_scan_limit``) because it is O(N).
-Hitting the cap logs a warning rather than silently truncating: a silent wrong
-answer is worse than a slow one.
+The ``tokens`` column exists because Postgres' default text search does not
+segment Chinese: tokenising ``content`` directly makes Chinese queries match
+nothing, **silently**. Tokens come from the *same* ``query_tokens`` function on
+the write and the query path, so the two cannot drift apart.
+
+``tokens`` uses the ``simple`` configuration (no stemming) because the column
+already holds bigrams and stemming would break them. The index is built on the
+**two-argument** ``to_tsvector('simple', tokens)``: only that form is IMMUTABLE
+and therefore indexable.
+
+When no embedding provider is configured (or it is circuit-broken, or returns
+the wrong dimensionality) the dense leg simply contributes nothing and the
+sparse leg carries the query. If *both* legs come back empty we fall back to the
+bounded lexical scan — *correct but degraded*, not a stub. That scan has a row
+cap (``keyword_scan_limit``) because it is O(N); hitting the cap logs a warning
+rather than silently truncating, because a silent wrong answer is worse than a
+slow one.
+
+Startup **fails fast** when the configured embedding dimension disagrees with
+the table's ``vector(N)``. Continuing would drop every vector (the old behaviour
+logged a warning and stored NULL) and quietly degrade retrieval to keyword-only
+with no visible symptom.
 
 Excluding non-corpus rows
 -------------------------
@@ -42,7 +66,7 @@ interpolated. Bandit flags every such f-string as possible SQL injection
 because it cannot see that ``_validate_identifier()`` already rejected anything
 outside ``[A-Za-z_][A-Za-z0-9_]*`` in ``__init__``. Each interpolation site
 carries a narrow suppression marker rather than a project-wide skip, so new
-SQL stays flagged and these eight sites remain individually auditable.
+SQL stays flagged and each site remains individually auditable.
 ``tests/unit/test_pgvector_client.py`` asserts the validator rejects injection
 attempts -- that test is the real guarantee, not the marker.
 
@@ -60,7 +84,7 @@ import re
 from typing import Any, Sequence
 
 from app.vectordb import VectorDocument, VectorSearchResult
-from app.vectordb.keywords import keyword_score, normalized_keyword_score
+from app.vectordb.keywords import keyword_score, tokenize_for_index, tsquery_text
 
 logger = logging.getLogger("moa.vectordb.postgres")
 
@@ -70,15 +94,19 @@ logger = logging.getLogger("moa.vectordb.postgres")
 _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SCHEMA_PATH = pathlib.Path(__file__).resolve().parents[2] / "db" / "gateway_schema.sql"
 
-# Fusion weights. Vector carries the semantic load; keyword rescues exact
-# identifiers that embeddings tend to smear together.
-VECTOR_WEIGHT = 0.7
-KEYWORD_WEIGHT = 0.3
+# Reciprocal Rank Fusion 的平滑常数（ADR-020）。RRF 只用**名次**，因此免量纲、免调参
+# ——这正是它取代原先 `0.7*cosine + 0.3*归一化关键词` 的理由：那个加权和依赖一个池内
+# min-max 归一化基准（pool_best），基准一变排序就跟着变。
+RRF_K = 60
 
-# How many vector candidates to pull before re-ranking. Wider than top_k so the
-# keyword term has something to reorder; capped so a huge table stays cheap.
+# 每条腿各取多少候选。比 top_k 宽，融合才有东西可排；有上限所以大表也不贵。
 CANDIDATE_MULTIPLIER = 4
 MIN_CANDIDATES = 20
+
+# 启动时回填 tokens 的批量上限（ADR-020）。老库的既有行没有这个列，不回填就永远
+# 不会被稀疏腿看见——那是"静默漏召回"。回填分批做并在日志里留下余量，别让一次
+# 启动被大表拖死。
+_TOKEN_BACKFILL_LIMIT = 5000
 
 _SEARCHABLE_SQL = "(metadata->>'searchable') IS DISTINCT FROM 'false'"
 
@@ -104,8 +132,18 @@ def _vector_literal(vector: Sequence[float]) -> str:
     return "[" + ",".join(f"{value:.8g}" for value in vector) + "]"
 
 
-def fuse(vector_score: float, keyword_score_01: float) -> float:
-    return VECTOR_WEIGHT * max(vector_score, 0.0) + KEYWORD_WEIGHT * keyword_score_01
+def rrf_scores(rankings: list[list[str]]) -> dict[str, float]:
+    """Reciprocal Rank Fusion：把若干条**已按名次排好**的 id 序列融成一张分数表。
+
+    ``sum(1 / (RRF_K + rank))``，rank 从 1 起。同一文档被两条腿都召回时分数累加，
+    所以"两个信号都认为相关"的文档自然排在只有一条腿支持的文档之前——不需要在
+    两条腿的分数量纲之间做任何校准。
+    """
+    totals: dict[str, float] = {}
+    for ranking in rankings:
+        for position, doc_id in enumerate(ranking, start=1):
+            totals[doc_id] = totals.get(doc_id, 0.0) + 1.0 / (RRF_K + position)
+    return totals
 
 
 def split_statements(raw_sql: str) -> list[str]:
@@ -234,6 +272,11 @@ class PgVectorClient:
             return
 
         self._degraded_reason = None
+        # 维度校验放在"启动不炸"的 except **之外**：故意让它能逃出去。配置与建表维度
+        # 不一致时，继续跑等于每条向量都被静默丢弃、检索退化成纯关键词（ADR-020 决策 4）。
+        await self._assert_dim_matches()
+        # 回填是 best-effort：失败只让稀疏腿不完整，不该拖垮启动。
+        await self._backfill_tokens()
         logger.info(
             "vectordb: PostgreSQL 连接池就绪 (table=%s, dim=%d, embedding=%s)",
             self._table,
@@ -299,6 +342,8 @@ class PgVectorClient:
                 doc.content,
                 json.dumps(doc.metadata, ensure_ascii=False),
                 _vector_literal(vec) if vec is not None else None,
+                # 稀疏腿的预分词列（ADR-020）：写入与查询必须用同一个分词函数。
+                tokenize_for_index(doc.content),
             )
             for doc, vec in zip(docs, vectors)
         ]
@@ -306,12 +351,13 @@ class PgVectorClient:
         # transiently we must not overwrite a previously stored good vector
         # with NULL, or an outage would silently erase the semantic index.
         await self._run_many(
-            f"INSERT INTO {self._table} (id, content, metadata, embedding) "  # nosec B608 - 表名已校验
-            f"VALUES (%s, %s, %s::jsonb, %s::vector) "
+            f"INSERT INTO {self._table} (id, content, metadata, embedding, tokens) "  # nosec B608 - 表名已校验
+            f"VALUES (%s, %s, %s::jsonb, %s::vector, %s) "
             f"ON CONFLICT (id) DO UPDATE SET "
             f"content = EXCLUDED.content, "
             f"metadata = EXCLUDED.metadata, "
             f"embedding = COALESCE(EXCLUDED.embedding, {self._table}.embedding), "
+            f"tokens = EXCLUDED.tokens, "
             f"updated_at = now()",
             rows,
         )
@@ -370,45 +416,86 @@ class PgVectorClient:
             )
             return VectorSearchResult(documents=[])
 
+        # 稠密腿：向量召回（HNSW，按余弦距离排序）。
+        dense: list[VectorDocument] = []
         vector = await self._embed_one(query)
-        if vector is None:
-            return VectorSearchResult(documents=await self._keyword_search(query, top_k, filter_metadata))
+        if vector is not None:
+            dense = await self._vector_candidates(vector, top_k, filter_metadata)
 
-        candidates = await self._vector_candidates(vector, top_k, filter_metadata)
-        if not candidates:
-            return VectorSearchResult(documents=await self._keyword_search(query, top_k, filter_metadata))
+        # 稀疏腿：**独立召回**（tsvector + ts_rank）。它不是"在稠密候选池里重排"
+        # ——那正是此前"混合检索"名不副实的地方：词法命中但排在稠密 top-k 之外的
+        # 文档永远召不回（ADR-020 背景）。
+        sparse = await self._sparse_candidates(query, top_k, filter_metadata)
 
-        query_lower = query.lower()
-        pool_best = max(keyword_score(doc.content, query_lower) for doc in candidates)
-
-        # 无向量的行对向量腿不可见，用关键词腿补齐，避免它们永远检索不到。
-        # 注意：补齐只在候选池不足 top_k 时触发（即表很小），大表下仍可能漏掉
-        # 写入时 embedding 恰好失败的个别行——这是已知的部分缓解，不是完备保证。
-        topped_up: list[VectorDocument] = []
-        if len(candidates) < top_k:
-            topped_up = await self._keyword_search(
-                query,
-                top_k - len(candidates),
-                filter_metadata,
-                exclude={doc.id for doc in candidates},
+        if not dense and not sparse:
+            # 两条腿都没召回到东西：退回有界的词法扫描。表极小、或 tokens 尚未回填
+            # 完时会走到这里——它是**部分**缓解，不是完备保证。
+            return VectorSearchResult(
+                documents=await self._keyword_search(query, top_k, filter_metadata)
             )
-            if topped_up:
-                # 归一化基准必须覆盖全部候选，否则两条腿的分数不在同一量纲上。
-                pool_best = max(pool_best, max(doc.score for doc in topped_up))
 
-        for doc in candidates:
-            doc.score = fuse(
-                doc.score, normalized_keyword_score(doc.content, query_lower, pool_best)
+        by_id: dict[str, VectorDocument] = {doc.id: doc for doc in (*dense, *sparse)}
+        rankings: list[list[str]] = [[doc.id for doc in dense], [doc.id for doc in sparse]]
+
+        # 无向量、又没回填 tokens 的行两条腿都看不见。稠密候选不足 top_k 时补一次
+        # 有界词法扫描，把它作为**第三条腿**交给 RRF（而不是像以前那样再自己算一套
+        # 加权分——那正是量纲要小心处理的地方）。
+        if len(dense) < top_k:
+            lexical = await self._keyword_search(
+                query, top_k, filter_metadata, exclude=set(by_id)
             )
-        for doc in topped_up:
-            # 补齐行没有 embedding，余弦腿贡献 0，只剩归一化的关键词分。
-            doc.score = fuse(0.0, normalized_keyword_score(doc.content, query_lower, pool_best))
+            for doc in lexical:
+                by_id.setdefault(doc.id, doc)
+            rankings.append([doc.id for doc in lexical])
 
-        results = candidates + topped_up
-        # 统一排序：融合分在 0..1，而关键词原始分是无上界的"命中次数"，
-        # 不重排的话 documents 就不是按相关度降序，取 documents[0] 会拿到错的结果。
-        results.sort(key=lambda doc: doc.score, reverse=True)
-        return VectorSearchResult(documents=results[:top_k])
+        fused = rrf_scores(rankings)
+        ranked = list(by_id.values())
+        for doc in ranked:
+            doc.score = fused.get(doc.id, 0.0)
+        # 融合分并列很常见（只被一条腿召回、名次又相同），必须给次级键，
+        # 否则返回顺序不稳定。
+        ranked.sort(key=lambda doc: (-doc.score, doc.id))
+        return VectorSearchResult(documents=ranked[:top_k])
+
+    async def _sparse_candidates(
+        self,
+        query: str,
+        top_k: int,
+        filter_metadata: dict[str, Any] | None,
+    ) -> list[VectorDocument]:
+        """稀疏腿：从预分词列按 ``ts_rank`` 召回（ADR-020 决策 1）。
+
+        分词走 ``query_tokens``（经 ``tsquery_text`` 拼成 OR 表达式），与写入侧
+        ``tokenize_for_index`` 是**同一个函数**——两份分词实现迟早会漂移。
+        用 ``|`` 而非 AND：bigram 做 AND 太严，中文长查询会让召回塌掉。
+        """
+        if top_k <= 0 or not query:
+            return []
+        query_ts = tsquery_text(query.lower())
+        if not query_ts:
+            return []
+        limit = max(top_k * CANDIDATE_MULTIPLIER, MIN_CANDIDATES)
+        rows = await self._run(
+            f"SELECT id, content, metadata, "  # nosec B608 - 表名已校验
+            f"ts_rank(to_tsvector('simple', tokens), to_tsquery('simple', %s)) AS score "
+            f"FROM {self._table} "
+            f"WHERE tokens IS NOT NULL AND metadata @> %s::jsonb AND {_SEARCHABLE_SQL} "
+            f"AND to_tsvector('simple', tokens) @@ to_tsquery('simple', %s) "
+            f"ORDER BY score DESC, id LIMIT %s",
+            (
+                query_ts,
+                json.dumps(filter_metadata or {}, ensure_ascii=False),
+                query_ts,
+                limit,
+            ),
+            fetch=True,
+        )
+        return [
+            VectorDocument(
+                id=row[0], content=row[1], metadata=row[2] or {}, score=float(row[3])
+            )
+            for row in rows or []
+        ]
 
     async def _vector_candidates(
         self, vector: Sequence[float], top_k: int, filter_metadata: dict[str, Any] | None
@@ -475,6 +562,62 @@ class PgVectorClient:
         scored.sort(key=lambda doc: doc.score, reverse=True)
         return scored[:top_k]
 
+    async def _assert_dim_matches(self) -> None:
+        """校验表里 embedding 的实际维度与配置一致；不一致**直接拒绝启动**。
+
+        旧行为是 `_embed_batch` 对每条不符的向量打一条 warn 然后丢弃——于是配置与建表
+        维度不一致时，**整库向量逐条丢失、检索静默退化成纯关键词**。这个错误没有任何
+        外显症状，只能靠这里当场拦住（ADR-020 决策 4）。
+        """
+        rows = await self._run(
+            "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+            "WHERE attrelid = to_regclass(%s) AND attname = 'embedding'",
+            (self._table,),
+            fetch=True,
+        )
+        if not rows or not rows[0][0]:
+            return  # 表还没建好：迁移会按配置维度建，无需比对
+        match = re.search(r"vector\((\d+)\)", str(rows[0][0]))
+        if match is None:
+            return
+        actual = int(match.group(1))
+        if actual != self._dim:
+            raise VectorStoreUnavailable(
+                f"表 {self._table} 的 embedding 维度是 {actual}，配置是 {self._dim}。"
+                f"不一致会让每条向量被静默丢弃、检索退化为纯关键词。"
+                f"请对齐 VECTOR_DB_EMBEDDING_DIM 与建表维度，或重建该列与索引。"
+            )
+
+    async def _backfill_tokens(self) -> None:
+        """给老库回填 `tokens`（ADR-020）。分批、best-effort，余量留在日志里。
+
+        不回填的后果是**静默漏召回**：那批行永远不被稀疏腿看见。单次上限是为了不让
+        一次启动被大表拖死——余量会在下次启动继续回填，日志会说明还有。
+        """
+        try:
+            rows = await self._run(
+                f"SELECT id, content FROM {self._table} "  # nosec B608 - 表名已校验
+                f"WHERE tokens IS NULL LIMIT %s",
+                (_TOKEN_BACKFILL_LIMIT,),
+                fetch=True,
+            )
+            rows = rows or []
+            if not rows:
+                return
+            await self._run_many(
+                f"UPDATE {self._table} SET tokens = %s WHERE id = %s",  # nosec B608 - 表名已校验
+                [(tokenize_for_index(content or ""), doc_id) for doc_id, content in rows],
+            )
+            logger.info("vectordb: 回填 tokens %d 行", len(rows))
+            if len(rows) >= _TOKEN_BACKFILL_LIMIT:
+                logger.warning(
+                    "vectordb: tokens 回填触及单次上限 %d，仍有未回填的行——"
+                    "这些行此刻只可能被稠密腿召回（重启会继续回填）",
+                    _TOKEN_BACKFILL_LIMIT,
+                )
+        except Exception as exc:  # noqa: BLE001 - 回填是 best-effort，不该拖垮启动
+            logger.warning("vectordb: tokens 回填失败，稀疏腿本次不完整: %s", exc)
+
     # ── embeddings ─────────────────────────────────────────────────────────
 
     async def _embed_one(self, text: str) -> list[float] | None:
@@ -522,7 +665,7 @@ class PgVectorClient:
 __all__ = [
     "PgVectorClient",
     "VectorStoreUnavailable",
-    "fuse",
+    "rrf_scores",
     "render_schema",
     "split_statements",
 ]

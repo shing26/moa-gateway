@@ -90,6 +90,25 @@ class FakePgStore:
             row = self.rows.get(params[0])
             return [] if row is None else [(row.id, row.content, row.metadata)]
 
+        if "to_tsquery" in text:  # 稀疏腿（ADR-020）：bigram 词元命中数近似 ts_rank
+            from app.vectordb.keywords import tokenize_for_index
+
+            query_ts, filter_json, _query_ts, limit = params
+            filter_metadata = json.loads(filter_json)
+            wanted = [token for token in query_ts.split(" | ") if token]
+            scored = []
+            for row in self.rows.values():
+                if not _contains(row.metadata, filter_metadata) or not _is_searchable(row.metadata):
+                    continue
+                content_tokens = set(tokenize_for_index(row.content).split())
+                hits = sum(1 for token in wanted if token in content_tokens)
+                if hits:
+                    scored.append((row, float(hits)))
+            scored.sort(key=lambda pair: pair[1], reverse=True)
+            return [
+                (row.id, row.content, row.metadata, score) for row, score in scored[:limit]
+            ]
+
         if "IS DISTINCT FROM 'false'" in text:  # 关键词回退扫描
             filter_metadata = json.loads(params[0])
             return [
@@ -144,7 +163,9 @@ class FakePgStore:
         self.sql.append(sql)
         assert "ON CONFLICT (id) DO UPDATE" in sql
         assert "COALESCE(EXCLUDED.embedding" in sql
-        for row_id, content, metadata_json, vector_literal in rows:
+        # 第五列是稀疏腿的 tokens（ADR-020）。这个内存假后端只复刻**写入语义**，
+        # 不建模 tsvector 检索，所以解出来就丢掉——它的存在由 pgvector 的 SQL 断言覆盖。
+        for row_id, content, metadata_json, vector_literal, _tokens in rows:
             embedding = _parse_vector(vector_literal) if vector_literal is not None else None
             existing = self.rows.get(row_id)
             # 复刻 SQL 里的 COALESCE：新向量为 NULL 时保留旧向量。

@@ -88,6 +88,24 @@ def keyword_score(content: str, query_lower: str) -> float:
     return score
 
 
+def tokenize_for_index(content: str) -> str:
+    """把正文压成稀疏腿用的**预分词串**（空格分隔）。
+
+    写入（``PgVectorClient.upsert_batch`` 填 ``tokens`` 列）与查询（构造 tsquery）
+    必须走**同一个函数**——两份分词实现迟早会漂移，这正是本模块开头警告过的事。
+    """
+    return " ".join(query_tokens(content.lower()))
+
+
+def tsquery_text(query_lower: str) -> str:
+    """把查询压成 ``to_tsquery('simple', …)`` 用的**或**表达式。
+
+    用 ``|``（任一 bigram 命中即算候选），而不是默认的 AND——bigram 做 AND 太严，
+    中文长查询几乎不可能让全部 bigram 都出现，召回会塌掉。排名交给 ``ts_rank``。
+    """
+    return " | ".join(query_tokens(query_lower))
+
+
 def normalized_keyword_score(content: str, query_lower: str, pool_best: float) -> float:
     """Keyword signal scaled to 0..1 so it can be fused with cosine similarity.
 
@@ -119,4 +137,6 @@ __all__ = [
     "match_metadata",
     "normalized_keyword_score",
     "query_tokens",
+    "tokenize_for_index",
+    "tsquery_text",
 ]
