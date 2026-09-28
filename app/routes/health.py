@@ -5,6 +5,7 @@ from app.config import settings
 from app.deps import _retriever, pipeline, vector_client
 from app.middleware.auth import insecure_mode_enabled
 import logging
+import pathlib
 import time
 from typing import Any
 
@@ -12,6 +13,56 @@ logger = logging.getLogger("moa.routes.health")
 router = APIRouter()
 _healthz_cache: dict[str, Any] = {"at": 0.0, "result": None}
 _HEALTHZ_TTL = 5.0
+
+# 审计链自检的文件大小上限：/healthz 挂在请求路径上（5 秒缓存一次），不该在这里做
+# 全量文件 IO。超大文件交给 CLI（scripts/verify_audit_chain.py）。
+_CHAIN_CHECK_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _audit_chain_check() -> dict[str, str]:
+    """校验**最新一个**审计文件的哈希链（ADR-019 那条回路的末端之一）。
+
+    链在此前**没有任何消费者**——写出来却没人跑，"篡改可发现"就没有回路末端。
+    这里和 CLI 一起构成末端：healthz 只回答"最近这个文件有没有被动过"且代价封顶，
+    全量校验是 CLI 的活。
+
+    返回 ``{check, detail}``：``check`` 进 ``checks`` 参与健康判定（``ok`` 在
+    ``healthy_values`` 里，``degraded: …`` 不在，于是断裂会把 status 拉成 degraded）；
+    ``detail`` 是给人看的一句话，放在 ``checks`` 之外。
+    """
+    from app.audit.wal import verify_audit_dir
+
+    directory = pathlib.Path(settings.log_dir)
+    files = sorted(directory.glob("audit-*.jsonl"))
+    if not files:
+        return {"check": "ok", "detail": "无审计文件"}
+    newest = files[-1]
+    try:
+        size = newest.stat().st_size
+    except OSError as exc:
+        return {"check": "ok", "detail": f"读不到 {newest.name}（{exc}）"}
+    if size > _CHAIN_CHECK_MAX_BYTES:
+        return {
+            "check": "ok",
+            "detail": (
+                f"{newest.name} 过大（{size // (1024 * 1024)}MB），"
+                "请用 scripts/verify_audit_chain.py 全量校验"
+            ),
+        }
+    report = verify_audit_dir(directory, limit=1)
+    if not report:
+        return {"check": "ok", "detail": "无审计文件"}
+    name, (line, chained) = next(iter(report.items()))
+    if chained == 0:
+        # 链上线（2026-09-28）**之前**写的文件没有哈希字段 —— 无链可校验。
+        # 说成"断裂"会让信号永远红（永远红和永远绿一样没人看）；说成"完整"则是假的。
+        return {"check": "ok", "detail": f"{name} 无链可校验（链上线前的数据）"}
+    if line is not None:
+        return {
+            "check": f"degraded: 审计链断裂 {name}:{line}",
+            "detail": f"{name} 第 {line} 行起无法证明未被改动",
+        }
+    return {"check": "ok", "detail": f"{name} 链完整（{chained} 行带链）"}
 
 @router.get("/health")
 async def health() -> dict[str, str]:
@@ -37,11 +88,20 @@ async def healthz() -> dict[str, object]:
     checks["redis"] = redis_check
     # 检索后端必须可见：静默退回内存存储会让"数据其实没落盘"这件事无人知晓。
     vector_info = vector_client.describe()
-    checks["vectordb"] = (
-        f"degraded: {str(vector_info.get('reason') or 'unknown')[:60]}"
-        if vector_info.get("degraded")
-        else str(vector_info.get("backend", "unknown"))
-    )
+    dim_mismatch = int(vector_info.get("embedding_dim_mismatches") or 0)
+    if dim_mismatch:
+        # 模型返回的维度与表不符 → 向量被逐条丢弃、稠密腿永远空、检索静默退化成纯稀疏。
+        # 这**是健康问题**（语义索引实际上没在建立），不能算正常；启动时的表维度校验
+        # 抓不到它（配置与表一致，错的是模型），所以由这个计数兜住（2026-09-28）。
+        checks["vectordb"] = (
+            f"degraded: {dim_mismatch} 条 embedding 维度与表不符、已丢弃（语义索引未建立）"
+        )
+    elif vector_info.get("degraded"):
+        checks["vectordb"] = f"degraded: {str(vector_info.get('reason') or 'unknown')[:60]}"
+    else:
+        checks["vectordb"] = str(vector_info.get("backend", "unknown"))
+    check_chain = _audit_chain_check()
+    checks["audit_chain"] = check_chain["check"]
     # "memory" 是受支持的零配置模式，与 redis 的 fallback_memory 同级；
     # 只有 "degraded: ..." 才代表配置与实际不符，需要告警。
     healthy_values = {"connected", "ok", "healthy", "fallback_memory", "memory", "postgres"}
@@ -67,6 +127,7 @@ async def healthz() -> dict[str, object]:
         "checks": checks,
         "engine": engine_name,
         "hitl": hitl_state,
+        "audit_chain": check_chain["detail"],
     }
     _healthz_cache["at"] = now
     _healthz_cache["result"] = result

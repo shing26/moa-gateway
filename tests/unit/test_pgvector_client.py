@@ -436,6 +436,8 @@ class TestSearchVectorPath:
         result = await client.search("redis", top_k=5)
         assert [doc.id for doc in result.documents] == ["k1"]
         run.none("<=>")
+        # 而且必须**计数**：维度不符意味着语义索引没在建立，这件事不能只靠一条日志
+        assert client.describe()["embedding_dim_mismatches"] >= 1
 
     @pytest.mark.asyncio
     async def test_provider_raising_falls_back_to_keyword_without_raising(self):

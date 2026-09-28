@@ -192,6 +192,11 @@ class PgVectorClient:
         self._pool = pool
         self._pool_injected = pool is not None
         self._degraded_reason: str | None = None
+        # embedding provider 返回的向量维度与表定义不符、被丢弃的条数。>0 意味着
+        # **语义索引实际上没在建立**：稠密腿永远是空的，检索静默退化成纯稀疏。
+        # 启动时的表维度校验抓不到这一种（那里比的是配置 vs 建表，两边都对，错的是模型），
+        # 所以只能在这里计数 + 报错，并让它出现在 describe()/healthz 上。
+        self._dim_mismatches = 0
 
     # ── introspection ──────────────────────────────────────────────────────
 
@@ -213,6 +218,8 @@ class PgVectorClient:
             "reason": self._degraded_reason,
             "embedding": bool(provider is not None and getattr(provider, "enabled", False)),
             "embedding_model": getattr(provider, "model", None),
+            # >0 = 模型返回的维度与表不符，向量被逐条丢弃、语义索引没在建立。
+            "embedding_dim_mismatches": self._dim_mismatches,
         }
 
     @property
@@ -651,10 +658,18 @@ class PgVectorClient:
             if vector is None:
                 accepted.append(None)
             elif len(vector) != self._dim:
-                logger.warning(
-                    "vectordb: embedding 维度 %d 与表定义 %d 不符，丢弃该向量",
+                # 提升为 error + 计数（2026-09-28）。此前只有一条 warning 然后丢弃：
+                # 若模型换了而上限没跟着改，**每一条**向量都会走到这里 → 稠密腿永远空
+                # → 检索静默退化成纯稀疏，而表现与"没配 embedding"几乎一样。
+                # 启动时的表维度校验抓不到它（配置与表一致，错的是模型），所以这里必须响。
+                self._dim_mismatches += 1
+                logger.error(
+                    "vectordb: embedding 维度 %d 与表定义 %d 不符，丢弃该向量"
+                    "（累计 %d 条）。语义索引没有在建立——请对齐 EMBEDDING_MODEL 与 "
+                    "VECTOR_DB_EMBEDDING_DIM，或重建该列与索引。",
                     len(vector),
                     self._dim,
+                    self._dim_mismatches,
                 )
                 accepted.append(None)
             else:

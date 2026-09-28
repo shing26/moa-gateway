@@ -8,8 +8,9 @@
 2. **丢了多少条答得出来**——满溢有计数与告警，不再静默；
 3. **容量算的是真写入字节**（中文用例把"字节"与"字符"分开）。
 
-边界也一并钉住：每个日文件是独立的链（首行 prev_hash 为空）、史前条目（无哈希字段）
-会被如实报成断裂、落盘失败不中断进程内接链。
+边界也一并钉住：每个日文件是独立的链（首行 prev_hash 为空）、**链上线之前**写的无链文件
+既不算"完整"也不算"断裂"（而是"无链可校验"——这两种误判各有代价，见下面两条用例）、
+以及落盘失败不中断进程内接链。
 """
 
 from __future__ import annotations
@@ -45,16 +46,24 @@ def _log_file(tmp_path):
     return next(iter(tmp_path.glob("audit-*.jsonl")))
 
 
-def _rows(tmp_path) -> list[dict]:
-    text = _log_file(tmp_path).read_text(encoding="utf-8")
+def _rows_of(path) -> list[dict]:
+    text = path.read_text(encoding="utf-8")
     return [json.loads(ln) for ln in text.splitlines() if ln.strip()]
 
 
-def _rewrite(tmp_path, rows: list[dict]) -> None:
-    _log_file(tmp_path).write_text(
+def _rewrite_file(path, rows: list[dict]) -> None:
+    path.write_text(
         "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
         encoding="utf-8",
     )
+
+
+def _rows(tmp_path) -> list[dict]:
+    return _rows_of(_log_file(tmp_path))
+
+
+def _rewrite(tmp_path, rows: list[dict]) -> None:
+    _rewrite_file(_log_file(tmp_path), rows)
 
 
 # ── 链本身 ──────────────────────────────────────────────────────────────────
@@ -125,14 +134,6 @@ async def test_verify_detects_a_removed_row(tmp_path) -> None:
     _rewrite(tmp_path, rows)
 
     assert verify_chain(_log_file(tmp_path)) == 2
-
-
-def test_verify_flags_rows_written_before_the_chain_existed(tmp_path) -> None:
-    """史前条目没有哈希字段——如实报断裂，而不是当它"链完整"。"""
-    f = tmp_path / "audit-2020-01-01.jsonl"
-    f.write_text(json.dumps({"trace_id": "old", "intent": "coding"}) + "\n", encoding="utf-8")
-
-    assert verify_chain(f) == 1
 
 
 def test_verify_missing_file_has_nothing_to_verify(tmp_path) -> None:
@@ -210,3 +211,94 @@ async def test_write_failure_does_not_break_the_in_process_chain(tmp_path, monke
     assert wal.write_failures == 2
     assert first.entry_hash and second.entry_hash
     assert second.prev_hash == first.entry_hash, "写失败之后链仍要在进程内接上"
+
+
+# ── 目录级校验（/healthz 与 scripts/verify_audit_chain.py 的入口）──────────
+
+
+@pytest.mark.asyncio
+async def test_verify_audit_dir_reports_every_file(tmp_path) -> None:
+    """目录级校验要逐个文件给结论——这是"链有没有人消费"的那个末端。"""
+    from app.audit.wal import verify_audit_dir
+
+    wal = _wal(tmp_path)
+    await _append_n(wal, 2)
+    today = _log_file(tmp_path)
+    older = tmp_path / "audit-2026-01-01.jsonl"
+    older.write_bytes(today.read_bytes())  # 每个日文件是独立链，复制过来仍完整
+
+    results = verify_audit_dir(tmp_path)
+    assert set(results) == {today.name, older.name}
+    assert all(line is None for line, _chained in results.values())
+
+    rows = _rows_of(older)
+    rows[0]["intent"] = "被改过"
+    _rewrite_file(older, rows)
+
+    results = verify_audit_dir(tmp_path)
+    assert results[older.name][0] == 1, "坏掉的那个要单独被点名"
+    assert results[today.name][0] is None, "好的那个不受影响"
+
+
+@pytest.mark.asyncio
+async def test_verify_audit_dir_limit_checks_only_the_newest(tmp_path) -> None:
+    """``limit`` 给 healthz 用：把每次请求的 IO 代价封顶。"""
+    from app.audit.wal import verify_audit_dir
+
+    wal = _wal(tmp_path)
+    await _append_n(wal, 2)
+    today = _log_file(tmp_path)
+    (tmp_path / "audit-2020-01-01.jsonl").write_text("{}\n", encoding="utf-8")
+
+    assert set(verify_audit_dir(tmp_path)) == {today.name, "audit-2020-01-01.jsonl"}
+    assert set(verify_audit_dir(tmp_path, limit=1)) == {today.name}
+    assert verify_audit_dir(tmp_path, limit=0) == {}
+
+
+# ── 链上线**之前**的历史文件（跑 CLI 时发现的真问题）────────────────────────
+
+
+def test_unchained_file_is_not_reported_as_broken_nor_as_ok(tmp_path) -> None:
+    """没有哈希字段的历史文件既不是"断裂"也不是"完整"——是**无链可校验**。
+
+    把"没有字段"算成断裂 → 历史目录永远全红，永远红和永远绿一样没人看；
+    算成完整 → 篡改者删掉两个字段就逃掉了。所以必须分开说。
+    """
+    from app.audit.wal import chain_report
+
+    legacy = tmp_path / "audit-2026-01-01.jsonl"
+    legacy.write_text(
+        json.dumps({"trace_id": "old", "intent": "coding"}, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    assert chain_report(legacy) == (None, 0)
+
+    # verify_chain 保持 int|None 的旧签名：无链可校验 → None
+    assert verify_chain(legacy) is None
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_prefix_before_the_chain_is_tolerated(tmp_path) -> None:
+    """链**开始之前**的无链行是历史前缀，跳过；链开始后再出现无链行才是断裂。"""
+    from app.audit.wal import chain_report
+
+    wal = _wal(tmp_path)
+    await _append_n(wal, 2)
+    path = _log_file(tmp_path)
+    rows = _rows_of(path)
+    legacy_line = json.dumps({"trace_id": "legacy", "intent": "coding"}, ensure_ascii=False)
+
+    _rewrite_file(path, rows)
+    path.write_text(legacy_line + "\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
+    assert chain_report(path) == (None, 2), "历史前缀不算断裂，带链行数照数"
+
+    # 把无链行插到链**中间** → 那是"有人把字段删了"，必须判断裂
+    path.write_text(
+        "\n".join(
+            [json.dumps(rows[0], ensure_ascii=False), legacy_line,
+             json.dumps(rows[1], ensure_ascii=False)]
+        ) + "\n",
+        encoding="utf-8",
+    )
+    assert chain_report(path)[0] == 2

@@ -36,6 +36,53 @@ def _chain_hash(prev_hash: str, payload: str) -> str:
     return hashlib.sha256(f"{prev_hash}{payload}".encode()).hexdigest()
 
 
+def chain_report(path: str | Path) -> tuple[int | None, int]:
+    """返回 ``(首个断裂行号或 None, 带链行数)``。
+
+    为什么需要第二个数（2026-09-28，跑 CLI 时发现）：链是当天才上线的，**之前**写的
+    审计文件根本没有哈希字段。把"没有字段"一律算作断裂，会让历史目录永远全红——
+    "永远红"和"永远绿"一样没人看；可反过来把"没有字段"算作完整，篡改者只要删掉两个
+    字段就逃掉了。所以要能分开说：
+
+    * ``chained == 0``            → 该文件**无链可校验**（不是"完整"，也不是"被改过"）
+    * ``line is None, chained > 0`` → 带链部分完整
+    * ``line = N``                → 第 N 行起无法证明未被改动
+
+    只允许"无链行"出现在**链开始之前**（历史前缀）；链一旦开始，再出现无链行
+    （字段被删）即判为断裂——那正是删字段逃逸的路径。
+    """
+    p = Path(path)
+    if not p.exists():
+        return None, 0
+    prev_hash = ""
+    chained = 0
+    started = False
+    with p.open("r", encoding="utf-8") as f:
+        for lineno, raw in enumerate(f, start=1):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                record = json.loads(raw)
+            except json.JSONDecodeError:
+                return lineno, chained
+            if not isinstance(record, dict):
+                return lineno, chained
+            if "prev_hash" not in record and "entry_hash" not in record:
+                if started:
+                    return lineno, chained
+                continue
+            started = True
+            chained += 1
+            if record.get("prev_hash", "") != prev_hash:
+                return lineno, chained
+            expected = _chain_hash(prev_hash, _canonical_payload(record))
+            if record.get("entry_hash", "") != expected:
+                return lineno, chained
+            prev_hash = expected
+    return None, chained
+
+
 def verify_chain(path: str | Path) -> int | None:
     """校验一个 WAL 文件的哈希链：返回**第一个**断裂处的行号（1-based），完整则 None。
 
@@ -46,32 +93,13 @@ def verify_chain(path: str | Path) -> int | None:
 
     * **每个日文件是一条独立的链**，跨日不接续，所以首行的 `prev_hash` 是空的。
       进程重启会从当日文件尾恢复链头，因此同一天内是连续的。
-    * 恢复失败（文件损坏 / 读不动）或遇到**史前条目**（本功能之前的旧行没有哈希字段）时，
-      校验会**如实报出**断裂。这是对的：能证明的是"从这条起可证连续"，
-      "无法证明连续"应当被看见，而不是被抹平。
+    * 续链失败（文件损坏 / 读不动）时，新条目以空 `prev_hash` 起链，校验会**如实**报出
+      这个断裂——能证明的是"从这条起可证连续"，"无法证明连续"应当被看见。
 
-    文件不存在时返回 None（没有链可校验）。
+    返回值**不区分**"无链可校验"与"带链部分完整"（两者都是 None）——需要区分时用
+    ``chain_report()``，它额外给出带链行数。文件不存在时返回 None。
     """
-    p = Path(path)
-    if not p.exists():
-        return None
-    prev_hash = ""
-    with p.open("r", encoding="utf-8") as f:
-        for lineno, raw in enumerate(f, start=1):
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                record = json.loads(raw)
-            except json.JSONDecodeError:
-                return lineno
-            if not isinstance(record, dict) or record.get("prev_hash", "") != prev_hash:
-                return lineno
-            expected = _chain_hash(prev_hash, _canonical_payload(record))
-            if record.get("entry_hash", "") != expected:
-                return lineno
-            prev_hash = expected
-    return None
+    return chain_report(path)[0]
 
 
 def _default_log_dir() -> str:
@@ -94,6 +122,25 @@ class LogConfig:
     directory: str = field(default_factory=_default_log_dir)
     retention_days: int = field(default_factory=_default_retention_days)
     file_prefix: str = "audit"
+
+
+def verify_audit_dir(
+    directory: str | Path, *, limit: int | None = None
+) -> dict[str, tuple[int | None, int]]:
+    """逐文件校验目录里的审计链，返回 ``{文件名: (首个断裂行号或 None, 带链行数)}``。
+
+    ``limit`` 只校验**最新的 N 个文件**（按文件名排序取尾部）。这是给"每次请求都会跑"
+    的调用方准备的（``/healthz`` 用 ``limit=1``）：全量校验是
+    ``scripts/verify_audit_chain.py`` 的活，不该挂在请求路径上。
+
+    存在这个函数是因为 ``verify_chain`` 此前**没有任何消费者**——链写出来了却没人跑，
+    "篡改可发现"因此没有回路末端（CONTEXT.md 对闭环的定义：末端有没有人消费产出）。
+    """
+    d = Path(directory)
+    files = sorted(d.glob("audit-*.jsonl"))
+    if limit is not None:
+        files = files[-limit:] if limit > 0 else []
+    return {p.name: chain_report(p) for p in files}
 
 
 @dataclass
@@ -278,4 +325,11 @@ class AsyncWal:
         pass
 
 
-__all__ = ["AsyncWal", "AuditEntry", "LogConfig", "verify_chain"]
+__all__ = [
+    "AsyncWal",
+    "AuditEntry",
+    "LogConfig",
+    "chain_report",
+    "verify_audit_dir",
+    "verify_chain",
+]
