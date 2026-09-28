@@ -72,7 +72,7 @@ uv run python scripts/redteam/run_redteam.py
 每次改动可以跑全部维度并输出 JSON 报告：
 
 ```bash
-uv run python evals/run_evals.py --offline   # 离线：e2e 与一致性走假引擎/标 skipped，CI 用这条
+uv run python evals/run_evals.py --offline   # 离线：e2e 真跑业务链路（真 pipeline + 正则路由 + mock agent，零 token），不跑需要模型的 judge；CI 用这条
 uv run python evals/run_evals.py             # 活体：真实编排 + 真实判分（需 Ollama/pgvector 就绪）
 ```
 

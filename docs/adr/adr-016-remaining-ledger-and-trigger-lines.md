@@ -91,9 +91,16 @@
 **二、三条既有行的触发线复核结论：全部未开。**
 
 - **评测基线对比（delta 门禁）**：触发线"出现会消费评测结论的决策点"——**未开**。
-  但审计同时暴露一个**缺陷**（不是这条被推迟的功能）：`evals/run_evals.py:241-256` 的
+  但审计同时暴露一个**缺陷**（不是这条被推迟的功能）：`evals/run_evals.py` 的
   `_OfflinePipeline` 连 pipeline 都不构造，CI 的 offline smoke **从未跑过业务链路**。
   **缺陷修，功能不立项**——修的是"CI 的 smoke 没冒烟到真链路"，不是"加上 delta 门禁"。
+
+  **✓ 已修（2026-09-28）**：删掉 `_OfflinePipeline` 桩，离线 e2e 改走
+  `app.deps.build_offline_pipeline()`——与线上同源的真 `MoAPipeline`，只把路由换成纯正则、
+  agent 后端交给 `AGENT_LLM`（CI 里即 mock），因此零网络零 token。实测
+  `e2e run=30 skipped=0 success=1.0 intent_match=0.9333 (28/30) judge未跑=30`（此前恒为
+  `run=0 skipped=30`）。离线不判分是**如实记 `judge_skipped`**，不是记 0 分——0 分是
+  "答案差"，没读数不该长得像 0 分（与 judge_failures 同一条口径）。**delta 门禁本身仍未立项。**
 - **`hitl_feedback` join 率**：触发线"有真实流量"——**未开**（`real_cases=0`，没有真实用户，
   这是事实不是欠债）。join **率指标**不立项。
 

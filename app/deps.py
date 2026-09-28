@@ -131,6 +131,40 @@ fsm_pipeline = MoAPipeline(
 )
 
 
+def build_offline_pipeline() -> MoAPipeline:
+    """零网络、零 token 的**真** pipeline，给离线评测用（`evals/run_evals.py --offline`）。
+
+    与 `fsm_pipeline` 只有一处实质区别，为的是**确定性**：路由换成纯正则的
+    `IntentRouter()`。`fsm_pipeline` 的 router 可能带 LLM 分类器（本机配了 Ollama 就会
+    真的去调），而离线评测必须保证不依赖模型。
+
+    其余组件与线上**同源**（同一个 engine / memory / evaluator / retriever / guard /
+    command_mode），所以它跑的是真业务链路：路由 → agent（`AGENT_LLM` 决定后端，CI 里
+    即 `mock`）→ 评估 → 守卫 → HITL → 审计。生产代码里给评测开这么一个工厂，好过让
+    eval 去掏 `deps` 的私有名——那些名字一改，掏的人就静默碎。
+
+    注意它**不**连数据库：调用方（`run_e2e_eval(use_store=False)`）不调
+    `vector_client.start()`，检索腿因此是空的。这没问题——离线 smoke 要验的是"业务
+    链路真的被走过"，检索正确性由知识/检索那批测试与活体评测各自覆盖。
+    """
+    return MoAPipeline(
+        engine=engine,
+        router=IntentRouter(),
+        memory=memory,
+        adapter=adapter,
+        evaluator=evaluator,
+        retriever=_retriever,
+        prompt_registry=_prompt_registry,
+        flag_client=_flag_client,
+        guard_service=guard_service,
+        command_mode=command_mode,
+        card_sender=None,
+        long_term_memory=long_term_memory,
+        budget_guard=budget_guard,
+        context_budget=context_budget,
+    )
+
+
 def _select_orchestrator(fsm: Any) -> Any:
     """Pick the request-path orchestrator from ``ENGINE``.
 

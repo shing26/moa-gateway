@@ -238,53 +238,58 @@ async def run_guard_eval(cases: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-class _OfflinePipeline:
-    """No-network stand-in that exercises the eval harness wiring end to end."""
+# 显式"离线不判分"的哨兵。用哨兵而不是 `judge=None`，是因为 None 已经被
+# `judge or default_judge` 用作"用默认 judge"的意思，两者必须分得开。
+_SKIP_JUDGE = object()
 
-    def __init__(self) -> None:
-        self.calls = 0
 
-    async def run(self, event: MoAEvent, *, channel: str, target: str) -> PipelineResult:
-        self.calls += 1
-        return PipelineResult(
-            trace_id=event.trace_id,
-            state="ROUTED",
-            intent="assistant",
-            text="offline fake output",
-            status="ok",
-        )
+class _JudgeSkipped(Exception):
+    """离线路径没有判分器。
+
+    用它走 `run_e2e_eval` 里**已有的** except 分支，比给那段判分代码再加一层缩进
+    稳妥得多——同时保证"没读数"（离线）与"判分失败"（provider 挂了）分开计数。
+    """
+
+
+async def _no_judge(*_args: Any, **_kwargs: Any) -> float:
+    """离线 e2e 的"判分器"：不判分，也**不假装有分数**——0 分是"答案差"。"""
+    raise _JudgeSkipped()
 
 
 async def run_e2e_offline(
     cases: list[dict[str, Any]],
     pipeline: Any | None = None,
 ) -> dict[str, Any]:
-    runner = pipeline or _OfflinePipeline()
-    total = len(cases)
-    for case in cases:
-        event = MoAEvent(
-            trace_id=f"eval-offline-{case.get('id', 'unknown')}",
-            event=None,
-            session_id=f"eval-offline-{case.get('id', 'unknown')}",
-            text=str(case.get("input", "")),
-            context={},
-        )
-        await runner.run(event, channel="eval", target="eval")
-    return {
-        "total": total,
-        "run": 0,
-        "skipped": total,
-        "avg_judge_score": 0.0,
-        "judge_failures": 0,
-        "avg_latency_ms": 0.0,
-        "avg_cost_usd": 0.0,
-        "success_rate": 0.0,
-        "intent_compared": 0,
-        "intent_matches": 0,
-        "intent_match_rate": 0.0,
-        "intent_mismatches": [],
-        "offline_smoke": total,
-    }
+    """离线 e2e：**真跑业务链路**，零网络、零 token。
+
+    （2026-09-28 修）此前这里是一个连 pipeline 都不构造的桩，跑完把 30 条一律记成
+    skipped——于是 CI 里那趟 "Eval smoke" **从未冒烟到业务链路**，"评测能跑"这件事
+    一直没有机器背书（ADR-016 台账里判为"要修"，见该台账补记）。
+
+    现在走 `app.deps.build_offline_pipeline()`：与线上同源的路由 → agent → 评估 →
+    守卫 → HITL → 审计，只把路由换成纯正则、agent 后端交给 `AGENT_LLM`（CI 里即 `mock`）。
+
+    **不跑 LLM judge**：判分需要模型，那是活体路径（`run_e2e_eval`）的事。这里把 judge
+    如实标成"未跑"（`judge_skipped`），而不是记 0 分——0 分是"答案差"，没读数不该长得像
+    0 分（与 ADR-016 的 `judge_failures` 同一条口径）。
+
+    已知副作用并接受：会把 `eval-offline-` 前缀的条目写进审计日志。
+    `scripts/collect_hitl_feedback.py` 已把 `eval` 前缀当合成流量排除，不污染真实指标。
+    """
+    if pipeline is None:
+        from app.deps import build_offline_pipeline
+
+        pipeline = build_offline_pipeline()
+    result = await run_e2e_eval(
+        cases,
+        pipeline=pipeline,
+        judge=_SKIP_JUDGE,
+        use_store=False,
+        case_prefix="eval-offline",
+    )
+    # 保留旧字段名，报告读者不必跟着改；语义从"30 个桩跑过"变成"30 条真跑过"。
+    result["offline_smoke"] = result["run"]
+    return result
 
 
 async def run_e2e_eval(
@@ -293,6 +298,7 @@ async def run_e2e_eval(
     pipeline: Any | None = None,
     judge: Any | None = None,
     use_store: bool = True,
+    case_prefix: str = "eval",
 ) -> dict[str, Any]:
     from app.deps import init_prompts, vector_client
     from app.deps import pipeline as default_pipeline
@@ -313,21 +319,23 @@ async def run_e2e_eval(
     if use_store:
         await vector_client.start()
     runner = pipeline or default_pipeline
-    judge_fn = judge or default_judge
+    # judge=_SKIP_JUDGE（离线路径）表示**不判分**；judge=None 才是"用默认 judge"。
+    judge_fn = _no_judge if judge is _SKIP_JUDGE else (judge or default_judge)
     scores: list[float] = []
     latencies: list[float] = []
     costs: list[float] = []
     status_matches = 0
     judge_failures = 0
+    judge_skipped = 0
     intent_compared = 0
     intent_matches = 0
     intent_mismatches: list[dict[str, Any]] = []
     try:
         for case in cases:
             event = MoAEvent(
-                trace_id=f"eval-{case.get('id', 'unknown')}",
+                trace_id=f"{case_prefix}-{case.get('id', 'unknown')}",
                 event=Event.MESSAGE_RECEIVED,
-                session_id=f"eval-{case.get('id', 'unknown')}",
+                session_id=f"{case_prefix}-{case.get('id', 'unknown')}",
                 text=str(case.get("input", "")),
                 context={},
             )
@@ -372,6 +380,10 @@ async def run_e2e_eval(
                         result.text,
                         str(case.get("judge_criteria", "")),
                     )
+                except _JudgeSkipped:
+                    # 离线路径没判分器：这是"没读数"，与"判分失败"分开计，
+                    # 更不能混进 avg_judge_score（那会变成一句假的 0 分）。
+                    judge_skipped += 1
                 except Exception as exc:
                     # judge 失败 ≠ 得 0 分：0 分是"模型输出差"，judge 挂了是"量具没读数"。
                     # 剔除出均分并单独计数——既不能让 provider 一死整个评测崩溃、报告都不写
@@ -398,6 +410,8 @@ async def run_e2e_eval(
         "intent_mismatches": intent_mismatches,
         "avg_judge_score": round(sum(scores) / len(scores), 4) if scores else 0.0,
         "judge_failures": judge_failures,
+        # 离线路径不判分：如实记"没读数"，别让 avg_judge_score 的 0.0 被读成"答案差"。
+        "judge_skipped": judge_skipped,
         "avg_latency_ms": round(sum(latencies) / len(latencies), 1) if latencies else 0.0,
         "avg_cost_usd": round(sum(costs) / len(costs), 6) if costs else 0.0,
     }
@@ -460,7 +474,7 @@ def build_summary(report: dict[str, Any]) -> str:
         f"e2e run={e2e['run']} skipped={e2e['skipped']} "
         f"success={metrics.get('task_success_rate')}"
     )
-    # 意图命中率只在真比对过时才显示（离线不跑 e2e，没得比）
+    # 意图命中率只在真比对过时才显示
     if e2e.get("intent_compared"):
         e2e_part += (
             f" intent_match={e2e.get('intent_match_rate')} "
@@ -470,6 +484,9 @@ def build_summary(report: dict[str, Any]) -> str:
     # 不写这个标记的话，"均分 0.8"会让人误以为 30 条全被评过。
     if e2e.get("judge_failures"):
         e2e_part += f" ⚠️ judge_failures={e2e['judge_failures']}"
+    # 离线路径不判分。同样必须写在脸上，否则 avg_judge_score 的 0.0 会被读成"答案差"。
+    if e2e.get("judge_skipped"):
+        e2e_part += f" judge未跑={e2e['judge_skipped']}"
     return (
         f"intent accuracy={intent['accuracy']} ({intent['correct']}/{intent['total']}), "
         f"{consistency_part}, "
@@ -617,7 +634,11 @@ async def run_all(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run agent-gateway evaluation harness")
-    parser.add_argument("--offline", action="store_true", help="skip e2e and mark as skipped")
+    parser.add_argument(
+        "--offline", action="store_true",
+        help="零网络零 token：e2e **真跑业务链路**（真 MoAPipeline + 纯正则路由 + mock agent），"
+             "但不跑需要模型的 LLM judge（记为 judge未跑，而不是 0 分）",
+    )
     parser.add_argument(
         "--engine",
         choices=["fsm", "langgraph"],

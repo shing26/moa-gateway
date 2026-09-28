@@ -68,17 +68,30 @@ class RecordingOfflinePipeline:
 
 
 @pytest.mark.asyncio
-async def test_offline_e2e_exercises_fake_pipeline_and_marks_skipped() -> None:
-    cases = [{"id": "e1"}, {"id": "e2"}]
+async def test_offline_e2e_really_runs_the_cases() -> None:
+    """离线 e2e 必须**真跑**（2026-09-28 修）。
+
+    此前这里断言 ``run=0 / skipped=2``——"跑过了但全记成跳过"。那正是 CI 里那趟
+    "Eval smoke" **从未冒烟到业务链路**的原因（ADR-016 台账判为"要修"）。
+    现在 run/skipped/success 都是真数，judge 如实记"未跑"。
+    """
+    cases = [
+        {"id": "e1", "input": "hi", "expected": {"status": "ok"}},
+        {"id": "e2", "input": "yo", "expected": {"status": "ok"}},
+    ]
     runner = RecordingOfflinePipeline()
 
     report = await run_e2e_offline(cases, pipeline=runner)
 
     assert report["total"] == 2
-    assert report["run"] == 0
-    assert report["skipped"] == 2
+    assert report["run"] == 2, "真跑：不能再记 0"
+    assert report["skipped"] == 0
     assert report["offline_smoke"] == 2
     assert runner.calls == 2
+    # 离线不判分：记"没读数"，但 avg_judge_score 仍是 0.0 —— 两者必须同时可见，
+    # 否则那个 0.0 会被读成"答案差"。
+    assert report["judge_skipped"] == 2
+    assert report["avg_judge_score"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -349,7 +362,11 @@ async def test_run_all_offline(tmp_path: Path) -> None:
 
     assert report["intent"]["accuracy"] == 1.0
     assert report["guard"]["deny_recall"] == 1.0
-    assert report["e2e"]["skipped"] == 1
+    # 离线不判分的行为由 test_offline_e2e_really_runs_the_cases 覆盖（那里用例的
+    # expected 能对上，才会走到判分分支）。这里不重复断言 judge_skipped：判分只在
+    # "状态相符"的分支里发生，而这条用例的状态由真 pipeline 决定。
+    assert report["e2e"]["run"] == 1, "离线 e2e 现在真跑业务链路"
+    assert report["e2e"]["skipped"] == 0
     assert report["e2e"]["offline_smoke"] == 1
     assert report["tool_selection"]["accuracy"] == 1.0
     assert report["agent_metrics"]["tool_selection_accuracy"] == 1.0
