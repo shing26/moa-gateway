@@ -41,6 +41,13 @@ class PolicyEngine:
             hits.extend(policy.detect(text))
         return hits
 
+    def display_name(self, policy_id: str) -> str:
+        """策略的人话名（找不到时退回 id，绝不抛异常——它进的是给用户看的文案）。"""
+        for policy in self._policies:
+            if policy.policy_id == policy_id:
+                return policy.name
+        return policy_id
+
 
 _IPV4_RE = re.compile(r"(?<!\d)(?:\d{1,3}\s*\.\s*){3}\d{1,3}(?!\d)")
 

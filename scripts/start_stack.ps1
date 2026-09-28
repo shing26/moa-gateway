@@ -119,7 +119,10 @@ function Ensure-Gateway {
     $python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
     if (-not (Test-Path $python)) { Write-Host "  [!!] 缺少 .venv\Scripts\python.exe（先 uv sync）"; return $false }
     Write-Host "  [..] 启动网关"
-    Start-Process -FilePath $python -ArgumentList "-m", "app" -WorkingDirectory $RepoRoot -WindowStyle Hidden `
+    # 端口必须真的传给网关（探索性验收 D1，2026-09-29）：此前 -GatewayPort 只改了健康
+    # 探测的目标，`python -m app` 仍按 settings.gateway_port 绑定 —— 端口被别的进程
+    # 占住时，网关 bind 失败退出，健康探测却还在探测那个被占的端口，80 秒后才报未就绪。
+    Start-Process -FilePath $python -ArgumentList "-m", "app", "--port", "$GatewayPort" -WorkingDirectory $RepoRoot -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $LogDir "gateway.out.log") `
         -RedirectStandardError (Join-Path $LogDir "gateway.err.log")
     for ($i = 0; $i -lt 40; $i++) {

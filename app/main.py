@@ -119,3 +119,12 @@ async def _json_decode_exception_handler(request: Request, exc: json.JSONDecodeE
     logger.warning("invalid json body: %s", exc)
     return JSONResponse(status_code=400, content={"error": ErrorCode.INVALID_JSON.value, "message": "请求体不是合法 JSON"})
 
+
+@app.exception_handler(UnicodeDecodeError)
+async def _unicode_decode_exception_handler(request: Request, exc: UnicodeDecodeError):
+    # 非 UTF-8 字节打到 request.json() 抛的是 UnicodeDecodeError（它不是
+    # JSONDecodeError 的子类，父类是 ValueError）——此前裸 500。本质是"请求体
+    # 编码不对"，400 才对（探索性验收 D5，2026-09-29）。
+    logger.warning("invalid body encoding: %s", exc)
+    return JSONResponse(status_code=400, content={"error": ErrorCode.INVALID_JSON.value, "message": "请求体不是合法 UTF-8 编码"})
+

@@ -9,7 +9,8 @@ from app.config import settings
 from app.deps import adapter, engine, logger, pipeline, tracer
 from app.fsm.state_machine import Event as FsmEvent
 from app.limit_providers.rate_limiter import rate_limiter
-from app.middleware.auth import approver_gate_error
+from app.channels.feishu_signature import verify_verification_token
+from app.middleware.auth import approver_gate_error, insecure_mode_enabled
 from app.middleware.request_logger import bind_trace, log_request
 from app.models.errors import ErrorCode
 from app.models.events import MoAEvent, PlatformEvent, new_trace_id
@@ -24,6 +25,17 @@ async def webhook_callback(request: Request) -> JSONResponse:
         logger.warning("unparseable card callback: %s", body)
         return JSONResponse({"error": ErrorCode.INVALID_CALLBACK_PAYLOAD.value}, status_code=400)
     session_id, trace_id, action = parsed
+    # 与 /feishu/event 同一道门（探索性验收 D3，2026-09-29）。此前这条路径的 token 校验
+    # 只有"带了 X-Lark-Token 就必须对"（auth.py 中间件），**没带直接放行** ——公网可达时，
+    # 知道 session/trace 的人可以伪造审批回调。两条回调路径必须同一姿态：配了 token
+    # 就必须对；没配只在显式 insecure 时放行（与审批人闸门同一三态）。
+    if not verify_verification_token(
+        body,
+        settings.feishu_verification_token,
+        allow_insecure=insecure_mode_enabled(settings.gateway_allow_insecure),
+    ):
+        logger.warning("card callback rejected by verification token check")
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
     logger.info("card callback session=%s trace=%s action=%s", session_id, trace_id, action)
     # 卡片回调的审计与最初触发审批的请求共享同一 trace，决策可回流可复盘
     bind_trace(trace_id or session_id)
@@ -38,7 +50,17 @@ async def webhook_callback(request: Request) -> JSONResponse:
     # 我最初把白名单校验插在 pop 之后，测试当场指出记录已被消耗。
     if action not in ("approve", "reject"):
         return JSONResponse({"error": f"unknown_action:{action}"}, status_code=400)
-    operator_id = str(body.get("open_id") or body.get("user_id") or "")
+    # 点击者：v1 在顶层 open_id/user_id；v2 卡片回调在 event.operator（探索性验收 D3：
+    # webhook 路径此前只读顶层，白名单模式下 v2 流量的**真**审批人会被 403）。
+    _event = body.get("event") if isinstance(body.get("event"), dict) else {}
+    _operator = _event.get("operator") if isinstance(_event.get("operator"), dict) else {}
+    operator_id = str(
+        body.get("open_id")
+        or body.get("user_id")
+        or _operator.get("open_id")
+        or _operator.get("user_id")
+        or ""
+    )
     gate_error = approver_gate_error(
         operator_id,
         settings.hitl_approver_ids,

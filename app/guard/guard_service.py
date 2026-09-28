@@ -103,16 +103,24 @@ class GuardService:
             role = resolve_role({"role": settings.default_role})
         hits = policy_engine.check(text)
         policy_ids = tuple(hit.policy_id for hit in hits)
+        # 同一策略可能因多条正则各命中一次，policy_ids 会重复。给用户/审批人看的文案
+        # 按**策略**去重并带上人话名——此前审批卡片上是
+        # "policy.security.secret_leak, policy.security.secret_leak, policy.security.secret_leak"
+        # 这种内部 ID 重复三遍（探索性验收 D10，2026-09-29）。
+        display = "、".join(
+            f"{policy_engine.display_name(pid)}（{pid}）"
+            for pid in dict.fromkeys(policy_ids)
+        )
         if any(hit.severity == "deny" for hit in hits):
             return GuardVerdict(
                 action=GuardianAction.DENY,
-                reason=f"policy deny: {', '.join(policy_ids)}",
+                reason=f"policy deny: {display}",
                 role=role,
             ), policy_ids
         if any(hit.severity == "review" for hit in hits):
             return GuardVerdict(
                 action=GuardianAction.REVIEW,
-                reason=f"policy review: {', '.join(policy_ids)}",
+                reason=f"policy review: {display}",
                 role=role,
             ), policy_ids
         return GuardVerdict(action=GuardianAction.ALLOW, reason="ok", role=role), ()
