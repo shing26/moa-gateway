@@ -1,4 +1,5 @@
 ﻿from __future__ import annotations
+import asyncio
 import json
 import logging
 import time
@@ -308,8 +309,29 @@ class Engine:
         self.adapter = adapter or ResponseAdapter()
         self.session_store = session_store or SessionStore()
         self._session_states: dict[str, StateContext] = {}
+        # 每会话一把锁，见 handle_event 的说明（探索性验收 D4，2026-09-29）。
+        self._session_locks: dict[str, asyncio.Lock] = {}
 
     async def handle_event(self, event: MoAEvent) -> SessionState:
+        """每会话串行化（探索性验收 D4，2026-09-29）。
+
+        这里原本是"读 `_session_states` → 算下一状态 → 写回"的读改写，没有互斥：
+        同一会话两条消息并发时，两边读到同一个旧状态，一边算出非法迁移
+        （500 `invalid_state_transition`），另一边把对方的写入覆盖掉（丢更新）。
+        实测 3 并发挂 1。
+
+        锁**只护住会话状态这一段**，跨会话完全并行；同一会话内后到的消息等前一条
+        处理完再走——这是"先到先处理"的语义，不是排队丢弃。
+
+        已知边界：锁字典**不随会话回收**（reset_session 也不摘锁——摘掉正在用的锁会让
+        后来的协程新建一把，等于两个协程同时进临界区）。一次会话一个 Lock 对象，
+        量级可接受；真到长跑多会话再引入 LRU，此处如实记下而不是假装没有。
+        """
+        lock = self._session_locks.setdefault(event.session_id, asyncio.Lock())
+        async with lock:
+            return await self._handle_event_locked(event)
+
+    async def _handle_event_locked(self, event: MoAEvent) -> SessionState:
         previous = self._session_states.get(event.session_id)
         metadata = dict(previous.metadata) if previous else dict(event.context)
         ctx = StateContext(

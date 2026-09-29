@@ -160,12 +160,37 @@ def test_webhook_cancel_returns_reset() -> None:
 
 
 def test_webhook_debug_returns_suspended() -> None:
+    # 载荷改成**精确指令**（2026-09-29，探索性验收 D2）：此前 _map_event 用子串匹配，
+    # 所以 "debug 错误" 这种词组也能触发。现在只有整条消息就是指令才算——本用例要验的
+    # 是"敏感挂起这条路走得通"，不该依赖模糊匹配。
     with app_client(app) as client:
         response = client.post(
             "/webhook/feishu",
-            json={"session_id": "debug-sess", "chat_id": "debug-chat", "text": "debug 错误"},
+            json={"session_id": "debug-sess", "chat_id": "debug-chat", "text": "debug"},
         )
     assert response.status_code == 200
     body = response.json()
     assert body.get("status") == "suspended"
     assert body.get("state") == "SUSPENDED"
+
+
+def test_webhook_sentence_containing_command_words_is_not_a_command() -> None:
+    """句子里出现"取消/报错"不该被当成指令（探索性验收 D2，2026-09-29）。
+
+    此前是子串匹配："怎么取消订阅" 会 RESET 清空会话、"看看这个报错" 会敏感挂起——
+    而挂起没有审批出口，用户只能再发一次 reset 才能继续。指令与对话必须分得开。
+    """
+    with app_client(app) as client:
+        for text, session in (
+            ("怎么取消订阅", "d2-cancel"),
+            ("帮我看看这个报错", "d2-debug"),
+        ):
+            response = client.post(
+                "/webhook/feishu",
+                json={"session_id": session, "chat_id": session, "text": text},
+            )
+            assert response.status_code == 200
+            body = response.json()
+            assert body.get("status") not in ("reset", "suspended"), (
+                f"{text!r} 被当成了指令（status={body.get('status')}）"
+            )

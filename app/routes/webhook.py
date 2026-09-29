@@ -195,10 +195,34 @@ def _decode_platform(channel: str, body: dict[str, Any]) -> PlatformEvent:
         payload=body,
     )
 
+# 指令词表：**整条消息**必须就是其中之一才算指令（含 `/` 前缀写法）。
+# 中文用 chr() 拼、与文件既有写法一致（避开编码问题）。
+_RESET_COMMANDS = frozenset(
+    {
+        "/reset", "/cancel", "/clear", "reset", "cancel", "clear",
+        chr(21462) + chr(28040),  # 取消
+        chr(37325) + chr(32622),  # 重置
+    }
+)
+_SENSITIVE_COMMANDS = frozenset(
+    {
+        "/debug", "debug",
+        chr(35843) + chr(35797),  # 调试
+        chr(25253) + chr(38169),  # 报错
+    }
+)
+
+
 def _map_event(platform_event: PlatformEvent):
-    text = (platform_event.payload.get("text") or "").lower()
-    if any(k in text for k in ("cancel", chr(21462)+chr(28040), "reset", chr(37325)+chr(32622))):
+    """把平台消息映射成 FSM 事件。**只认"整条消息就是指令"**（全等，大小写不敏感）。
+
+    此前是子串匹配（探索性验收 D2，2026-09-29）："怎么**取消**订阅" 会被当成重置指令
+    清空会话，"看看这个**报错**" 会被判敏感挂起——而挂起没有审批出口，用户只能再发一次
+    reset 才能继续。指令与对话必须分得开：一句正常的话里出现"取消"不该丢掉上下文。
+    """
+    text = (platform_event.payload.get("text") or "").strip().lower()
+    if text in _RESET_COMMANDS:
         return FsmEvent.RESET
-    if any(k in text for k in ("debug", chr(38169)+chr(35823), chr(25253)+chr(38169))):
+    if text in _SENSITIVE_COMMANDS:
         return FsmEvent.SENSITIVE_DETECTED
     return FsmEvent.MESSAGE_RECEIVED
