@@ -170,6 +170,8 @@ async def _process_hitl_card(
 
 @router.post("/feishu/event")
 async def feishu_event(request: Request):
+    # 卡片回调有 3 秒响应窗口，处理耗时必须可观测（否则只能猜是不是网络）。
+    started = time.monotonic()
     try:
         body = await request.json()
     except Exception:
@@ -201,7 +203,12 @@ async def feishu_event(request: Request):
     header = body.get("header", {}) if isinstance(body.get("header"), dict) else {}
     event_id = header.get("event_id", body.get("event_id", ""))
     if event_id and not _dedup(event_id):
-        return JSONResponse({"msg":"duplicate"})
+        # 卡片回调必须回**空对象**（2026-09-29 修）：返回 {"msg": ...} 会被客户端当成
+        # 卡片更新去解析、解析失败即报 200341。而重投很容易走到这里——第一次响应慢、
+        # 平台重投同一条，第二投就命中本分支。此处事件类型还没解析，但对消息类事件
+        # 回 {} 同样无害（客户端不看 body）。
+        logger.info("feishu_event duplicate event_id=%s（重投，已忽略）", event_id)
+        return JSONResponse({})
 
     parsed = parse_feishu_event(body)
     logger.info("feishu_event_parsed event_type=%s body=%s", parsed["event_type"], json.dumps(body, ensure_ascii=False))
@@ -226,8 +233,17 @@ async def feishu_event(request: Request):
             )
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)
+        else:
+            logger.warning("card_action 未知动作，已忽略 action=%r trace=%s", action, trace_id)
         # 卡片回调响应契约：HTTP 200 + 空对象即"已受理"；返回业务结构会被
         # 客户端当作卡片更新解析失败，同样触发 200341。
+        # elapsed 是**服务端**受理耗时。飞书窗口是 3000ms——若这里只有几十毫秒而客户端
+        # 仍报 200341，那就是网络往返（Funnel 多一跳）吃掉了窗口，不是服务端卡住；
+        # 这条日志就是为了把这两种情况分开，而不是继续猜。
+        logger.info(
+            "card_action 已受理 action=%s elapsed_ms=%.1f（飞书窗口 3000ms）",
+            action, (time.monotonic() - started) * 1000,
+        )
         return JSONResponse({})
     if parsed["event_type"] not in ("event_callback", "im.message.receive_v1"):
         return JSONResponse({"msg":"ignored"})

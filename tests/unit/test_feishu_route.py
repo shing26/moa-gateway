@@ -49,6 +49,36 @@ def _clear_seen():
     feishu_route._seen_events.clear()
 
 
+def test_card_action_retry_is_answered_with_empty_object(monkeypatch) -> None:
+    """卡片回调一律回**空对象**，重投也不例外（2026-09-29 修 200341）。
+
+    此前重投命中 dedup 分支、返回 `{"msg": "duplicate"}` —— 而卡片回调返回业务结构会被
+    客户端当成"卡片更新"去解析、解析失败即报 200341。重投恰恰是"第一次响应偏慢"的
+    后果，所以这条路径在真实点击里很容易被走到（本机实测就是先看到 200341）。
+    """
+    _clear_seen()
+    adapter = FakeFeishuAdapter()
+    monkeypatch.setattr(feishu_route, "get_adapter", _fake_get_adapter(adapter))
+
+    body = {
+        "schema": "2.0",
+        "header": {"event_type": "card.action.trigger", "event_id": "card-retry-1"},
+        "event": {
+            "operator": {"open_id": "ou_someone"},
+            "action": {"value": {"action": "approve", "trace_id": "t-retry"}},
+            "context": {"open_chat_id": "oc-x", "open_message_id": "om-x"},
+        },
+    }
+    with TestClient(app) as client:
+        first = client.post("/feishu/event", json=body)
+        second = client.post("/feishu/event", json=body)
+
+    assert first.status_code == 200
+    assert first.json() == {}, "受理必须回空对象"
+    assert second.status_code == 200
+    assert second.json() == {}, "重投也必须是空对象，否则客户端报 200341"
+
+
 def test_encrypted_event_is_rejected_loudly() -> None:
     """加密模式未实现，收到加密体必须**明确报错**而不是静默丢弃。
 
