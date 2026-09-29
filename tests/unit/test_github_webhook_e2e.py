@@ -189,8 +189,10 @@ def test_webhook_sentence_containing_command_words_is_not_a_command() -> None:
                 "/webhook/feishu",
                 json={"session_id": session, "chat_id": session, "text": text},
             )
-            assert response.status_code == 200
             body = response.json()
+            # **只看 status 字段，不看 HTTP 码**：这一句最终是正常回答（本机配了 LLM）
+            # 还是 agent 失败（CI 里没有凭据 → 路由返 500 error）与本用例无关。
+            # 关键判据是"它没被当成指令"。
             assert body.get("status") not in ("reset", "suspended"), (
                 f"{text!r} 被当成了指令（status={body.get('status')}）"
             )
