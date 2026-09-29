@@ -44,7 +44,11 @@ for name in ("GATEWAY_PORT", "APP_PORT"):
 # 置空 = 未配置；再显式开 insecure，让这两条路由在测试里可达（策略见
 # app/middleware/auth.py，与 /webhook、/dashboard 共用同一判定）。
 # 验签本身的行为由 test_feishu_signature.py 直接断言，不走 env。
-for name in ("FEISHU_VERIFICATION_TOKEN", "FEISHU_ENCRYPT_KEY"):
+# 同理，HITL_APPROVER_IDS 也必须置空（2026-09-29 补）：开发者按文档配好自己的审批人
+# 白名单之后，本地跑测试会把白名单带进测试进程 —— 那些**不带 operator**（或 operator
+# 不在名单里）的回调用例就全部 403。本次就是这么红的：5 条 /webhook/callback 用例从
+# 200 变 403，而代码没错，是环境渗进来了。需要白名单的用例各自 monkeypatch 显式设。
+for name in ("FEISHU_VERIFICATION_TOKEN", "FEISHU_ENCRYPT_KEY", "HITL_APPROVER_IDS"):
     os.environ[name] = ""
 os.environ["GATEWAY_ALLOW_INSECURE"] = "1"
 
