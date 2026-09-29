@@ -255,6 +255,56 @@ async def test_verify_audit_dir_limit_checks_only_the_newest(tmp_path) -> None:
     assert verify_audit_dir(tmp_path, limit=0) == {}
 
 
+# ── 多写者交错（2026-09-29：这是我启动服务时自己撞出来的真问题）──────────────
+
+
+@pytest.mark.asyncio
+async def test_two_writers_interleaved_do_not_report_a_break(tmp_path, monkeypatch) -> None:
+    """多进程写同一份审计文件，**不该**被当成篡改。
+
+    实测现场：8082 与 8083 两个实例写同一个 `logs/`，`audit-2026-09-29.jsonl:25`
+    报"断裂"。原因不是有人改文件，而是链此前是"整份文件一条"、而两个进程各自从
+    文件尾恢复链头后交错写入。现在链是**每写者一条**，交错互不干扰。
+    """
+    import app.audit.wal as wal_module
+    from app.audit.wal import chain_report
+
+    monkeypatch.setattr(wal_module, "_WRITER_ID", "host:111")
+    first = _wal(tmp_path)
+    await _append_n(first, 2)
+
+    monkeypatch.setattr(wal_module, "_WRITER_ID", "host:222")
+    second = _wal(tmp_path)
+    await _append_n(second, 2)
+
+    # 写者 111 隔了两行之后再来一条：它要接的是**自己**上一条，不是文件的最后一条。
+    monkeypatch.setattr(wal_module, "_WRITER_ID", "host:111")
+    await first.append(_entry(9))
+
+    rows = _rows(tmp_path)
+    assert [r["writer"] for r in rows] == [
+        "host:111", "host:111", "host:222", "host:222", "host:111",
+    ]
+    assert chain_report(_log_file(tmp_path)) == (None, 5), "交错不算断裂"
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_row_is_still_a_break_with_multiple_writers(tmp_path, monkeypatch) -> None:
+    """宽容交错不等于放过篡改：抽掉某写者的一行，它的链立刻对不上。"""
+    import app.audit.wal as wal_module
+    from app.audit.wal import chain_report
+
+    monkeypatch.setattr(wal_module, "_WRITER_ID", "host:111")
+    wal = _wal(tmp_path)
+    await _append_n(wal, 3)
+
+    rows = _rows(tmp_path)
+    del rows[1]
+    _rewrite(tmp_path, rows)
+
+    assert chain_report(_log_file(tmp_path))[0] == 2
+
+
 # ── 链上线**之前**的历史文件（跑 CLI 时发现的真问题）────────────────────────
 
 

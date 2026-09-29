@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import socket
 import threading
 import time
 from collections import deque
@@ -21,6 +22,13 @@ _HASH_FIELDS = ("prev_hash", "entry_hash")
 #: 恢复链头时向后读的字节数——只需要最后一行，不必读整个文件。
 _RESUME_TAIL_BYTES = 64 * 1024
 
+#: 本进程的写者标识。审计链是**每写者一条**（见 ``chain_report``）：同一份日志文件
+#: 可能被多个进程同时写（多实例、评测进程、手工启动的第二个实例），如果链是"整份
+#: 文件一条"，交错写入就会让校验把每一处交错都报成"被改过"——2026-09-29 实测：
+#: 8082 与 8083 两个实例写同一目录后 `audit-2026-09-29.jsonl:25` 报断裂。
+#: 带上写者标识之后，每个写者各自成链：交错不再误报，篡改照样测得出来。
+_WRITER_ID = f"{socket.gethostname()}:{os.getpid()}"
+
 
 def _canonical_payload(record: dict[str, Any]) -> str:
     """把一条审计记录压成确定性字符串，**只用于算哈希**。
@@ -37,7 +45,7 @@ def _chain_hash(prev_hash: str, payload: str) -> str:
 
 
 def chain_report(path: str | Path) -> tuple[int | None, int]:
-    """返回 ``(首个断裂行号或 None, 带链行数)``。
+    """返回 ``(首个断裂行号或 None, 带链行数)``。**链是每写者一条**。
 
     为什么需要第二个数（2026-09-28，跑 CLI 时发现）：链是当天才上线的，**之前**写的
     审计文件根本没有哈希字段。把"没有字段"一律算作断裂，会让历史目录永远全红——
@@ -50,11 +58,19 @@ def chain_report(path: str | Path) -> tuple[int | None, int]:
 
     只允许"无链行"出现在**链开始之前**（历史前缀）；链一旦开始，再出现无链行
     （字段被删）即判为断裂——那正是删字段逃逸的路径。
+
+    **为什么按写者分组（2026-09-29 修正）**：同一份日志文件会被多个进程同时写
+    （多实例 / 评测进程 / 手工起的第二个实例）。此前链是"整份文件一条"，于是每一处
+    交错都被报成断裂——实测 8082 与 8083 两个实例写同一目录后第 25 行即报错，
+    **而那不是篡改**。现在每个写者各自成链：交错的写者互不干扰，而**删行/改字段/
+    改 prev_hash 照样测得出来**（删掉某写者的一行 → 该写者下一行的 prev_hash 对不上；
+    删掉 writer 字段 → 它自成一组、首行 prev_hash 非空 → 断裂）。
     """
     p = Path(path)
     if not p.exists():
         return None, 0
-    prev_hash = ""
+    # 每个写者各自维护链头；缺失 writer 的老行归入 "" 这一组。
+    heads: dict[str, str] = {}
     chained = 0
     started = False
     with p.open("r", encoding="utf-8") as f:
@@ -74,12 +90,14 @@ def chain_report(path: str | Path) -> tuple[int | None, int]:
                 continue
             started = True
             chained += 1
+            writer = str(record.get("writer", ""))
+            prev_hash = heads.get(writer, "")
             if record.get("prev_hash", "") != prev_hash:
                 return lineno, chained
             expected = _chain_hash(prev_hash, _canonical_payload(record))
             if record.get("entry_hash", "") != expected:
                 return lineno, chained
-            prev_hash = expected
+            heads[writer] = expected
     return None, chained
 
 
@@ -214,6 +232,9 @@ class AsyncWal:
         """
         record = entry.to_audit_dict()
         record.pop("agent_output", None)
+        # 写者标识进哈希覆盖范围：链是每写者一条，标识本身就是被保护的内容
+        # （删掉它就会自成一组，校验时首行 prev_hash 非空 → 照样报断裂）。
+        record["writer"] = _WRITER_ID
         record["prev_hash"] = prev_hash
         record["entry_hash"] = ""
         record["entry_hash"] = _chain_hash(prev_hash, _canonical_payload(record))
@@ -245,10 +266,16 @@ class AsyncWal:
             )
 
     def _resume_chain(self, path: str) -> str:
-        """从当日文件尾恢复链头，使进程重启后链仍连续。
+        """恢复**本写者**的链头（不是整份文件的链头）。
 
-        失败时返回空串——新条目因此以空 ``prev_hash`` 起链，``verify_chain`` 会**如实**
-        把它报成断裂。"无法证明与之前连续"应当可见，而不是悄悄补一个看似连续的链头。
+        此前取的是文件的最后一行——多进程写同一文件时会接到**别的写者**的链头上，
+        于是本写者的链条从第一条就对不上（2026-09-29 实测的第 25 行"断裂"就是这么来的，
+        实际是 8082 与 8083 两个实例交错写入）。链既然是每写者一条，恢复也必须按写者找。
+
+        只在文件尾窗口（``_RESUME_TAIL_BYTES``）内找：若本写者上次写入落在窗口之外
+        （今天被别人写了几十万行），恢复不到 → 以空链头起链，校验会如实报出那一处
+        断裂。宁可报"无法证明连续"，也不假装连续。
+        失败（文件不存在 / 读不动）时同样返回空串。
         """
         p = Path(path)
         if not p.exists():
@@ -259,12 +286,19 @@ class AsyncWal:
                 if size > _RESUME_TAIL_BYTES:
                     f.seek(size - _RESUME_TAIL_BYTES)
                 tail = f.read().decode("utf-8", errors="replace")
-            last = next(ln for ln in reversed(tail.splitlines()) if ln.strip())
-            record = json.loads(last)
-            return str(record.get("entry_hash", "") or "")
-        except (OSError, ValueError, StopIteration, json.JSONDecodeError) as exc:
+            # 从后往前找**自己**那条：可能是几行前，也可能今天还没写过。
+            for line in reversed(tail.splitlines()):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue  # 从中间 seek 时首行可能是半截
+                if isinstance(record, dict) and str(record.get("writer", "")) == _WRITER_ID:
+                    return str(record.get("entry_hash", "") or "")
+        except OSError as exc:
             logger.warning("wal chain resume failed, starting a new chain: %s", exc)
-            return ""
+        return ""
 
     async def replay(self, batch_size: int = 100) -> list[AuditEntry]:
         with self._lock:
