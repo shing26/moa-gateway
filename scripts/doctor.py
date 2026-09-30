@@ -245,7 +245,10 @@ def check_llm(env: Mapping[str, str]) -> CheckResult:
                 f"{base_url}: {type(exc).__name__}: {exc}",
                 "Start Ollama with `ollama serve`, then verify `ollama list`.",
             )
-        if model not in names:
+        # ollama list 显示的是**带 tag** 的名字（moa-qwen:latest），而配置里常写裸名
+        # （moa-qwen）。两侧都要归一化，否则会假报 "not installed"、还提示一个根本
+        # 不可行的 `ollama pull`（探索性验收 D9，2026-09-29 实测：模型明明装着）。
+        if model not in names and f"{model}:latest" not in names:
             return CheckResult(
                 "llm",
                 "fail",

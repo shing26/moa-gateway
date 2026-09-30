@@ -28,7 +28,7 @@
   说明：stop 只停网关与容器，**不停 Ollama**（它常被本机其他工具共用）。
 #>
 param(
-    [ValidateSet("start", "stop", "status")]
+    [ValidateSet("start", "stop", "status", "restart")]
     [string]$Action = "start",
     [int]$GatewayPort = 8081,
     [int]$RedisPort = 6380,
@@ -57,10 +57,35 @@ function Test-Http([string]$Url) {
     } catch { return $false }
 }
 
-function Get-GatewayPid {
-    $line = (netstat -ano | Select-String ":$GatewayPort\s.*LISTENING" | Select-Object -First 1)
+function Get-GatewayPid([int]$Port) {
+    $line = (netstat -ano | Select-String ":$Port\s.*LISTENING" | Select-Object -First 1)
     if (-not $line) { return $null }
     return ($line.Line -split '\s+')[-1]
+}
+
+function Test-IsOurGateway([int]$Port) {
+    # 只认 /healthz 的**字段形状**：对 /health 返回 200 的服务很多（包括占着 8081 的
+    # 那个），只有本应用才带 engine/hitl/audit_chain。探索性验收 D1 的教训：
+    # 端口被别的服务占住时，"探到 200" 会被误判成"网关已在运行"。
+    try {
+        $res = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/healthz" -TimeoutSec 4 -UseBasicParsing
+        return ($res.StatusCode -eq 200 -and $res.Content -match '"engine"')
+    } catch { return $false }
+}
+
+function Stop-GatewayProcess([int]$Port) {
+    # 必须**先确认是本应用**再动手：-Action stop 此前默认端口是 8081，而那正是用户
+    # 另一个项目的端口——会把别人的进程 taskkill 掉（2026-09-29 发现）。
+    # 顺带修一个潜在 bug：原实现把结果赋给 $pid，那是 PowerShell 的只读自动变量。
+    $gwPid = Get-GatewayPid $Port
+    if (-not $gwPid) { Write-Host "  [ok] 网关未在运行"; return $true }
+    if (-not (Test-IsOurGateway $Port)) {
+        Write-Host "  [!!] 端口 $Port 上不是本网关（/healthz 缺本应用字段）——拒绝杀进程，那可能是你的其他服务"
+        return $false
+    }
+    taskkill /F /PID $gwPid | Out-Null
+    Write-Host "  [ok] 网关已停止 (pid $gwPid)"
+    return $true
 }
 
 function Ensure-Containers {
@@ -113,8 +138,16 @@ function Ensure-Ollama {
 }
 
 function Ensure-Gateway {
-    if (Test-Http "http://127.0.0.1:$GatewayPort/health") {
-        Write-Host "  [ok] 网关已在运行 ($GatewayPort)"; return $true
+    if (Test-IsOurGateway $GatewayPort) {
+        # "已在运行" ≠ "会应用你刚改的配置"：settings 在进程启动时读一次。
+        # 2026-09-29 实测：改了 .env 之后连跑三次 start，/healthz 三次都不变，
+        # 用户以为配置没生效。所以这里必须把这句话说出口。
+        Write-Host "  [ok] 网关已在运行 ($GatewayPort) —— 改过 .env/代码后要应用新配置请用 -Action restart"
+        return $true
+    }
+    if (Test-Port $GatewayPort) {
+        Write-Host "  [!!] 端口 $GatewayPort 被别的进程占用（/healthz 不是本应用的形状）。换 -GatewayPort 或自行停掉它——本脚本不会替你杀别人的进程"
+        return $false
     }
     $python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
     if (-not (Test-Path $python)) { Write-Host "  [!!] 缺少 .venv\Scripts\python.exe（先 uv sync）"; return $false }
@@ -144,13 +177,21 @@ switch ($Action) {
         Write-Host ("  gateway {0}: {1}" -f $GatewayPort, $(if (Test-Http "http://127.0.0.1:$GatewayPort/health") { "UP" } else { "DOWN" }))
     }
     "stop" {
-        $pid = Get-GatewayPid
-        if ($pid) { taskkill /F /PID $pid | Out-Null; Write-Host "  [ok] 网关已停止 (pid $pid)" }
-        else { Write-Host "  [ok] 网关未在运行" }
+        if (-not (Stop-GatewayProcess $GatewayPort)) { exit 1 }
         Push-Location $RepoRoot
         docker compose -f docker-compose.dev.yml stop redis postgres | Out-Null
         Pop-Location
         Write-Host "  [ok] 容器已停止（Ollama 保持运行，常被其他工具共用）"
+    }
+    "restart" {
+        if (-not (Stop-GatewayProcess $GatewayPort)) { exit 1 }
+        Write-Host "  [..] 重新拉起依赖与网关"
+        $ok = $true
+        $ok = (Ensure-Containers) -and $ok
+        $ok = (Ensure-Ollama) -and $ok
+        $ok = (Ensure-Gateway) -and $ok
+        if ($ok) { Write-Host "重启完成：http://127.0.0.1:$GatewayPort/healthz" }
+        else { Write-Host "有组件未就绪，见上面标记 [!!] 的行"; exit 1 }
     }
     "start" {
         Write-Host "启动 moa-gateway 依赖栈："
