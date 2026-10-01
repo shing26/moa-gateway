@@ -9,7 +9,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlparse
-from urllib.request import urlopen
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -392,6 +393,67 @@ def check_embeddings(env: Mapping[str, str]) -> CheckResult:
     return CheckResult("embeddings", "pass", model)
 
 
+def check_github(env: Mapping[str, str]) -> CheckResult:
+    """GitHub 侧能不能真用：离线通道 / 缺凭据 / 凭据无效 三种情况分开报。
+
+    **为什么必须探活而不是只看"有没有配"**（2026-10-02）：
+    ``.env`` 里 ``GITHUB_TOKEN=`` 从空变成一串字符时，PR 审查链路会立刻"看起来
+    配好了"——webhook 不再降级、任务照常入队。但过期或复制不全的 token 是在
+    worker 调 GitHub API 时才 401 的，那时投递方早就收到 202 走了，排查起来要跨
+    三个进程。
+
+    这里只探 ``/user``（一次 GET，不碰任何仓库），所以能在**部署前**就发现
+    "token 形态对但 GitHub 拒收"，并直接给出下一步。
+    """
+    fixture = (env.get("CODE_REVIEW_GITHUB_FIXTURE") or "").strip()
+    if fixture:
+        return CheckResult(
+            "github",
+            "pass",
+            f"离线 fixture 通道：{fixture}（评论不会到真实 PR）",
+        )
+
+    token = (env.get("GITHUB_TOKEN") or "").strip()
+    if not token:
+        return CheckResult(
+            "github",
+            "warn",
+            "GITHUB_TOKEN 未配置，PR 审查链路会以 degraded 受理",
+            "需要审查真实 PR 时设置 GITHUB_TOKEN；只想跑 golden path 可用 "
+            "CODE_REVIEW_GITHUB_FIXTURE 走离线通道。",
+        )
+
+    secret = (env.get("GITHUB_WEBHOOK_SECRET") or "").strip()
+    suffix = "" if secret else "；另：GITHUB_WEBHOOK_SECRET 未设，webhook 会 fail-closed 拒收"
+
+    request = Request(  # noqa: S310 - 固定 https 目标
+        "https://api.github.com/user",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "moa-doctor",
+        },
+    )
+    try:
+        with urlopen(request, timeout=10) as response:  # noqa: S310
+            login = json.loads(response.read().decode("utf-8")).get("login", "?")
+    except HTTPError as exc:
+        return CheckResult(
+            "github",
+            "fail",
+            f"token 形态正常但 GitHub 拒收（HTTP {exc.code}）{suffix}",
+            "token 多半已过期 / 复制不全 / 被撤销。重新生成后整段替换 .env 那一行，"
+            "末尾不要留空格。",
+        )
+    except Exception as exc:  # noqa: BLE001 - 探活失败不该让 doctor 崩掉
+        return CheckResult(
+            "github",
+            "warn",
+            f"无法探测 GitHub（{type(exc).__name__}），跳过{suffix}",
+        )
+    return CheckResult("github", "pass", f"token 可用，身份 {login}{suffix}")
+
+
 def run_checks(root: Path = PROJECT_ROOT) -> list[CheckResult]:
     try:
         from dotenv import load_dotenv
@@ -410,6 +472,7 @@ def run_checks(root: Path = PROJECT_ROOT) -> list[CheckResult]:
         check_llm(env),
         check_vectordb(env),
         check_embeddings(env),
+        check_github(env),
     ]
 
 

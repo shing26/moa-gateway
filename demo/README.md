@@ -57,6 +57,48 @@ uv run python -m app.cli demo approve "shing26/moa-gateway#42@demo00000000000000
    （`request_approval` / `posting` / `complete`）。原先 `publish_review` 推进
    `done` 时**没写审计**，于是审计链里"写回成功"与"在 posting 被杀掉"长得一模一样
    ——已补。
-2. **`demo review` 的默认 sha 按 (repo, pr) 稳定推导**，所以同一条命令连跑两次
-   能直接验幂等。想跑新任务就换 PR 号，或 `--sha`。
+2. **`demo review` 会取真实的 head sha**（离线通道取自 fixture，真 GitHub 模式向
+   GitHub 现取）。曾经这里是"按 (repo, pr) 推导一个假 sha"，那个值只在离线通道下
+   成立：接了真 token 之后，webhook 按假 sha 建任务行、worker 从 GitHub 取回真 sha
+   再把结论写到真 sha 那一行——库里多出一行，`demo status` 盯着的那行永远停在
+   queued。现取真实 sha 同时保住了幂等演示：没有新 commit 时 sha 不变。
 
+## 三件"量出来才知道"的事
+
+### 1. 投递耗时里混进了 `import httpx`（~640ms）
+
+`demo review` 打印的耗时一度是 625~763ms，而用直连客户端打同一个端点是 **19ms**。
+差额几乎全在 `import httpx` ——它写在 `_post_webhook` 内部，而整个函数包在计时
+区间里。所以那个数字量的是 Python 的 import，不是网关。
+
+修法是把 import 提到计时之前。修完是 153ms。
+
+**这条值得单独记，是因为它正是"把阈值从 1000 挪到 1500 就能通过"的最坏形态**：
+阈值本来卡在 968ms，看上去只差一点点，而真正的问题是量的东西不对。发现它的办法
+不是调阈值，是拿另一个客户端打同一个端点对一下。
+
+另外脚本显式跑一次 schema 迁移并把网关的 `CODE_REVIEW_AUTO_MIGRATE` 置 0：网关
+的第一次建 store 会跑一遍幂等 DDL（实测 ~930ms），算进去量的就不是投递路径了。
+
+### 2. 依赖不在开跑前验，会干等 5 分钟
+
+Ollama 进程中途死掉时，worker 每个 agent 调用都 `ConnectionRefusedError`，任务被判
+failed，而脚本还在 `Wait-State` 里轮询——**等了 5 分钟**才报"没在 150 秒内到
+waiting_approval"。真正的原因离这句话十万八千里。
+
+所以脚本开头有预检：容器在不在、Ollama 通不通、`qwen2.5:3b` 拉了没，缺哪个当场
+说哪个，退出码 2。
+
+### 3. `doctor.py` 之前完全不看 GitHub
+
+`.env` 里 `GITHUB_TOKEN` 从空变成一串字符时，PR 审查链路会立刻"看起来配好了"——
+webhook 不再降级、任务照常入队。但过期或复制不全的 token 要到 worker 调 GitHub
+API 时才 401，那时投递方早就收到 202 走了。
+
+现在 `doctor.py` 有一项 `github`，探一次 `/user`，把三种情况分开报：离线通道 /
+未配置 / 形态对但 GitHub 拒收。
+
+```powershell
+uv run python scripts/doctor.py            # 看 github 那一项
+uv run python scripts/probe_github_token.py --repo owner/repo   # 只看 token
+```

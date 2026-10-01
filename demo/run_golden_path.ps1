@@ -92,6 +92,60 @@ function Audit-Counts($taskKey) {
 $Gateway = $null
 $Worker = $null
 
+# ── 依赖预检 ────────────────────────────────────────────────────────────
+# 这段是被一次真实事故逼出来的：Ollama 进程中途死掉，worker 每个 agent 调用都
+# ConnectionRefusedError，任务被判 failed，而脚本还在 Wait-State 里轮询——
+# **干等了 5 分钟才报错**，报错信息是"没在 150 秒内到 waiting_approval"。
+# 真正的原因（推理服务没起来）离这句话十万八千里。
+#
+# 所以依赖必须在开跑前一次性验完，缺哪个当场说哪个。
+$Model = "qwen2.5:3b"
+$Missing = @()
+
+foreach ($svc in @("moa-gateway-redis-1", "moa-gateway-postgres-1")) {
+    $running = docker ps --filter "name=$svc" --format "{{.Names}}"
+    if (-not $running) { $Missing += "容器未运行: $svc" }
+}
+
+try {
+    $tags = (Invoke-RestMethod "http://localhost:11434/api/tags" -TimeoutSec 8).models.name
+    if ($tags -notcontains $Model) { $Missing += "Ollama 缺少模型 $Model" }
+} catch {
+    $Missing += "Ollama 不可达（localhost:11434）：$($_.Exception.Message.Split([char]10)[0])"
+}
+
+if ($Missing.Count -gt 0) {
+    Write-Host "依赖预检未通过：" -ForegroundColor Red
+    $Missing | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+    Write-Host ""
+    Write-Host "  docker compose -f docker-compose.dev.yml up -d redis postgres"
+    Write-Host "  ollama serve   # 确认 qwen2.5:3b 已拉取"
+    exit 2
+}
+Write-Host "依赖预检通过（redis + postgres + ollama/$Model）" -ForegroundColor DarkGray
+
+# 把 schema 迁移挪出被测区间。
+#
+# 网关的**第一次**建 store 会跑一遍幂等 DDL（ALTER TABLE / CREATE INDEX），实测
+# ~930ms；同一进程内后续只要 ~52ms。第 2 步量的是"投递到返回"的耗时，把这次一次性
+# 迁移算进去，量到的就不是投递路径而是 DDL——那次 202 落在 1000ms 边缘纯属 DDL
+# 抖动，跟"有没有在等 agent"毫无关系。
+#
+# 迁移本来就该由部署方跑，而不是让每个消费者在启动时跑（CODE_REVIEW_AUTO_MIGRATE
+# 这个开关就是为此存在的）。这里显式付掉，判据才名副其实。
+uv run python -c "from apps.code_review_pipeline.storage.review_store import build_review_store; build_review_store()"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "schema 迁移失败——先确认 PostgreSQL 可达。" -ForegroundColor Red
+    exit 2
+}
+Write-Host "schema 迁移已完成（不计入投递耗时）" -ForegroundColor DarkGray
+
+# 网关进程**不再**自己迁移。上面已经显式跑过一次了；让网关在第一个请求里再跑一遍
+# 会把 ~930ms 的 DDL 算进投递耗时——那正是第 2 步一开始卡在 1271ms 的原因。
+# CODE_REVIEW_AUTO_MIGRATE=0 正是为此存在的（见 review_store.build_review_store
+# 的 docstring：迁移的所有权归 gateway / 显式迁移命令，不该由消费方在启动时改）。
+$env:CODE_REVIEW_AUTO_MIGRATE = "0"
+
 try {
     Step "0. 清空 demo 状态（让判据可重复）" {
         Psql "DELETE FROM code_review_prs WHERE repo='shing26/moa-gateway'" | Out-Null

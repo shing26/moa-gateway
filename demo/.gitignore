@@ -2,4 +2,4 @@
 # fixture / 脚本 / README 是资产，这些不是。
 *.log
 *.err
-
+last_run.txt

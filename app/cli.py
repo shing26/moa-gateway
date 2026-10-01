@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import hashlib
 import json
 import os
 import sys
@@ -38,16 +37,17 @@ def _identity_from_task_key(task_key: str) -> tuple[str, int, str]:
     return repo, int(number), sha
 
 
-def _demo_sha(repo: str, pr_number: int) -> str:
-    """**按 PR 稳定**的假 sha。
-
-    稳定性就是 ``demo review 42`` 连跑两次的验收方式：两次算出同一个 sha，于是
-    第二次必然撞上幂等判据。想重跑一个全新任务就换个 PR 号，或用 ``--sha``。
-    """
-    return hashlib.sha1(f"{repo}#{pr_number}".encode()).hexdigest()
+def _fixture_keys(path: str) -> list[str]:
+    with open(path, "r", encoding="utf-8") as fh:
+        return sorted(json.load(fh).get("pulls", {}))
 
 
-def _head_sha_for_demo(repo: str, pr_number: int, explicit: str | None) -> str:
+def _fixture_pull(path: str, repo: str, pr_number: int) -> dict[str, Any] | None:
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh).get("pulls", {}).get(f"{repo}#{pr_number}")
+
+
+async def _head_sha_for_demo(repo: str, pr_number: int, explicit: str | None) -> str:
     """决定这次投递的 head sha。
 
     **离线通道下必须取自 fixture**，不能自己推导一个：worker 是按 payload 里的 sha
@@ -55,7 +55,14 @@ def _head_sha_for_demo(repo: str, pr_number: int, explicit: str | None) -> str:
     另一行任务上——于是 `demo status` 显示 queued、库里却多了一行 done。这不是
     "数据不一致的小问题"，而是 demo 会展示出一个假的成功。
 
-    所以规则是：显式 ``--sha`` > fixture 里的值 > 按 (repo, pr) 稳定推导。
+    所以规则是：显式 ``--sha`` > fixture 里的值 > **向 GitHub 现取**。
+
+    真 GitHub 模式下曾经在这里"按 (repo, pr) 稳定推导"一个假 sha，那个值只在
+    离线通道下成立（fixture 的 sha 是我们自己定的）。接了真 token 之后它会立刻
+    分叉：webhook 按假 sha 建任务行，而 worker 从 GitHub 取回**真** sha 再把结论
+    写到真 sha 那一行——于是库里多出一行，`demo status` 盯着的那一行永远停在
+    queued。现取真实 sha 同时保住了幂等演示：同一个 PR 在没有新 commit 时 sha
+    不变，所以 `demo review 42` 连跑两次第二次仍然撞幂等。
     """
     if explicit:
         return explicit
@@ -63,16 +70,28 @@ def _head_sha_for_demo(repo: str, pr_number: int, explicit: str | None) -> str:
 
     path = fixture_path()
     if path:
-        with open(path, "r", encoding="utf-8") as fh:
-            pulls = json.load(fh).get("pulls", {})
-        entry = pulls.get(f"{repo}#{pr_number}")
+        # 文件读挪出事件循环：ruff ASYNC230。CLI 是同步入口，这层只是为了让
+        # 两条取 sha 的路径（本地文件 / GitHub API）共用一个 async 函数。
+        entry = await asyncio.to_thread(_fixture_pull, path, repo, pr_number)
         if entry is None:
             raise ValueError(
                 f"fixture {path} 里没有 {repo}#{pr_number}；"
-                f"现有：{', '.join(sorted(pulls)) or '(空)'}"
+                f"现有：{', '.join(sorted(_fixture_keys(path))) or '(空)'}"
             )
         return str(entry.get("pr", {}).get("head", {}).get("sha", ""))
-    return _demo_sha(repo, pr_number)
+
+    from apps.code_review_pipeline.routing.github_client import GitHubRepo
+    from apps.code_review_pipeline.routing.github_provider import build_github_client
+
+    owner, _, name = repo.partition("/")
+    github = build_github_client()
+    try:
+        pr = await github.get_pr(GitHubRepo(owner=owner, name=name), pr_number)
+        return str(pr.get("head", {}).get("sha", ""))
+    finally:
+        close = getattr(github, "aclose", None)
+        if close is not None:
+            await close()
 
 
 def build_webhook_payload(repo: str, pr_number: int, head_sha: str, action: str) -> dict[str, Any]:
@@ -142,12 +161,31 @@ def cmd_demo_review(args: argparse.Namespace) -> int:
 
     repo = args.repo
     try:
-        head_sha = _head_sha_for_demo(repo, args.pr_number, args.sha)
-    except (OSError, ValueError) as exc:
-        print(str(exc), file=sys.stderr)
+        head_sha = asyncio.run(_head_sha_for_demo(repo, args.pr_number, args.sha))
+    except Exception as exc:  # noqa: BLE001 - CLI 要把取 sha 失败说成人话
+        # 现取 sha 会撞上 GitHub 的 401/404（token 失效、PR 不存在），而这些
+        # 在这里必须变成一句可执行的提示，而不是一段 httpx 栈。
+        print(f"取不到 {repo}#{args.pr_number} 的真实 head sha：{exc}", file=sys.stderr)
+        print(
+            "  先用 `uv run python scripts/doctor.py` 看 github 那一项；"
+            "离线演示请设 CODE_REVIEW_GITHUB_FIXTURE。",
+            file=sys.stderr,
+        )
         return 2
     payload = build_webhook_payload(repo, args.pr_number, head_sha, args.event)
     url = f"http://{args.host}:{args.port}/webhook/github/review"
+
+    # 计时**之前**先把依赖 import 掉。
+    #
+    # ``_post_webhook`` 内部才 import httpx，而它整个包在计时区间内。`import httpx`
+    # 在这台机器上实测 ~640ms，于是"投递耗时"量的其实是 Python 的 import：同一个
+    # 网关用直连客户端量是 19ms，走 CLI 却是 625~763ms，差额几乎全在这一条 import
+    # 上。这正是"把阈值从 1000 挪到 1500 来通过"最该避免的假绿。
+    import httpx  # noqa: F401 - 副作用是把它装进 sys.modules
+
+    from apps.code_review_pipeline.routing.github_signature import (  # noqa: F401
+        sign_payload,
+    )
 
     started = time.perf_counter()
     status, body = asyncio.run(_post_webhook(payload, url, secret))
