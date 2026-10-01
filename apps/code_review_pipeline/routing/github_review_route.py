@@ -57,9 +57,16 @@ def build_task_key(repo: str, pr_number: Any, head_sha: str) -> str:
     ``code_review_findings`` 也按 trace_id 外键挂在同一条下。既有 e2e 只断言了
     ``"trace_id" in body``、没断言唯一性，所以一直没被测出来。
     """
-    short = (head_sha or "").strip()[:12] or "unknown"
+    # 完整 sha，不截断。此前截断到 12 hex（48 bit）是个**假安全**的优化：它让
+    # 读起来短，但两个不同 commit 只要共享前 12 位就得到同一个 key，而 D2 要加的
+    # `UNIQUE(repo, pr_number, head_sha)` 拦不住——INSERT 会先在 trace_id 主键上
+    # 冲突，走 `DO UPDATE` 覆盖前一条。也就是"加唯一约束"看起来防住了重复，实际
+    # 漏在更早的那一环。同类分叉第四次（DSN 读取 / embedding 维度 / trace_id 的
+    # body['id'] / 这次的身份截断）：同一个业务身份在两处各写一遍，迟早不一致。
+    # 短 key 对人类可读性的收益，远小于"重复投递静默丢数据"的代价。
+    sha = (head_sha or "").strip() or "unknown"
     number = int(pr_number or 0)
-    return f"{repo}#{number}@{short}"
+    return f"{repo}#{number}@{sha}"
 
 
 @github_review_router.post("/webhook/github/review")

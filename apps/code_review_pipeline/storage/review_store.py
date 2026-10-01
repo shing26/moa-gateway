@@ -3,7 +3,16 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
+
+try:
+    from psycopg.types.json import Jsonb
+except Exception:  # pragma: no cover - psycopg 缺失时的降级（见 _missing_deps）
+    # 没有 psycopg 时 build_review_store 早在选型阶段就抛 StorageInitError，这里
+    # 只是让模块仍可 import（内存存储路径完全用不到 Jsonb）。
+    def Jsonb(value: Any) -> Any:  # type: ignore[misc]
+        return value
 
 logger = logging.getLogger("moa.code_review.storage")
 
@@ -14,6 +23,16 @@ logger = logging.getLogger("moa.code_review.storage")
 # connect_timeout 时**完全不看 socket 超时**，所以必须显式给。10s 足够覆盖同机
 # docker-compose 的正常建连，又能让"库没起"在 10s 内变成一条明确异常。
 _CONNECT_TIMEOUT_S = 10
+
+# 任务状态的唯一词汇表。**只有这一份**——见 schema.sql 里"不新增 task_state"
+# 的说明：同一张表并存两套状态词汇正是 app/models/errors.py 记下的教训。
+# D2 只用到 queued；running/waiting_approval/posting/done/failed 随 D3 的状态机
+# 一起加进来，不在这里预先声明未使用的值。
+TASK_STATE_QUEUED = "queued"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class StorageInitError(Exception):
@@ -136,6 +155,22 @@ class PostgresReviewStore:
             )
 
     def save(self, record: ReviewRecord) -> None:
+        """写入/复用一条任务行（D2）。
+
+        冲突目标是 **(repo, pr_number, head_sha)** 而不是 trace_id：后者是"这条记录
+        的地址"，前者才是"这件事本身"。幂等属于后者——地址一变（trace_id 派生规则
+        改过），挂在地址上的幂等会静默失效，而数据库里那条 UNIQUE 还在，看着好好的。
+
+        DO UPDATE 的白名单是**刻意**的：只更新"这次投递能重新观察到的内容"
+        （文件数、reviewers、是否需要人工、updated_at）。下面两类**不进白名单**：
+
+        - ``posted_review_id``：EXCLUDED 里它恒为 NULL（入队时还没写回）。无脑
+          DO UPDATE 会让**每次重投都把"已写回"抹成"未写回"**，下次投递就在 GitHub
+          上再贴一条重复评论——恰好是 D4 要消灭的现象。
+        - ``status``：EXCLUDED 里它恒为入队值。已 done 的任务被重投拽回 queued，
+          下一轮派发会重算一遍，计划里"done 不重算"的约束就此失效，且失效方式
+          极安静（不报错，只是多花一遍 5 个 agent）。
+        """
         self._connect()
         try:
             with self._conn.cursor() as cur:
@@ -143,18 +178,18 @@ class PostgresReviewStore:
                     """
                     INSERT INTO code_review_prs (
                         trace_id, repo, pr_number, head_sha, base_sha, title, author, html_url, diff_url,
-                        changed_files_count, labels, reviewers, overall_need_human_review, status
+                        changed_files_count, labels, reviewers, overall_need_human_review, status,
+                        state_transitions
                     ) VALUES (
                         %(trace_id)s, %(repo)s, %(pr_number)s, %(head_sha)s, %(base_sha)s, %(title)s,
                         %(author)s, %(html_url)s, %(diff_url)s, %(changed_files_count)s,
-                        %(labels)s, %(reviewers)s, %(overall_need_human_review)s, %(status)s
+                        %(labels)s, %(reviewers)s, %(overall_need_human_review)s, %(status)s,
+                        %(state_transitions)s
                     )
-                    ON CONFLICT (trace_id) DO UPDATE SET
-                        head_sha = EXCLUDED.head_sha,
+                    ON CONFLICT (repo, pr_number, head_sha) DO UPDATE SET
                         changed_files_count = EXCLUDED.changed_files_count,
                         reviewers = EXCLUDED.reviewers,
                         overall_need_human_review = EXCLUDED.overall_need_human_review,
-                        status = EXCLUDED.status,
                         updated_at = NOW()
                     """,
                     {
@@ -171,7 +206,14 @@ class PostgresReviewStore:
                         "labels": record.raw.get("labels", []),
                         "reviewers": record.raw.get("reviewers", []),
                         "overall_need_human_review": bool(record.need_human_review),
-                        "status": "pending",
+                        "status": TASK_STATE_QUEUED,
+                        # psycopg3 会把 Python 的 list 适配成 PG **数组**（oid 1005），
+                        # 而 state_transitions 是 jsonb 列——不显式包 Jsonb 的话，
+                        # 真库上会报 column is of type jsonb but expression is of type
+                        # array。这是纯逻辑测试测不出、只有真库才炸的那类错。
+                        "state_transitions": Jsonb(
+                            [{"from": None, "to": TASK_STATE_QUEUED, "at": _now_iso()}]
+                        ),
                     },
                 )
                 self._conn.commit()
