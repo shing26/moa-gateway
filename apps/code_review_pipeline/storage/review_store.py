@@ -44,6 +44,15 @@ class StorageInitError(Exception):
     """Raised when the persistent store cannot be initialized."""
 
 
+class TaskNotFound(LookupError):
+    """任务行不存在。
+
+    与 ``InvalidTaskTransition`` 分开：前者是"消息指向一个不存在的任务"（数据
+    不一致，通常意味着入队时任务行没落库），后者是"任务在，但这一步不该发生"。
+    两者在 worker 里的处置不同——前者要报警，后者多数是正常竞争的结果。
+    """
+
+
 def _missing_deps() -> list[str]:
     missing = []
     try:
@@ -152,13 +161,65 @@ class ReviewRecord:
 class ReviewStore:
     def __init__(self) -> None:
         self._records: dict[str, ReviewRecord] = {}
-
-    def save(self, record: ReviewRecord) -> None:
-        self._records[record.trace_id] = record
-        logger.info("review saved trace=%s findings=%d", record.trace_id, record.findings_count)
+        self._states: dict[str, str] = {}
 
     def get(self, trace_id: str) -> ReviewRecord | None:
         return self._records.get(trace_id)
+
+    # 任务状态方法的签名**必须与 PostgresReviewStore 完全一致**（都用
+    # identity 三元组，不用 trace_id）。此前内存版按 trace_id、PG 版按 identity，
+    # 于是 worker 在本地跑得通、接真库就崩——同一个坑的第五次变体：
+    # 同一份契约在两个实现里各写一遍。
+
+    def get_task_state(self, identity: tuple[str, int, str]) -> str | None:
+        return self._states.get(identity)
+
+    def _transition(
+        self,
+        identity: tuple[str, int, str],
+        action: Any,
+        allowed_from: tuple[str, ...],
+    ) -> str:
+        from apps.code_review_pipeline.task_state import (
+            ACTION_TARGET,
+            InvalidTaskTransition,
+            TaskState,
+        )
+
+        target = ACTION_TARGET[action]
+        current = self._states.get(identity)
+        if current is None:
+            raise TaskNotFound(f"no task for {identity!r}")
+        if current not in allowed_from:
+            raise InvalidTaskTransition(TaskState(current), action)
+        self._states[identity] = target.value
+        return target.value
+
+    def claim_task(self, identity: tuple[str, int, str]) -> bool:
+        from apps.code_review_pipeline.task_state import (
+            InvalidTaskTransition,
+            TaskAction,
+            TaskState,
+        )
+
+        try:
+            self._transition(identity, TaskAction.CLAIM, (TaskState.QUEUED.value,))
+        except (TaskNotFound, InvalidTaskTransition):
+            return False
+        return True
+
+    def transition_task(self, identity: tuple[str, int, str], action: str) -> str:
+        from apps.code_review_pipeline.task_state import ALLOWED_ACTIONS, TaskAction
+
+        act = TaskAction(action)
+        allowed = tuple(sorted(s.value for s, acts in ALLOWED_ACTIONS.items() if act in acts))
+        return self._transition(identity, act, allowed)
+
+    def save(self, record: ReviewRecord) -> None:
+        self._records[record.trace_id] = record
+        identity = (record.repo, record.pr_number, record.head_sha)
+        self._states.setdefault(identity, TASK_STATE_QUEUED)
+        logger.info("review saved trace=%s findings=%d", record.trace_id, record.findings_count)
 
     async def close(self) -> None:
         self._records.clear()
@@ -283,6 +344,87 @@ class PostgresReviewStore:
                 )
         except Exception:
             return None
+
+    # ── 任务状态（D3）────────────────────────────────────────────────────
+    #
+    # 全部用**带状态谓词的条件 UPDATE** 实现，不用"先 SELECT 再 UPDATE"。区别不是
+    # 风格：两个 worker 同时收到同一条消息时（Streams 的至少一次投递，加上
+    # XAUTOCLAIM 的重认领），先读后写会让两者都认为认领成功，于是 5 个 agent 跑
+    # 两遍。条件 UPDATE 只有一行的 rowcount 为 1。rowcount==0 即"别人已拿走"，
+    # 调用方据此跳过而不是重试。
+
+    _IDENTITY = "repo=%s AND pr_number=%s AND head_sha=%s"
+
+    def get_task_state(self, identity: tuple[str, int, str]) -> str | None:
+        repo, pr_number, head_sha = identity
+        self._connect()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM code_review_prs WHERE " + self._IDENTITY,
+                (repo, pr_number, head_sha),
+            )
+            row = cur.fetchone()
+        self._conn.rollback()
+        return str(row[0]) if row else None
+
+    def _transition(
+        self,
+        identity: tuple[str, int, str],
+        action: Any,
+        allowed_from: tuple[str, ...],
+    ) -> str:
+        """把任务从 ``allowed_from`` 之一推进到 ``action`` 的目标状态。"""
+        from apps.code_review_pipeline.task_state import (
+            ACTION_TARGET,
+            InvalidTaskTransition,
+            TaskState,
+        )
+
+        target = ACTION_TARGET[action]
+        repo, pr_number, head_sha = identity
+        stamp = _now_iso()
+        rows_in = []
+        for src in allowed_from:
+            rows_in.append({"from": src, "to": target.value, "at": stamp})
+        self._connect()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE code_review_prs SET status = %s, "
+                "state_transitions = state_transitions || %s::jsonb, updated_at = NOW() "
+                "WHERE " + self._IDENTITY + " AND status = ANY(%s) RETURNING status",
+                (target.value, Jsonb(rows_in), list(allowed_from)),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                self._conn.commit()
+                return str(row[0])
+            cur.execute(
+                "SELECT status FROM code_review_prs WHERE " + self._IDENTITY,
+                (repo, pr_number, head_sha),
+            )
+            current = cur.fetchone()
+        self._conn.rollback()
+        if current is None:
+            raise TaskNotFound(f"no task for {identity!r}")
+        raise InvalidTaskTransition(TaskState(current[0]), action)
+
+    def claim_task(self, identity: tuple[str, int, str]) -> bool:
+        """认领一个 queued 任务；已被别人认领则返回 False（不抛）。"""
+        from apps.code_review_pipeline.task_state import TaskAction, TaskState
+
+        try:
+            self._transition(identity, TaskAction.CLAIM, (TaskState.QUEUED.value,))
+        except (TaskNotFound, InvalidTaskTransition):
+            return False
+        return True
+
+    def transition_task(self, identity: tuple[str, int, str], action: str) -> str:
+        """按动作推进任务；当前状态不允许则抛 InvalidTaskTransition。"""
+        from apps.code_review_pipeline.task_state import ALLOWED_ACTIONS, TaskAction
+
+        act = TaskAction(action)
+        allowed = tuple(sorted(s.value for s, acts in ALLOWED_ACTIONS.items() if act in acts))
+        return self._transition(identity, act, allowed)
 
     async def close(self) -> None:
         if self._conn is not None:
