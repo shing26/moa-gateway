@@ -31,6 +31,51 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from app.audit.wal import verify_audit_dir  # noqa: E402
 
 
+def _report_task(
+    logs_dir: pathlib.Path, task_id: str, expect: int | None, quiet: bool
+) -> int:
+    """按 task_id 打印审计行，并校验条数与种类。
+
+    种类校验是刻意加的：只数"7 条"的话，5 条 lifecycle + 2 条 agent 也能凑够 7，
+    于是"某个 agent 没跑"这类缺陷就查不出来。
+    """
+    from app.audit.recorder import entries_for_trace
+    from apps.code_review_pipeline.task_audit import (
+        AGENT_NAMES,
+        HUMAN_DECISION_AGENT,
+        LIFECYCLE_AGENT,
+    )
+
+    rows = entries_for_trace(logs_dir, task_id)
+    if not rows:
+        print(f"task_id={task_id} 在 {logs_dir} 下没有任何审计行", file=sys.stderr)
+        return 1
+
+    agents = [r for r in rows if r.get("agent_name") in AGENT_NAMES]
+    lifecycle = [r for r in rows if r.get("agent_name") == LIFECYCLE_AGENT]
+    human = [r for r in rows if r.get("agent_name") == HUMAN_DECISION_AGENT]
+
+    if not quiet:
+        for row in rows:
+            print(f"  {row.get('agent_name')}: {str(row.get('agent_output', ''))[:60]}")
+    print(
+        f"task_id={task_id}: 共 {len(rows)} 行"
+        f"（agent {len(agents)}/5，lifecycle {len(lifecycle)}，人工决策 {len(human)}）"
+    )
+
+    missing = [a for a in AGENT_NAMES if a not in {r.get("agent_name") for r in agents}]
+    if missing:
+        print(f"缺少 agent 审计行: {', '.join(missing)}", file=sys.stderr)
+        return 1
+    if not lifecycle:
+        print("缺少任务 lifecycle 审计行", file=sys.stderr)
+        return 1
+    if expect is not None and len(rows) != expect:
+        print(f"行数不符：期望 {expect}，实际 {len(rows)}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     root = pathlib.Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Verify the tamper-evident audit hash chain")
@@ -40,11 +85,25 @@ def main(argv: list[str] | None = None) -> int:
         help="只校验最新的 N 个文件（默认全部）",
     )
     parser.add_argument("--quiet", action="store_true", help="只打印结论与断裂点")
+    parser.add_argument(
+        "--task",
+        default=None,
+        help="只查某个 task_id 的审计行（D4 判据：5 agent + 1 lifecycle + 1 人工决策）",
+    )
+    parser.add_argument(
+        "--expect-rows",
+        type=int,
+        default=None,
+        help="配合 --task：期望的行数，不符则退出码 1",
+    )
     args = parser.parse_args(argv)
 
     if not args.logs_dir.exists():
         print(f"logs 目录不存在: {args.logs_dir}", file=sys.stderr)
         return 2
+
+    if args.task:
+        return _report_task(args.logs_dir, args.task, args.expect_rows, args.quiet)
 
     results = verify_audit_dir(args.logs_dir, limit=args.limit)
     if not results:

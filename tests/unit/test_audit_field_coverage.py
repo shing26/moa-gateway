@@ -126,7 +126,7 @@ def test_typed_fields_win_over_same_named_extra_keys():
 async def test_wal_persists_every_field(monkeypatch, tmp_path):
     """README 声称可按 trace 查询的字段，必须真的在日志行里。"""
     wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
-    monkeypatch.setattr(request_logger, "_wal", wal)
+    monkeypatch.setattr("app.audit.recorder.wal", wal)
     bind_context_stats({"kept": 3, "dropped": 1, "elided": 1, "tokens": 512})
 
     class FakeRequest:

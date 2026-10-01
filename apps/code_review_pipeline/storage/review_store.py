@@ -162,6 +162,7 @@ class ReviewStore:
     def __init__(self) -> None:
         self._records: dict[str, ReviewRecord] = {}
         self._states: dict[str, str] = {}
+        self._posted: dict[tuple[str, int, str], str] = {}
 
     def get(self, trace_id: str) -> ReviewRecord | None:
         return self._records.get(trace_id)
@@ -386,6 +387,36 @@ class PostgresReviewStore:
         self._conn.rollback()
         return str(row[0]) if row else None
 
+    def get_posted_review_id(self, identity: tuple[str, int, str]) -> str | None:
+        """已写回的 GitHub review id；None = 还没写回（D4 幂等的主判据）。
+
+        刻意读**身份三元组**而不是 trace_id：trace_id 是派生出来的地址，改一次
+        格式就查不到历史记录；而幂等判据必须在任何派生规则变更后依然成立。
+        """
+        repo, pr_number, head_sha = identity
+        self._connect()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT posted_review_id FROM code_review_prs WHERE " + self._IDENTITY,
+                (repo, pr_number, head_sha),
+            )
+            row = cur.fetchone()
+        self._conn.rollback()
+        if not row or row[0] is None:
+            return None
+        return str(row[0])
+
+    def set_posted_review_id(self, identity: tuple[str, int, str], review_id: str) -> None:
+        repo, pr_number, head_sha = identity
+        self._connect()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE code_review_prs SET posted_review_id = %s, updated_at = NOW() "
+                "WHERE " + self._IDENTITY,
+                (review_id, repo, pr_number, head_sha),
+            )
+        self._conn.commit()
+
     def _transition(
         self,
         identity: tuple[str, int, str],
@@ -489,6 +520,13 @@ class PostgresReviewStore:
         act = TaskAction(action)
         allowed = tuple(sorted(s.value for s, acts in ALLOWED_ACTIONS.items() if act in acts))
         return self._transition(identity, act, allowed)
+
+    def get_posted_review_id(self, identity: tuple[str, int, str]) -> str | None:
+        """已写回的 GitHub review id；None = 还没写回（D4 幂等的主判据）。"""
+        return self._posted.get(identity)
+
+    def set_posted_review_id(self, identity: tuple[str, int, str], review_id: str) -> None:
+        self._posted[identity] = review_id
 
     async def close(self) -> None:
         if self._conn is not None:

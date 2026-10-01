@@ -47,7 +47,7 @@ class TestDualWrite:
     @pytest.mark.asyncio
     async def test_log_request_writes_wal_and_es(self, monkeypatch, tmp_path):
         wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
-        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+        monkeypatch.setattr("app.audit.recorder.wal", wal)
         es_calls = []
 
         class FakeEs:
@@ -70,7 +70,7 @@ class TestDualWrite:
     @pytest.mark.asyncio
     async def test_es_write_exception_does_not_break_main_flow(self, monkeypatch, tmp_path):
         wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
-        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+        monkeypatch.setattr("app.audit.recorder.wal", wal)
 
         class RaisingEs:
             async def write(self, entry):
@@ -89,7 +89,7 @@ class TestDualWrite:
     @pytest.mark.asyncio
     async def test_no_es_writer_single_wal(self, monkeypatch, tmp_path):
         wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
-        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+        monkeypatch.setattr("app.audit.recorder.wal", wal)
         monkeypatch.setattr("app.deps.es_writer", None)
 
         await log_request(

@@ -17,7 +17,7 @@ class TestLogRequestPolicyFields:
     @pytest.mark.asyncio
     async def test_log_request_with_policy_and_hitl_fields(self, monkeypatch, tmp_path):
         wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
-        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+        monkeypatch.setattr("app.audit.recorder.wal", wal)
 
         await log_request(
             FakeRequest(), 200, 12.3, "s1", "general", "search", "allow",
@@ -40,7 +40,7 @@ class TestLogRequestPolicyFields:
     @pytest.mark.asyncio
     async def test_log_request_violation_is_first_policy_hit(self, monkeypatch, tmp_path):
         wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
-        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+        monkeypatch.setattr("app.audit.recorder.wal", wal)
 
         await log_request(
             FakeRequest(), 200, 5.0, "s1", "general", "analyst", "allow",
@@ -53,7 +53,7 @@ class TestLogRequestPolicyFields:
     @pytest.mark.asyncio
     async def test_log_request_without_new_args_matches_original(self, monkeypatch, tmp_path):
         wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
-        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+        monkeypatch.setattr("app.audit.recorder.wal", wal)
 
         await log_request(
             FakeRequest(), 200, 12.3, "s1", "general", "search", "allow",
@@ -78,7 +78,7 @@ class TestLogRequestPolicyFields:
     @pytest.mark.asyncio
     async def test_log_request_with_llm_metrics_fields(self, monkeypatch, tmp_path):
         wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
-        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+        monkeypatch.setattr("app.audit.recorder.wal", wal)
 
         await log_request(
             FakeRequest(), 200, 12.3, "s1", "coder", "coding", "allow",
@@ -97,7 +97,7 @@ class TestLogRequestPolicyFields:
     @pytest.mark.asyncio
     async def test_log_request_disk_format_stays_compatible(self, monkeypatch, tmp_path):
         wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
-        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+        monkeypatch.setattr("app.audit.recorder.wal", wal)
 
         await log_request(
             FakeRequest(), 200, 12.3, "s1", "general", "search", "denied",
@@ -127,7 +127,7 @@ class TestOptionalExtraFields:
 
     async def _one_entry(self, monkeypatch, tmp_path, **kwargs):
         wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
-        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+        monkeypatch.setattr("app.audit.recorder.wal", wal)
         await log_request(
             FakeRequest(), 200, 1.0, "s1", "task", "task", "allow",
             "in", "out", **kwargs,

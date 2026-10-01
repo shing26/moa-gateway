@@ -27,7 +27,7 @@ class _Collector:
 @pytest.fixture()
 def collector(monkeypatch):
     c = _Collector()
-    monkeypatch.setattr(request_logger, "_wal", c)
+    monkeypatch.setattr("app.audit.recorder.wal", c)
     return c
 
 

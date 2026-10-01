@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import tempfile
 import dataclasses
@@ -70,7 +70,7 @@ class TestAsyncWal:
     @pytest.mark.asyncio
     async def test_log_request_stores_input_output_previews(self, monkeypatch, tmp_path):
         wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
-        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+        monkeypatch.setattr("app.audit.recorder.wal", wal)
 
         class FakeRequest:
             method = "POST"
@@ -106,7 +106,7 @@ class TestAsyncWal:
     async def test_log_request_persists_eval_score_and_issues(self, monkeypatch, tmp_path):
         """评测结果必须落盘，而不是像此前那样恒 0.0 / 恒空。"""
         wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
-        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+        monkeypatch.setattr("app.audit.recorder.wal", wal)
 
         class FakeRequest:
             method = "POST"
@@ -134,7 +134,7 @@ class TestAsyncWal:
         这正是 2026-09-21 那轮评估误判的成因。这条是那个歧义的回归守卫。
         """
         wal = AsyncWal(_config=LogConfig(directory=str(tmp_path), retention_days=90))
-        monkeypatch.setattr("app.middleware.request_logger._wal", wal)
+        monkeypatch.setattr("app.audit.recorder.wal", wal)
 
         class FakeRequest:
             method = "POST"

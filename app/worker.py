@@ -108,7 +108,7 @@ class TaskWorker:
             await self._queue.ack(msg.message_id)
             return 1
 
-        self._apply_outcome(identity, outcome)
+        await self._apply_outcome(msg, outcome)
         # ack 放在状态落库**之后**——这是底座的核心契约。
         await self._queue.ack(msg.message_id)
         return 1
@@ -119,12 +119,13 @@ class TaskWorker:
         except Exception:
             logger.exception("could not mark task failed: %s", identity)
 
-    def _apply_outcome(self, identity: tuple[str, int, str], outcome: str) -> None:
+    async def _apply_outcome(self, msg: TaskMessage, outcome: str) -> None:
         """把 processor 的返回值映射成状态动作。
 
         processor 只返回三种结果：需要审批 / 完成 / 失败。映射集中在这里，
         processor 不碰状态机词汇——它只该关心"审出了什么"。
         """
+        identity = msg.identity
         action = {
             TaskState.WAITING_APPROVAL.value: "request_approval",
             TaskState.DONE.value: "complete",
@@ -132,6 +133,9 @@ class TaskWorker:
         }.get(outcome, "request_approval")
         try:
             self._store.transition_task(identity, action)
+            from apps.code_review_pipeline.task_audit import record_lifecycle
+
+            await record_lifecycle(msg.task_key, msg.repo, action, outcome=outcome)
         except Exception:
             logger.exception("could not persist outcome %s for %s", outcome, identity)
 
@@ -178,6 +182,12 @@ async def review_processor(msg: TaskMessage) -> str:
     )
     pipeline = CodeReviewPipeline.from_env()
     pr, result = await pipeline.run(event)
+
+    # 五个 agent 各留一行。worker 不经过 HTTP 中间件，所以审计得在这里显式写——
+    # 否则任务在队列里干了什么完全查不到。
+    from apps.code_review_pipeline.task_audit import record_agent_rows
+
+    await record_agent_rows(msg.task_key, msg.repo, result)
 
     # 审查结论落进任务行：findings 数与"是否需要人工"是 D4 审批页与写回判据的
     # 数据来源。此处失败不该让整个任务失败（结论只是附加信息），故吞掉异常。

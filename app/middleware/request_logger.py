@@ -7,15 +7,16 @@ from contextvars import ContextVar
 from typing import Any
 
 from app.audit.models import AuditEntry
-from app.audit.wal import AsyncWal
+from app.audit.recorder import record as record_audit_entry
+from app.audit.recorder import wal as _wal
 from app.models.events import new_trace_id
 
 logger = logging.getLogger("moa.middleware.request_logger")
 
-# 目录/保留期跟 settings（LOG_DIR / LOG_RETENTION_DAYS）走；测试在 conftest 里
-# 把 LOG_DIR 指到临时目录，因此**不再污染**开发机真实的 logs/audit-*.jsonl
-# （dashboard 的审计统计读的就是那份文件）。
-_wal = AsyncWal()
+# WAL 实例现在住在 app/audit/recorder.py（D4）。此前这里自己 new 一个，而 worker
+# 侧又 new 了一个——两个 WAL 各写各的哈希链，落到同一个文件里，
+# verify_chain 会把交错的链判成断裂。目录/保留期仍跟 settings（LOG_DIR /
+# LOG_RETENTION_DAYS）走；测试在 conftest 里把 LOG_DIR 指到临时目录。
 
 # 请求作用域的审计 trace：一次请求内的所有审计条目（含双引擎与后台任务）
 # 共享同一个 trace，否则 review 与后续 hitl_approve/reject 分属两条互不
@@ -135,11 +136,4 @@ async def log_request(
         hitl_duration_ms=hitl_duration_ms,
         extra=extra,
     )
-    await _wal.append(entry)
-    try:
-        from app.deps import es_writer
-
-        if es_writer is not None:
-            await es_writer.write(entry)
-    except Exception:
-        logger.warning("es audit write failed", exc_info=True)
+    await record_audit_entry(entry)

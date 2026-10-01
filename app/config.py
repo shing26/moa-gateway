@@ -192,6 +192,13 @@ class Settings:
             os.getenv("CODE_REVIEW_AUTO_MIGRATE"), True
         )
 
+        # 写回 GitHub 默认**关**（即 dry-run）。刻意与"功能开关"的直觉相反：
+        # 往真实 PR 上贴评论是有外部后果的动作，而漏发只是少一次自动化。
+        # 所以默认走 dry-run（判定路径完全相同，只在最后一步停下），要真发显式开。
+        self.code_review_publish_dry_run: bool = _parse_bool(
+            os.getenv("CODE_REVIEW_PUBLISH_DRY_RUN"), True
+        )
+
         # ── 鉴权与端口（原 main.py / __main__.py 的旁路 env 读取，收编统一校验）──
         self.webhook_auth_token: str = os.getenv("WEBHOOK_AUTH_TOKEN", "")
         self.dashboard_password: str = os.getenv("DASHBOARD_PASSWORD", "")
