@@ -167,10 +167,16 @@ async def test_approve_writes_audit_before_posting(collector: _Collector) -> Non
 
 
 @pytest.mark.asyncio
-async def test_dry_run_approve_leaves_task_in_posting(
+async def test_dry_run_approve_has_no_side_effects(
     collector: _Collector,
 ) -> None:
-    """dry-run 停在 posting：发了审计、推进了状态，但没发评论也没记 id。"""
+    """dry-run **完全不动状态**：不发评论、不记 id、不推进、不写审计。
+
+    回归（2026-10-02 golden path）：原实现先 ``approve -> posting`` 再跑 dry-run，
+    把任务留在 posting。而 posting 只允许 complete/fail，于是"先试跑、再真跑"这条
+    最自然的路径永久卡死——``demo approve`` 之后接 ``demo approve --real`` 直接抛
+    InvalidTaskTransition。dry-run 的意义就是预演，预演推进过的状态没法重推。
+    """
     store = FakeStore()
     gh = FakeGitHub()
     outcome = await approve_task(
@@ -179,8 +185,36 @@ async def test_dry_run_approve_leaves_task_in_posting(
     assert outcome.status == "dry_run"
     assert gh.posted == []
     assert store.posted_review_id is None, "dry-run 记了 id 会让真跑被主判据挡掉"
-    assert store.transitions == ["approve"]
+    assert store.transitions == [], "dry-run 推进了状态，真跑就再也推进不了"
+    assert collector.entries == [], "dry-run 写了审计，等于宣称发生过一次决策"
 
+
+@pytest.mark.asyncio
+async def test_dry_run_then_real_approve_succeeds(collector: _Collector) -> None:
+    """先试跑再真跑必须走得通——这是 dry-run 存在的意义。"""
+    store = FakeStore()
+    gh = FakeGitHub()
+    await approve_task(store, gh, IDENTITY, TASK_ID, operator="alice", dry_run=True)
+    outcome = await approve_task(store, gh, IDENTITY, TASK_ID, operator="alice")
+    assert outcome.status == "posted"
+    assert store.transitions == ["approve", "complete"]
+
+
+@pytest.mark.asyncio
+async def test_approve_twice_is_idempotent_not_a_crash(collector: _Collector) -> None:
+    """重复批准应报"已写回"，而不是抛 InvalidTaskTransition。
+
+    已写回的任务处于终态 done，而 done 不允许任何动作。所以这个短路必须发生在
+    状态迁移**之前**——否则人看到的是一坨状态机栈，怎么也想不到"我只是又点了
+    一次批准"。
+    """
+    store = FakeStore()
+    gh = FakeGitHub()
+    await approve_task(store, gh, IDENTITY, TASK_ID, operator="alice")
+    again = await approve_task(store, gh, IDENTITY, TASK_ID, operator="alice")
+    assert again.status == "already_posted"
+    assert again.review_id == "4242"
+    assert len(gh.posted) == 1, "第二次批准又发了一条评论"
 
 @pytest.mark.asyncio
 async def test_reject_never_posts(collector: _Collector) -> None:

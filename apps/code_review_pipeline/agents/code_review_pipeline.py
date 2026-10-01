@@ -11,6 +11,7 @@ from apps.code_review_pipeline.agents.coverage_agent import TestCoverageAgent
 from apps.code_review_pipeline.agents.triage_agent import TriageAgent
 from apps.code_review_pipeline.rag.retriever import retrieve_team_patterns
 from apps.code_review_pipeline.routing.github_client import GitHubClient, GitHubRepo
+from apps.code_review_pipeline.routing.github_provider import build_github_client
 from apps.code_review_pipeline.routing.github_webhook_adapter import (
     PRFetchError,
     UnsupportedGitHubEvent,
@@ -131,7 +132,8 @@ class CodeReviewPipeline:
 
     @staticmethod
     def from_env() -> CodeReviewPipeline:
-        return CodeReviewPipeline(github_client=GitHubClient.from_env())
+        # 选型交给 github_provider：真 GitHub / 离线 fixture 只在那一个文件里判断。
+        return CodeReviewPipeline(github_client=build_github_client())
 
 
 def _envelope_from_event(event: MoAEvent, diff_payload: dict[str, Any], *, agent: str, rag_context: dict[str, Any] | None = None, report_inputs: dict[str, Any] | None = None) -> AgentEnvelope:

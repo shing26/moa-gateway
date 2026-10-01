@@ -20,7 +20,7 @@ import logging
 import os
 import socket
 import uuid
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from apps.code_review_pipeline.storage.review_store import (
     ReviewStore,
@@ -166,7 +166,6 @@ async def review_processor(msg: TaskMessage) -> str:
     """
     from app.models.events import MoAEvent
     from apps.code_review_pipeline.agents.code_review_pipeline import CodeReviewPipeline
-    from apps.code_review_pipeline.storage.review_store import ReviewRecord
 
     payload = {
         "action": "synchronize",
@@ -192,43 +191,83 @@ async def review_processor(msg: TaskMessage) -> str:
     # 审查结论落进任务行：findings 数与"是否需要人工"是 D4 审批页与写回判据的
     # 数据来源。此处失败不该让整个任务失败（结论只是附加信息），故吞掉异常。
     try:
-        attrs = ("triage", "static_analysis", "semantic_review", "test_coverage")
-        total = 0
-        for attr in attrs:
-            section = getattr(result, attr, None)
-            total += len(getattr(section, "findings", ()) or ())
-        store = build_review_store()
-        store.save(
-            ReviewRecord(
-                trace_id=result.trace_id,
-                repo=pr.repo,
-                pr_number=pr.pr_number,
-                head_sha=pr.head_sha,
-                author=pr.author,
-                findings_count=total,
-                need_human_review=result.overall_need_human_review,
-                raw={
-                    "base_sha": pr.base_sha,
-                    "title": pr.title,
-                    "html_url": pr.html_url,
-                    "diff_url": pr.diff_url,
-                },
-            )
-        )
+        build_review_store().save(record_from_result(result))
     except Exception:
         logger.warning("could not persist review findings for %s", msg.task_key)
+
+    # 飞书摘要也搬到这里（D5）。此前它在 webhook 里同步发送——而 webhook 早已改成
+    # 只入队就返回，那时已经没有结论可发了。漏掉这一步的表现是"通知静默消失"，
+    # 不会报错，所以它是随着异步化一起被弄丢的。
+    try:
+        from apps.code_review_pipeline.notifications.feishu_notifier import (
+            FeishuReviewNotifier,
+        )
+        from apps.code_review_pipeline.reporting import build_notification, count_by_severity
+
+        counts = count_by_severity(result)
+        await FeishuReviewNotifier.from_env().send_summary(
+            build_notification(result, counts)
+        )
+    except Exception as exc:
+        logger.warning("feishu notification failed: %s", exc)
 
     return TaskState.WAITING_APPROVAL.value
 
 
+def record_from_result(result: Any) -> Any:
+    """审查结论 -> 任务行（唯一的 ``ReviewRecord`` 生产者）。
+
+    此前这个函数住在 webhook 路由里，而真正的调用者是 worker——路由改成异步派发
+    之后它变成死代码，留着只会让人以为 webhook 还在写结论。搬到唯一的调用方，
+    顺带消掉 worker 里那份内联的重复实现（同一个 ``ReviewRecord`` 在一个文件里
+    构造了两次，字段还差一个 ``changed_files_count``）。
+
+    ``raw`` 里的四项曾长期是空的：``save()`` 从 ``raw`` 读它们，于是 NOT NULL 列
+    写空串、不报错，只是库里留下空标题的空行。这条坑在 review_store 里有记录。
+    """
+    from apps.code_review_pipeline.storage.review_store import ReviewRecord
+
+    total_findings = 0
+    for attr in ("triage", "static_analysis", "semantic_review", "test_coverage", "report"):
+        section = getattr(result, attr, None)
+        if section:
+            total_findings += len(getattr(section, "findings", ()) or ())
+    return ReviewRecord(
+        trace_id=result.trace_id,
+        repo=result.pr.repo,
+        pr_number=result.pr.pr_number,
+        head_sha=result.pr.head_sha,
+        author=result.pr.author,
+        findings_count=total_findings,
+        need_human_review=result.overall_need_human_review,
+        raw={
+            "base_sha": result.pr.base_sha,
+            "title": result.pr.title,
+            "html_url": result.pr.html_url,
+            "diff_url": result.pr.diff_url,
+            "changed_files_count": len(result.pr.changed_files),
+        },
+    )
+
+
 def build_worker() -> TaskWorker:
-    """装配 worker。Redis 与 store 各自独立连接：队列挂了不该影响读库。"""
+    """装配 worker。Redis 与 store 各自独立连接：队列挂了不该影响读库。
+
+    ``reclaim_min_idle_ms`` 可用 ``TASK_RECLAIM_MIN_IDLE_MS`` 调小。它是崩溃恢复的
+    **感知延迟**——worker 死后要等这么久，消息才会被 XAUTOCLAIM 认领。生产默认
+    60s 是个合理折中；demo 与集成测试要把它调到几秒，否则"崩溃后多久恢复"这条
+    判据本身就得等一分钟。默认值不变，只是让这个折中可见、可调。
+    """
     from redis.asyncio import Redis
 
     from app.config import settings
 
     redis = Redis.from_url(settings.redis_url, decode_responses=False)
-    return TaskWorker(TaskQueue(redis), build_review_store(), review_processor)
+    idle_ms = int(os.getenv("TASK_RECLAIM_MIN_IDLE_MS") or "60000")
+    return TaskWorker(
+        TaskQueue(redis), build_review_store(), review_processor,
+        reclaim_min_idle_ms=idle_ms,
+    )
 
 
 def main() -> None:

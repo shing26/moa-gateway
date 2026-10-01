@@ -96,6 +96,23 @@ async def publish_review(
     owner, _, name = repo_name.partition("/")
     repo = GitHubRepo(owner=owner, name=name)
 
+    async def _complete(reason: str) -> None:
+        """推进到 done **并留审计**。
+
+        收编成一个函数是有原因的：原先这两处 ``transition_task(..., "complete")``
+        是裸调用，状态推进了、审计没写。后果是审计链里看不出任务是怎么收尾的——
+        "写回成功"与"在 posting 阶段被杀掉"留下的记录**完全一样**。而这条链
+        存在的全部意义就是"事后能证明发生了什么"，少写最后一步等于在最关键的地方
+        留白。
+
+        顺序与 approve_task 一致：**先审计后推进**。崩在中间会留下一条 complete
+        审计而状态仍在 posting，人能看出来"记录与状态不一致"，反过来则查不出来。
+        """
+        from apps.code_review_pipeline.task_audit import record_lifecycle
+
+        await record_lifecycle(task_id, repo_name, "complete", reason=reason)
+        store.transition_task(identity, "complete")
+
     # store 的方法是**同步**的（沿用既有 psycopg 同步客户端的约定），只有 GitHub
     # 那一侧 await。两边不一致会让调用点漏 await 或者 await 一个非协程——
     # 后者是 TypeError，报错位置还离真正的原因很远。
@@ -108,7 +125,7 @@ async def publish_review(
     if adopted is not None:
         found_id = str(adopted.get("id", ""))
         store.set_posted_review_id(identity, found_id)
-        store.transition_task(identity, "complete")
+        await _complete("adopted")
         logger.info("adopted existing review %s for %s", found_id, task_id)
         return PublishOutcome(status="adopted", review_id=found_id)
 
@@ -119,5 +136,5 @@ async def publish_review(
     created = await github.create_review(repo, pr_number, body, event="COMMENT")
     review_id = str(created.get("id", ""))
     store.set_posted_review_id(identity, review_id)
-    store.transition_task(identity, "complete")
+    await _complete("posted")
     return PublishOutcome(status="posted", review_id=review_id)

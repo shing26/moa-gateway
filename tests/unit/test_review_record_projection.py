@@ -3,7 +3,7 @@
 真库实证：唯一一行遗留数据的 repo 为空、pr_number=0，而 trace_id 却是合法的
 cr_shing26/moa-gateway:...。根因是 PostgresReviewStore.save() 从 record.raw 取
 repo / pr_number / title / base_sha / html_url / diff_url，而唯一的生产者
-github_review_route._record_from_result 传的是 raw={}，那些 .get(key, default)
+app.worker.record_from_result 传的是 raw={}，那些 .get(key, default)
  于是全部落到默认值。
 
 为什么必须现在修：D2 刚把幂等键定成 UNIQUE(repo, pr_number, head_sha)。建在
@@ -74,7 +74,7 @@ def saved_params(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
             author="shing26",
             findings_count=3,
             need_human_review=True,
-            # 生产者（github_review_route._record_from_result）就是传空 raw
+            # 生产者（app.worker.record_from_result）就是传空 raw
             raw={},
         )
     )
@@ -120,13 +120,13 @@ def test_required_not_null_columns_are_populated(
 
 
 def test_record_route_projection_fills_identity_fields() -> None:
-    """_record_from_result 必须把 PR 上下文的真实字段填进 ReviewRecord。
+    """record_from_result 必须把 PR 上下文的真实字段填进 ReviewRecord。
 
     ReviewRecord 里已有 repo / pr_number / head_sha / author 几个字段，
-    _record_from_result 也确实赋了值——问题只出在 save() 不看它们。这条断言
+    record_from_result 也确实赋了值——问题只出在 save() 不看它们。这条断言
     "生产者侧填了"，与上面几条"消费者侧读对"配合，才算闭环。
     """
-    from apps.code_review_pipeline.routing import github_review_route as route
+    from app.worker import record_from_result
 
     class _Pr:
         repo = "shing26/moa-gateway"
@@ -137,6 +137,9 @@ def test_record_route_projection_fills_identity_fields() -> None:
         title = "add task queue"
         html_url = "https://github.com/shing26/moa-gateway/pull/7"
         diff_url = "https://github.com/shing26/moa-gateway/pull/7.diff"
+        # PRContext 上确实有这个字段，生产函数用它填 changed_files_count。
+        # 假对象少给一个字段，生产函数就该在这里炸——那才是"缺字段"该有的样子。
+        changed_files: list[Any] = []
 
     class _Section:
         findings: list[Any] = []
@@ -151,7 +154,7 @@ def test_record_route_projection_fills_identity_fields() -> None:
         report = _Section()
         overall_need_human_review = False
 
-    record = route._record_from_result(_Result())
+    record = record_from_result(_Result())
     assert record.repo == "shing26/moa-gateway"
     assert record.pr_number == 7
     assert record.head_sha == "deadbeefcafe"

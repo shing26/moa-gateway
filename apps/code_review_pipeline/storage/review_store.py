@@ -235,6 +235,13 @@ class ReviewStore:
         allowed = tuple(sorted(s.value for s, acts in ALLOWED_ACTIONS.items() if act in acts))
         return self._transition(identity, act, allowed)
 
+    def get_posted_review_id(self, identity: tuple[str, int, str]) -> str | None:
+        """已写回的 GitHub review id；None = 还没写回（D4 幂等的主判据）。"""
+        return self._posted.get(identity)
+
+    def set_posted_review_id(self, identity: tuple[str, int, str], review_id: str) -> None:
+        self._posted[identity] = review_id
+
     def save(self, record: ReviewRecord) -> None:
         self._records[record.trace_id] = record
         identity = (record.repo, record.pr_number, record.head_sha)
@@ -520,13 +527,6 @@ class PostgresReviewStore:
         act = TaskAction(action)
         allowed = tuple(sorted(s.value for s, acts in ALLOWED_ACTIONS.items() if act in acts))
         return self._transition(identity, act, allowed)
-
-    def get_posted_review_id(self, identity: tuple[str, int, str]) -> str | None:
-        """已写回的 GitHub review id；None = 还没写回（D4 幂等的主判据）。"""
-        return self._posted.get(identity)
-
-    def set_posted_review_id(self, identity: tuple[str, int, str], review_id: str) -> None:
-        self._posted[identity] = review_id
 
     async def close(self) -> None:
         if self._conn is not None:

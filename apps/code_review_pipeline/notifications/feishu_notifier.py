@@ -41,6 +41,29 @@ class FeishuReviewNotifier:
             notification.findings_by_severity or {},
         )
 
+        # **没有明确配置的收件目标就不发**。
+        #
+        # 此前 target 回落成 notification.repo（也就是 "owner/repo" 这个字符串），
+        # 而 card_sender 又会借用聊天链路那套飞书凭据。结果是：只要 .env 里配了
+        # FEISHU_APP_ID/SECRET（那是给聊天 webhook 用的），PR 审查链路就会拿着一个
+        # repo 名当 chat_id 去发卡片——实测在 golden path 里真的换到了 token 并
+        # "发送成功"。
+        #
+        # 这不是"多发了一条通知"，而是**审查链路擅自复用了聊天链路的凭据和目标**。
+        # 两件事分开配、各自决定发不发，才是能预期的行为。
+        #
+        # 判据只看 _default_target，不看 _webhook_url：``FeishuCardSender.send_card``
+        # 是拿 ``card.target`` 当 receive_id、并且固定用 receive_id_type=chat_id 去
+        # 调 im/v1/messages 的，``_webhook_url`` 在这条发送路径上**根本没被读**。
+        # 拿 webhook 存在当"已配置"的凭证，会在真正发出去时仍然把 repo 名当 chat_id。
+        if not self._default_target:
+            logger.info(
+                "no notification destination configured (FEISHU_HOME_CHANNEL); "
+                "skipping feishu summary trace=%s",
+                notification.trace_id,
+            )
+            return
+
         card_sender = self._card_sender or _global_card_sender
         if card_sender is None:
             logger.warning("feishu card sender not initialized; skip notification")
@@ -51,8 +74,7 @@ class FeishuReviewNotifier:
         else:
             card = self._build_summary_card(notification)
 
-        target = self._default_target or notification.repo
-        card.target = target
+        card.target = self._default_target
 
         ok = await card_sender.send_card(card)
         if not ok:

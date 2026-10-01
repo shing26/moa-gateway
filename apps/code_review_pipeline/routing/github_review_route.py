@@ -8,14 +8,12 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from app.config import settings
-from app.deps import logger, tracer
+from app.deps import tracer
 from app.middleware.auth import insecure_mode_enabled
-from app.models.events import MoAEvent, PlatformEvent
-from apps.code_review_pipeline.reporting import build_notification, count_by_severity
-from apps.code_review_pipeline.agents.code_review_pipeline import CodeReviewPipeline
-from apps.code_review_pipeline.notifications.feishu_notifier import FeishuReviewNotifier
 from apps.code_review_pipeline.storage.review_store import ReviewStore, build_review_store
+from apps.code_review_pipeline.task_queue import TaskQueue
 from apps.code_review_pipeline.routing.github_signature import verify_signature
+from apps.code_review_pipeline.routing.github_provider import github_configured
 
 github_review_router = APIRouter()
 logger = logging.getLogger("moa.code_review.route")
@@ -32,7 +30,7 @@ logger = logging.getLogger("moa.code_review.route")
 # 不再被 import 吞掉 —— 它改为在第一次真正写记录时抛出（见 `_get_review_store`），
 # 那是能在响应里如实降级为 5xx/日志的位置，而不是让整个进程连启动都完不成。
 _review_store: ReviewStore | None = None
-_feishu_notifier = FeishuReviewNotifier.from_env()
+_task_queue: TaskQueue | None = None
 
 
 def _get_review_store() -> ReviewStore:
@@ -40,6 +38,26 @@ def _get_review_store() -> ReviewStore:
     if _review_store is None:
         _review_store = build_review_store()
     return _review_store
+
+
+def _get_task_queue() -> TaskQueue:
+    """惰性构建队列客户端（同样不在 import 期连 Redis，理由见 _review_store）。"""
+    global _task_queue
+    if _task_queue is None:
+        from redis.asyncio import Redis
+
+        _task_queue = TaskQueue(
+            Redis.from_url(settings.redis_url, decode_responses=False)
+        )
+    return _task_queue
+
+
+# 只有这三个 action 值得审一遍。worker 端把 action 固定成 "synchronize"（队列消息
+# 只带身份，语义"这份代码要审一遍"由入口判定），所以**过滤必须发生在这里**——
+# 否则 closed / labeled / edited 这类事件会各自变成一次完整的 5-agent 审查。
+# 这份清单与 build_pr_context_from_github 的是同一件事，单点声明在这里，
+# 那边保留自己的检查是因为它也可能被非 webhook 路径直接调用。
+REVIEWABLE_ACTIONS = frozenset({"opened", "synchronize", "reopened"})
 
 
 def build_task_key(repo: str, pr_number: Any, head_sha: str) -> str:
@@ -69,6 +87,48 @@ def build_task_key(repo: str, pr_number: Any, head_sha: str) -> str:
     return f"{repo}#{number}@{sha}"
 
 
+def record_from_webhook(task_key: str, body: dict[str, Any]) -> Any:
+    """从 **webhook payload** 建任务行（入队时刻的快照，不是审查结论）。
+
+    为什么字段取自 payload 而不是审查结果：D3 之后审查跑在 worker 里，webhook 这一
+    刻**还没有任何结论**。入队时要先把身份三列落库——worker 认领时就是按它们查的行，
+    晚一步就变成"消息指向不存在的任务"被 ack 掉。
+
+    这也顺手修掉了一个老问题：``_record_from_result`` 只能在审查跑完后调，于是
+    "入队时任务行不存在"这个窗口一直存在；只是此前 webhook 同步跑审查，窗口小到
+    没人踩到。
+    """
+    from apps.code_review_pipeline.storage.review_store import ReviewRecord
+
+    pr = dict(body.get("pull_request", {}))
+    repo_meta = dict(body.get("repository", {}))
+    return ReviewRecord(
+        trace_id=f"cr_{task_key}",
+        repo=str(repo_meta.get("full_name", "")),
+        pr_number=int(pr.get("number", 0) or 0),
+        head_sha=str(pr.get("head", {}).get("sha", "")),
+        author=str(pr.get("user", {}).get("login", "")),
+        # 结论未知：计数为 0、"是否需要人工"为 False。worker 跑完会覆盖这两列。
+        findings_count=0,
+        need_human_review=False,
+        raw={
+            "base_sha": str(pr.get("base", {}).get("sha", "")),
+            "title": str(pr.get("title", "")),
+            "html_url": str(pr.get("html_url", "")),
+            "diff_url": str(pr.get("diff_url", "")),
+            "changed_files_count": int(pr.get("changed_files", 0) or 0),
+            "labels": [
+                str(x.get("name", "")) if isinstance(x, dict) else str(x)
+                for x in (pr.get("labels") or [])
+            ],
+            "reviewers": [
+                str(x.get("login", "")) if isinstance(x, dict) else str(x)
+                for x in (pr.get("requested_reviewers") or [])
+            ],
+        },
+    )
+
+
 @github_review_router.post("/webhook/github/review")
 async def github_review_webhook(request: Request) -> JSONResponse:
     with tracer.start_as_current_span("moa.code_review.webhook") as span:
@@ -96,96 +156,80 @@ async def github_review_webhook(request: Request) -> JSONResponse:
         pr_number = body.get("pull_request", {}).get("number")
         head_sha = str(body.get("pull_request", {}).get("head", {}).get("sha", ""))
         task_key = build_task_key(repo, pr_number, head_sha)
-        platform_event = PlatformEvent(
-            platform="github",
-            message_id=task_key,
-            session_id=repo,
-            user_id=str(body.get("pull_request", {}).get("user", {}).get("login", "")),
-            payload=body,
-        )
         trace_id = f"cr_{task_key}"
         span.set_attribute("moa.channel", "github")
         span.set_attribute("moa.trace_id", trace_id)
         span.set_attribute("moa.task_key", task_key)
 
-        try:
-            pipeline = CodeReviewPipeline.from_env()
-        except Exception as exc:
-            logger.error("github review pipeline init failed: %s", exc)
-            if "GITHUB_TOKEN" in str(exc):
-                message = "PR 审查未执行：GITHUB_TOKEN 未配置。"
-            else:
-                message = "PR 审查未执行：审查流水线未配置完成。"
+        action = str(body.get("action", "")).lower()
+        if action not in REVIEWABLE_ACTIONS:
+            # 非审查事件照收不误，但不入队。返回 200 而不是 4xx：GitHub 侧看到
+            # 2xx 就不会重投，而"这条事件我们不管"确实不是投递方的错。
+            logger.info("ignoring github event action=%s task=%s", action, task_key)
             return JSONResponse({
-                "trace_id": trace_id,
-                "status": "degraded",
-                "message": message,
-            }, status_code=200)
-
-        event = MoAEvent(
-            trace_id=trace_id,
-            event=None,
-            session_id=platform_event.session_id,
-            text="",
-            context=body,
-        )
-
-        try:
-            pr, result = await pipeline.run(event)
-        except Exception as exc:
-            logger.exception("github review run failed")
-            return JSONResponse({
-                "error": "pipeline_run_failed",
-                "detail": "PR 审查执行失败，请稍后重试。",
-            }, status_code=500)
-
-        _get_review_store().save(_record_from_result(result))
-
-        findings_by_severity = count_by_severity(result)
-        notification = build_notification(result, findings_by_severity)
-        try:
-            await _feishu_notifier.send_summary(notification)
-        except Exception as exc:
-            logger.warning("feishu notification failed: %s", exc)
-
-        return JSONResponse(
-            {
                 "trace_id": trace_id,
                 "task_key": task_key,
-                "repo": pr.repo,
-                "pr_number": pr.pr_number,
-                "changed_files": len(pr.changed_files),
-                "findings_by_severity": findings_by_severity,
-                "need_human_review": result.overall_need_human_review,
-                "status": "accepted",
-                "recommendation": getattr(result.report, "recommendation", None),
-                "summary": getattr(result.report, "summary", "") or "",
-            }
-        )
+                "status": "ignored",
+                "reason": f"action {action or '(missing)'} is not reviewable",
+            }, status_code=200)
 
+        if not github_configured():
+            # fail-fast：GitHub 侧不可用时**当场**如实降级。若照常入队，worker 会
+            # 在半夜对着一个注定失败的取数请求抛异常，而投递方早就收到 202 走了。
+            logger.error("github review skipped: no GitHub credentials configured")
+            return JSONResponse({
+                "trace_id": trace_id,
+                "task_key": task_key,
+                "status": "degraded",
+                "message": "PR 审查未执行：GITHUB_TOKEN 未配置。",
+            }, status_code=200)
 
-def _record_from_result(result: Any) -> Any:
-    from apps.code_review_pipeline.storage.review_store import ReviewRecord
-    total_findings = 0
-    for attr in ("triage", "static_analysis", "semantic_review", "test_coverage", "report"):
-        section = getattr(result, attr, None)
-        if section:
-            total_findings += len(getattr(section, "findings", ()) or ())
-    return ReviewRecord(
-        trace_id=result.trace_id,
-        repo=result.pr.repo,
-        pr_number=result.pr.pr_number,
-        head_sha=result.pr.head_sha,
-        author=result.pr.author,
-        findings_count=total_findings,
-        need_human_review=result.overall_need_human_review,
-        # raw 此前是空的，于是 save() 里所有 raw.get(...) 全落默认值，NOT NULL 列
-        # 一律写空串（不报错，但库里留下空标题的空行）。这些字段 dataclass 上没有，
-        # 只能靠 raw 传递，所以这里必须填。
-        raw={
-            "base_sha": getattr(result.pr, "base_sha", "") or "",
-            "title": getattr(result.pr, "title", "") or "",
-            "html_url": getattr(result.pr, "html_url", "") or "",
-            "diff_url": getattr(result.pr, "diff_url", "") or "",
-        },
-    )
+        store = _get_review_store()
+        identity = (repo, int(pr_number or 0), head_sha)
+        # 先看状态再落库：已经审过（含任何终态）就是重投，返回 200 且**不再入队**。
+        # 不靠"入队前先查"来做幂等——查与写之间有窗口，而真正的幂等判据是消费端的
+        # 条件 UPDATE 认领。这里查状态只为给出正确的 HTTP 语义（202 vs 200）。
+        existing = store.get_task_state(identity)
+        store.save(record_from_webhook(task_key, body))
+
+        try:
+            message_id = await _get_task_queue().enqueue(repo, identity[1], head_sha)
+        except Exception:
+            logger.exception("could not enqueue review task %s", task_key)
+            # 503 而非 202：任务行已经是 queued，但**没有任何东西会去跑它**。说"已
+            # 受理"是撒谎。投递方重投是安全的（重投即重新入队，行数不变）。
+            return JSONResponse({
+                "trace_id": trace_id,
+                "task_key": task_key,
+                "status": "queue_unavailable",
+                "message": "任务队列不可用，请重试投递。",
+            }, status_code=503)
+
+        span.set_attribute("moa.queue_message_id", message_id)
+        if existing is not None:
+            logger.info(
+                "redelivery of %s (state=%s); re-enqueued for idempotent skip",
+                task_key,
+                existing,
+            )
+            return JSONResponse({
+                "trace_id": trace_id,
+                "task_key": task_key,
+                "repo": repo,
+                "pr_number": identity[1],
+                "state": existing,
+                "status": "idempotent",
+                "detail": "该 PR 的这个 commit 已在审查流程中或已完成。",
+            }, status_code=200)
+
+        # 202：已受理，未完成。**响应体里没有 findings_by_severity**——那要等 5 个
+        # agent 跑完才知道，而返回它就意味着又回到了"webhook 同步跑审查"。
+        logger.info("queued review task %s as %s", task_key, message_id)
+        return JSONResponse({
+            "trace_id": trace_id,
+            "task_key": task_key,
+            "repo": repo,
+            "pr_number": identity[1],
+            "state": "queued",
+            "status": "accepted",
+        }, status_code=202)

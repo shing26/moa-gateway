@@ -1,0 +1,5 @@
+# golden path 的运行日志：每次跑都变，且体积不小。
+# fixture / 脚本 / README 是资产，这些不是。
+*.log
+*.err
+

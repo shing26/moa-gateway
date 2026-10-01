@@ -32,7 +32,7 @@ from app.audit.wal import verify_audit_dir  # noqa: E402
 
 
 def _report_task(
-    logs_dir: pathlib.Path, task_id: str, expect: int | None, quiet: bool
+    logs_dir: pathlib.Path, task_id: str, expect: int | None, quiet: bool, as_json: bool = False
 ) -> int:
     """按 task_id 打印审计行，并校验条数与种类。
 
@@ -55,13 +55,30 @@ def _report_task(
     lifecycle = [r for r in rows if r.get("agent_name") == LIFECYCLE_AGENT]
     human = [r for r in rows if r.get("agent_name") == HUMAN_DECISION_AGENT]
 
-    if not quiet:
+    if as_json:
+        import json
+
+        print(
+            json.dumps(
+                {
+                    "task_id": task_id,
+                    "total": len(rows),
+                    "agents": len(agents),
+                    "lifecycle": len(lifecycle),
+                    "human_decision": len(human),
+                    "agent_names": sorted({str(r.get("agent_name")) for r in agents}),
+                },
+                ensure_ascii=False,
+            )
+        )
+    elif not quiet:
         for row in rows:
             print(f"  {row.get('agent_name')}: {str(row.get('agent_output', ''))[:60]}")
-    print(
-        f"task_id={task_id}: 共 {len(rows)} 行"
-        f"（agent {len(agents)}/5，lifecycle {len(lifecycle)}，人工决策 {len(human)}）"
-    )
+    if not as_json:
+        print(
+            f"task_id={task_id}: 共 {len(rows)} 行"
+            f"（agent {len(agents)}/5，lifecycle {len(lifecycle)}，人工决策 {len(human)}）"
+        )
 
     missing = [a for a in AGENT_NAMES if a not in {r.get("agent_name") for r in agents}]
     if missing:
@@ -96,6 +113,11 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="配合 --task：期望的行数，不符则退出码 1",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="配合 --task：只输出一行 JSON 计数（给脚本/回归断言用）",
+    )
     args = parser.parse_args(argv)
 
     if not args.logs_dir.exists():
@@ -103,7 +125,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.task:
-        return _report_task(args.logs_dir, args.task, args.expect_rows, args.quiet)
+        return _report_task(
+            args.logs_dir, args.task, args.expect_rows, args.quiet, as_json=args.json
+        )
 
     results = verify_audit_dir(args.logs_dir, limit=args.limit)
     if not results:
