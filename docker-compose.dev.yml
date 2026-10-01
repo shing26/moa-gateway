@@ -65,6 +65,42 @@ services:
       postgres:
         condition: service_healthy
 
+  # 任务 worker（D3）：独立进程消费 Redis Streams 里的 PR 审查任务。
+  #
+  # 为什么必须是独立 service 而不是网关里的后台协程：一次审查要跑 5 个 agent、
+  # 可能等人审批，能占几分钟。放在网关进程里，一个卡住的任务会连带拖垮同进程
+  # 的所有 HTTP 请求。
+  #
+  # CODE_REVIEW_AUTO_MIGRATE=0：schema 的所有权归 gateway。worker 只是消费者，
+  # 不该在启动时改 schema——迁移要 ACCESS EXCLUSIVE 锁，与网关并行启动时会互相
+  # 排队，而任何一条在途的只读连接就足以让迁移挂死（真库实测）。
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    environment:
+      - ENV=dev
+      - MOA_ENV=dev
+      - REDIS_URL=redis://redis:6379/0
+      - VECTOR_DB_DSN=postgresql://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
+      - CODE_REVIEW_AUTO_MIGRATE=0
+      - LLM_PROVIDER=${LLM_PROVIDER:-local}
+      - LLM_BASE_URL=${DOCKER_LLM_BASE_URL:-http://host.docker.internal:11434/v1}
+      - LLM_MODEL=${LLM_MODEL:-qwen2.5:3b}
+      - LLM_API_KEY=${LLM_API_KEY:-ollama-local}
+      - LLM_FALLBACK_MODELS=${LLM_FALLBACK_MODELS:-qwen2.5:3b}
+      - LITELLM_LOCAL_MODEL_COST_MAP=true
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GATEWAY_ALLOW_INSECURE=${GATEWAY_ALLOW_INSECURE:-0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    # worker 崩了要能自己起来——"进程会挂"正是这套底座要处理的场景之一。
+    restart: unless-stopped
+
   omniroute:
     image: diegosouzapw/omniroute:latest
     profiles: ["base"]

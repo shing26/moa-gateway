@@ -82,6 +82,24 @@ def test_waiting_approval_accepts_human_decisions() -> None:
         assert can(TaskState.WAITING_APPROVAL, action), action.value
 
 
+def test_resume_is_a_self_loop_on_running() -> None:
+    """RESUME 只在 running 上自环，用来接管崩溃遗留的任务。
+
+    没有它的话，worker 崩在"认领后、落库前"时，任务行是 running 而消息还在 PEL：
+    重启后认领失败 → 跳过 → 任务**永久卡住**，且不报任何错（集成测试实测过）。
+    """
+    assert can(TaskState.RUNNING, TaskAction.RESUME)
+    assert next_state(TaskState.RUNNING, TaskAction.RESUME) is TaskState.RUNNING
+
+
+@pytest.mark.parametrize(
+    "state", [TaskState.QUEUED, TaskState.WAITING_APPROVAL, TaskState.POSTING]
+)
+def test_resume_is_only_valid_on_running(state: TaskState) -> None:
+    """RESUME 不能从别的状态发起：它专治"卡在 running"，不是万能钥匙。"""
+    assert not can(state, TaskAction.RESUME), f"{state.value} 不该允许 resume"
+
+
 def test_no_action_is_dead_vocabulary() -> None:
     """每个动作都必须至少被一个状态接受。
 

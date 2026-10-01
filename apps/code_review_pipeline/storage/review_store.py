@@ -208,6 +208,25 @@ class ReviewStore:
             return False
         return True
 
+    def acquire_task(self, identity: tuple[str, int, str], *, reclaim: bool = False) -> bool:
+        from apps.code_review_pipeline.task_state import (
+            InvalidTaskTransition,
+            TaskAction,
+            TaskState,
+        )
+
+        action = TaskAction.RESUME if reclaim else TaskAction.CLAIM
+        allowed = (
+            (TaskState.QUEUED.value, TaskState.RUNNING.value)
+            if reclaim
+            else (TaskState.QUEUED.value,)
+        )
+        try:
+            self._transition(identity, action, allowed)
+        except (TaskNotFound, InvalidTaskTransition):
+            return False
+        return True
+
     def transition_task(self, identity: tuple[str, int, str], action: str) -> str:
         from apps.code_review_pipeline.task_state import ALLOWED_ACTIONS, TaskAction
 
@@ -392,7 +411,18 @@ class PostgresReviewStore:
                 "UPDATE code_review_prs SET status = %s, "
                 "state_transitions = state_transitions || %s::jsonb, updated_at = NOW() "
                 "WHERE " + self._IDENTITY + " AND status = ANY(%s) RETURNING status",
-                (target.value, Jsonb(rows_in), list(allowed_from)),
+                # 顺序必须与 SQL 里占位符的出现顺序一致：status、jsonb、
+                # 然后是 _IDENTITY 的 repo/pr_number/head_sha，最后是 ANY。
+                # 少传会在真库上直接报 "6 placeholders but 3 parameters"；
+                # 假 cursor 不校验，于是单测全绿（同一个教训的又一次）。
+                (
+                    target.value,
+                    Jsonb(rows_in),
+                    repo,
+                    pr_number,
+                    head_sha,
+                    list(allowed_from),
+                ),
             )
             row = cur.fetchone()
             if row is not None:
@@ -410,10 +440,44 @@ class PostgresReviewStore:
 
     def claim_task(self, identity: tuple[str, int, str]) -> bool:
         """认领一个 queued 任务；已被别人认领则返回 False（不抛）。"""
-        from apps.code_review_pipeline.task_state import TaskAction, TaskState
+        from apps.code_review_pipeline.task_state import (
+            InvalidTaskTransition,
+            TaskAction,
+            TaskState,
+        )
 
         try:
             self._transition(identity, TaskAction.CLAIM, (TaskState.QUEUED.value,))
+        except (TaskNotFound, InvalidTaskTransition):
+            return False
+        return True
+
+    def acquire_task(self, identity: tuple[str, int, str], *, reclaim: bool = False) -> bool:
+        """取得一个任务的所有权。``reclaim=True`` 时允许接管 running 的任务。
+
+        存在的理由（2026-10-01，集成测试实测）：worker 崩在"认领之后、状态落库
+        之前"时，任务行已经是 running、消息还在 PEL。只认 queued 的话，重启后的
+        worker 认领失败 → 直接跳过 → 任务永久卡在 running，且没有任何报错。
+
+        ``reclaim=True`` 只应来自 XAUTOCLAIM 路径：Redis 保证只有空闲超过
+        min-idle-time 的消息才会被回收，所以"原 worker 还活着但很慢"与"原 worker
+        死了"在那一刻无法区分。这里选择**当作它死了**（重跑一遍）而不是当作它活着
+        （任务永久卡住）—— 前者浪费一次审查，后者丢失任务。
+        """
+        from apps.code_review_pipeline.task_state import (
+            InvalidTaskTransition,
+            TaskAction,
+            TaskState,
+        )
+
+        action = TaskAction.RESUME if reclaim else TaskAction.CLAIM
+        allowed = (
+            (TaskState.QUEUED.value, TaskState.RUNNING.value)
+            if reclaim
+            else (TaskState.QUEUED.value,)
+        )
+        try:
+            self._transition(identity, action, allowed)
         except (TaskNotFound, InvalidTaskTransition):
             return False
         return True

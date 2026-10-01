@@ -36,6 +36,7 @@ class TaskState(str, Enum):
 
 class TaskAction(str, Enum):
     CLAIM = "claim"
+    RESUME = "resume"
     REQUEST_APPROVAL = "request_approval"
     APPROVE = "approve"
     REJECT = "reject"
@@ -58,8 +59,19 @@ class TaskAction(str, Enum):
 #    幂等判断（posted_review_id IS NULL）在两种终态下的处置不同。
 ALLOWED_ACTIONS: dict[TaskState, frozenset[TaskAction]] = {
     TaskState.QUEUED: frozenset({TaskAction.CLAIM, TaskAction.FAIL}),
+    # RESUME 是 running 上的**自环**：只能由"回收崩溃遗留消息"的路径发起
+    # （见 review_store.acquire_task(reclaim=True)），正常流程不该用。
+    #
+    # 为什么需要它：worker 崩在"认领之后、落库之前"时，任务行已是 running 而消息
+    # 还在 PEL。若只认领 queued，这个任务就**永久卡住**——没人能推进它，也没人
+    # 会报错。RESUME 让重启后的 worker 能接管自己（可能是自己重启前的）遗留工作。
+    #
+    # 代价是"同一任务可能被跑两遍"（原 worker 其实没死，只是慢）。这是有意接受的：
+    # 本系统选的是**至少一次执行 + 幂等副作用**，不是恰好一次。审查流程重跑只是
+    # 多花一遍 5 个 agent，而漏跑一个任务是彻底丢失。
     TaskState.RUNNING: frozenset(
         {
+            TaskAction.RESUME,
             TaskAction.REQUEST_APPROVAL,
             TaskAction.COMPLETE,
             TaskAction.FAIL,
@@ -78,6 +90,7 @@ ALLOWED_ACTIONS: dict[TaskState, frozenset[TaskAction]] = {
 
 ACTION_TARGET: dict[TaskAction, TaskState] = {
     TaskAction.CLAIM: TaskState.RUNNING,
+    TaskAction.RESUME: TaskState.RUNNING,
     TaskAction.REQUEST_APPROVAL: TaskState.WAITING_APPROVAL,
     # APPROVE 直接进 POSTING：审批通过和"开始写回"是同一个动作的两面，中间
     # 没有任何可观测状态。曾经单独留了个 start_posting，但它与 approve 目标
