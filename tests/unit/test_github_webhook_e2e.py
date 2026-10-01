@@ -10,7 +10,29 @@ from app.config import settings
 from app.main import app
 from apps.code_review_pipeline.rag.embeddings import EmbeddingError
 from apps.code_review_pipeline.routing.github_client import GitHubClient
+from apps.code_review_pipeline.routing.github_signature import sign_payload
 from tests.support import app_client
+
+_TEST_WEBHOOK_SECRET = "test-webhook-secret"
+
+
+def _post_signed(client: Any, payload: dict[str, Any], *, secret: str | None = None) -> Any:
+    """带真实 HMAC 签名投递事件。
+
+    签名必须对**实际发出的字节**计算，所以这里手动序列化再带上签名头——如果改用
+    ``client.post(..., json=payload, headers=...)``，httpx 内部序列化出的字节与这里
+    算签名的字节可能不一致（分隔符/转义差异），测试会假失败。
+    """
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    used = _TEST_WEBHOOK_SECRET if secret is None else secret
+    return client.post(
+        "/webhook/github/review",
+        content=raw,
+        headers={
+            "Content-Type": "application/json",
+            "X-Hub-Signature-256": sign_payload(raw, used),
+        },
+    )
 
 
 class DummyLLM:
@@ -74,6 +96,8 @@ def _patch_github_and_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     ):
         monkeypatch.setattr(f"{module}.build_code_review_llm", lambda: DummyLLM())
     monkeypatch.setattr(settings, "github_token", "test-token")
+    # 端点自 2026-10-01 起 fail-closed 校验 X-Hub-Signature-256
+    monkeypatch.setattr(settings, "github_webhook_secret", _TEST_WEBHOOK_SECRET)
 
 
 def test_github_review_webhook_returns_accepted() -> None:
@@ -86,12 +110,13 @@ def test_github_review_webhook_returns_accepted() -> None:
             "title": "e2e: verify webhook pipeline",
             "state": "open",
             "user": {"login": "shing26"},
+            "head": {"sha": "abc1234"},
         },
         "repository": {
             "full_name": "shing26/moa-gateway",
         },
     }
-    response = client.post("/webhook/github/review", json=payload)
+    response = _post_signed(client, payload)
     print("STATUS:", response.status_code)
     print("BODY:", response.text[:500])
     assert response.status_code == 200
@@ -103,6 +128,9 @@ def test_github_review_webhook_returns_accepted() -> None:
     assert "changed_files" in body
     assert "findings_by_severity" in body
     assert "need_human_review" in body
+    # D1：trace_id 由 (repo, pr_number, head_sha) 决定
+    assert body.get("task_key") == "shing26/moa-gateway#1@abc1234"
+    assert body.get("trace_id") == "cr_shing26/moa-gateway#1@abc1234"
 
 
 def test_github_review_webhook_degrades_without_token(monkeypatch) -> None:
@@ -116,12 +144,13 @@ def test_github_review_webhook_degrades_without_token(monkeypatch) -> None:
             "title": "e2e: no token",
             "state": "open",
             "user": {"login": "shing26"},
+            "head": {"sha": "abc1234"},
         },
         "repository": {
             "full_name": "shing26/moa-gateway",
         },
     }
-    response = client.post("/webhook/github/review", json=payload)
+    response = _post_signed(client, payload)
     assert response.status_code == 200
     body = response.json()
     assert body.get("status") == "degraded"
@@ -196,3 +225,72 @@ def test_webhook_sentence_containing_command_words_is_not_a_command() -> None:
             assert body.get("status") not in ("reset", "suspended"), (
                 f"{text!r} 被当成了指令（status={body.get('status')}）"
             )
+
+# ── D1 前置修复（2026-10-01）────────────────────────────────────────
+
+
+def test_webhook_rejects_unsigned_request() -> None:
+    """D1 判据：无签名 → 401。端点此前零校验。"""
+    client = app_client(app)
+    response = client.post("/webhook/github/review", json={"action": "opened", "number": 1})
+    assert response.status_code == 401
+    assert response.json()["error"] == "unauthorized"
+
+
+def test_webhook_rejects_bad_signature() -> None:
+    """签名算错 → 401。"""
+    client = app_client(app)
+    response = _post_signed(client, {"action": "opened", "number": 1}, secret="wrong-secret")
+    assert response.status_code == 401
+
+
+def test_webhook_fails_closed_when_secret_unset(monkeypatch) -> None:
+    """没配 GITHUB_WEBHOOK_SECRET → 拒绝（fail-closed），不静默放行。
+
+    与 AuthMiddleware / feishu_signature 同一套姿势。此处若 fail-open，
+    "签名校验"就只是个可关闭的装饰。
+    """
+    monkeypatch.setattr(settings, "github_webhook_secret", "")
+    monkeypatch.setattr(settings, "gateway_allow_insecure", "")
+    client = app_client(app)
+    response = client.post("/webhook/github/review", json={"action": "opened", "number": 1})
+    assert response.status_code == 401
+
+
+def test_webhook_accepts_valid_signature() -> None:
+    """签名正确 → 正常受理。"""
+    client = app_client(app)
+    response = _post_signed(client, {
+        "action": "opened",
+        "number": 3,
+        "pull_request": {"number": 3, "head": {"sha": "deadbeefcafe"}},
+        "repository": {"full_name": "shing26/moa-gateway"},
+    })
+    assert response.status_code == 200
+
+
+def test_two_prs_in_same_repo_get_distinct_trace_ids() -> None:
+    """D1 判据：同仓库两个 PR 产生两条独立记录。
+
+    回归：此前 trace_id = f"cr_{repo}:{body['id']}"，而 pull_request 事件顶层没有
+    id 字段 → 同一仓库所有 PR 共用一个主键，review_store 的
+    ON CONFLICT (trace_id) DO UPDATE 让后一个 PR 覆盖前一个。
+    """
+    seen = set()
+    for pr_number, sha in ((11, "aaaa1111"), (12, "bbbb2222")):
+        body = _task_key_of(pr_number, sha)
+        assert body not in seen, f"PR #{pr_number} 与前一个撞了同一个 task_key"
+        seen.add(body)
+    assert len(seen) == 2
+
+
+def test_same_pr_redelivery_is_idempotent() -> None:
+    """同一个 PR 重投 → 同一个 task_key（这正是幂等键要的行为）。"""
+    assert _task_key_of(42, "abc1234") == _task_key_of(42, "abc1234")
+    # head_sha 变了 = 代码变了 = 该重新审
+    assert _task_key_of(42, "abc1234") != _task_key_of(42, "def5678")
+
+
+def _task_key_of(pr_number: int, head_sha: str) -> str:
+    from apps.code_review_pipeline.routing.github_review_route import build_task_key
+    return build_task_key("shing26/moa-gateway", pr_number, head_sha)

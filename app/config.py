@@ -203,6 +203,14 @@ class Settings:
         self.otel_exporter_otlp_endpoint: str = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
         # GitHub 令牌（PR 审查链路的唯一凭据来源）。
         self.github_token: str = os.getenv("GITHUB_TOKEN", "")
+        # GitHub webhook 签名密钥（X-Hub-Signature-256 的 HMAC 密钥）。
+        # 与 GITHUB_TOKEN 分工不同：token 是**读/写 API** 的凭据（我方主动
+        # 调 GitHub 时用），这个是**验证入站请求**的共享密钥（GitHub 签给我方
+        # 的 webhook 时用）。2026-10-01 之前本项目对该端点零校验：任何人 POST
+        # 一个伪造的 PR 事件都能让流水线跑起来；在加写回之后，那等于让别人
+        # 替我们往任意仓库发评论。未配置时端点 fail-closed（见
+        # apps/code_review_pipeline/routing/github_review_route.py）。
+        self.github_webhook_secret: str = os.getenv("GITHUB_WEBHOOK_SECRET", "")
         # 审计日志目录与保留期。此前 .env.template 文档写了 LOG_DIR / LOG_RETENTION_DAYS，
         # 但**没有任何代码读它们**（wal 硬编码 "logs"/90，audit_stats 也硬编码 "logs"）——
         # 两个死旋钮，这里复活它们。

@@ -7,6 +7,14 @@ from typing import Any
 
 logger = logging.getLogger("moa.code_review.storage")
 
+# 建表 / 业务连接的 TCP 超时（秒）。
+#
+# 为什么不写死 30：Windows 上"对不可达端口 SYN 无响应"走的是 OS 级重传，实测能到
+# 分钟级（2026-10-01 实测 `import app.main` 挂死 >2.5 分钟且零日志）。libpq 不给
+# connect_timeout 时**完全不看 socket 超时**，所以必须显式给。10s 足够覆盖同机
+# docker-compose 的正常建连，又能让"库没起"在 10s 内变成一条明确异常。
+_CONNECT_TIMEOUT_S = 10
+
 
 class StorageInitError(Exception):
     """Raised when the persistent store cannot be initialized."""
@@ -69,7 +77,7 @@ def _ensure_schema(dsn: str) -> None:
         schema_sql = render_schema(fh.read(), _embedding_dim())
 
     try:
-        with psycopg.connect(dsn) as conn:
+        with psycopg.connect(dsn, connect_timeout=_CONNECT_TIMEOUT_S) as conn:
             with conn.cursor() as cur:
                 cur.execute(schema_sql)
                 conn.commit()
@@ -123,7 +131,9 @@ class PostgresReviewStore:
             if self._psycopg is None:
                 import psycopg  # type: ignore[import-untyped]
                 self._psycopg = psycopg
-            self._conn = self._psycopg.connect(self._dsn)
+            self._conn = self._psycopg.connect(
+                self._dsn, connect_timeout=_CONNECT_TIMEOUT_S
+            )
 
     def save(self, record: ReviewRecord) -> None:
         self._connect()
