@@ -179,5 +179,13 @@ def _record_from_result(result: Any) -> Any:
         author=result.pr.author,
         findings_count=total_findings,
         need_human_review=result.overall_need_human_review,
-        raw={},
+        # raw 此前是空的，于是 save() 里所有 raw.get(...) 全落默认值，NOT NULL 列
+        # 一律写空串（不报错，但库里留下空标题的空行）。这些字段 dataclass 上没有，
+        # 只能靠 raw 传递，所以这里必须填。
+        raw={
+            "base_sha": getattr(result.pr, "base_sha", "") or "",
+            "title": getattr(result.pr, "title", "") or "",
+            "html_url": getattr(result.pr, "html_url", "") or "",
+            "diff_url": getattr(result.pr, "diff_url", "") or "",
+        },
     )

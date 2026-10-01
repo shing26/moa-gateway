@@ -36,6 +36,10 @@ langgraph = ["langgraph>=1.2"]
 # （apps/code_review_pipeline/agents/coverage_agent.py）不再被当成测试收集。
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+  "postgres: 需要真实 PostgreSQL 的集成用例（compose 起 postgres；连不上则 skip）",
+  "redis: 需要真实 Redis 的集成用例（compose 起 redis；连不上则 skip）",
+]
 
 [tool.ruff]
 extend-exclude = ["scripts"]

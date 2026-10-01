@@ -32,6 +32,11 @@ for name in (
 ):
     os.environ[name] = ""
 
+# 集成用例依赖"自动迁移开"这条路径（每次 build_review_store 会建表）。
+# 开发者 .env 里若把它关了，集成用例会因为表不存在而报 undefined_column，
+# 看起来像代码坏了。显式钉死，别让本机配置渗进测试。
+os.environ["CODE_REVIEW_AUTO_MIGRATE"] = "1"
+
 # GATEWAY_PORT/APP_PORT 同理：开发机 .env 若写了非法端口，config.validate()
 # 会在 import 期 raise，把整个测试进程炸掉。置空 = 未配置 = 默认 8081。
 for name in ("GATEWAY_PORT", "APP_PORT"):

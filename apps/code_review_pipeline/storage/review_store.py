@@ -24,6 +24,11 @@ logger = logging.getLogger("moa.code_review.storage")
 # docker-compose 的正常建连，又能让"库没起"在 10s 内变成一条明确异常。
 _CONNECT_TIMEOUT_S = 10
 
+# 迁移等锁的上限（毫秒）。取 15s：ACCESS EXCLUSIVE 在正常部署里应该"没有竞争地"
+# 立刻拿到，多等十几秒基本意味着另一个进程正卡在同一次迁移上——早失败并给出明确
+# 异常，远好过无声挂起。
+_LOCK_TIMEOUT_MS = 15_000
+
 # 任务状态的唯一词汇表。**只有这一份**——见 schema.sql 里"不新增 task_state"
 # 的说明：同一张表并存两套状态词汇正是 app/models/errors.py 记下的教训。
 # D2 只用到 queued；running/waiting_approval/posting/done/failed 随 D3 的状态机
@@ -96,7 +101,27 @@ def _ensure_schema(dsn: str) -> None:
         schema_sql = render_schema(fh.read(), _embedding_dim())
 
     try:
-        with psycopg.connect(dsn, connect_timeout=_CONNECT_TIMEOUT_S) as conn:
+        # lock_timeout 不是可选项：schema.sql 里有 ALTER TABLE 和非 CONCURRENTLY 的
+        # CREATE UNIQUE INDEX，两者都要 ACCESS EXCLUSIVE 锁。任何一条在途的只读
+        # 连接（哪怕只是一个没提交的 SELECT，它握 ACCESS SHARE）都能让这里无限期
+        # 排队——PG 的锁等待默认没有超时，表现为"进程卡住"而非"迁移失败"，
+        # 且日志上一片安静。
+        #
+        # 真库实测（2026-10-01）：两个连续跑的集成用例，第二个的建表被第一个用例
+        # 遗留的 idle-in-transaction 连接挡住，pytest 挂死 >60s。
+        # D3 之后 worker 与 gateway 是两个进程、都在启动时跑迁移，这个隐患从
+        # "测试才会遇到"变成"生产启动就会遇到"。
+        #
+        # lock_timeout 必须走 `options` 而不是当成连接参数直传：它是 PG 的**服务端
+        # 运行参数**，libpq 不认这个连接选项。真库实测直传会报
+        # `invalid connection option "lock_timeout"`，整个迁移直接失败。
+        # 讽刺的是这个错误是被"假连接的单测"漏掉的——假 psycopg 对任何 kwarg
+        # 都点头，所以断言"传了 lock_timeout"在单测里是绿的。
+        with psycopg.connect(
+            dsn,
+            connect_timeout=_CONNECT_TIMEOUT_S,
+            options=f"-c lock_timeout={_LOCK_TIMEOUT_MS}",
+        ) as conn:
             with conn.cursor() as cur:
                 cur.execute(schema_sql)
                 conn.commit()
@@ -194,9 +219,24 @@ class PostgresReviewStore:
                     """,
                     {
                         "trace_id": record.trace_id,
-                        "repo": record.raw.get("repo", ""),
-                        "pr_number": int(record.raw.get("pr_number", 0) or 0),
-                        "head_sha": record.raw.get("head_sha", record.head_sha),
+                        # 身份三列读 dataclass，不读 raw（2026-10-01）。
+                        #
+                        # 此前这里是 raw.get("repo", "")，而唯一的生产者
+                        # github_review_route._record_from_result 传 raw={} —— 于是
+                        # repo 恒为 ''、pr_number 恒为 0。真库里那行遗留数据就是
+                        # 这么来的（trace_id 合法、repo 空、pr_number=0）。
+                        # D2 刚把幂等键定成 UNIQUE(repo, pr_number, head_sha)：
+                        # 建在 ('', 0, sha) 上的唯一约束，换个仓库的同一个 sha
+                        # 就会误判成同一件事而合并。
+                        #
+                        # raw 里如果有值也不采信——它没有 schema、没有类型约定，
+                        # 曾经就是那个"两处各写一遍"的第四处分叉。
+                        "repo": record.repo,
+                        "pr_number": int(record.pr_number or 0),
+                        "head_sha": record.head_sha,
+                        # 以下四列 dataclass 上没有对应字段（ReviewRecord 只保留了
+                        # 幂等与统计所需的最小集），只能继续取 raw。NOT NULL 列写空串
+                        # 不报错但会留下无意义行，所以生产方应尽量填满。
                         "base_sha": record.raw.get("base_sha", ""),
                         "title": record.raw.get("title", ""),
                         "author": record.author,
@@ -260,11 +300,24 @@ def build_review_store() -> ReviewStore:
     Priority:
     1. Postgres if CODE_REVIEW_DATABASE_URL / DATABASE_URL / POSTGRES_URL is set
     2. In-memory fallback otherwise
+
+    ``CODE_REVIEW_AUTO_MIGRATE=0`` 时跳过建表 DDL（2026-10-01）。
+
+    为什么需要这个开关：D3 的 worker 是**独立进程**，它和 gateway 都会在启动时
+    走到这里。迁移要 ACCESS EXCLUSIVE 锁，于是两个进程会互相排队；而一个只握
+    读锁的在途连接就足以让迁移挂死（真库实测）。worker 只是个消费者——schema
+    的所有权应该归 gateway / 显式迁移命令，不该由每个消费方在启动时改。
     """
     dsn = _build_dsn()
     if not dsn:
         logger.info("no database URL configured; using in-memory review store")
         return ReviewStore()
+
+    from app.config import settings
+
+    if not settings.code_review_auto_migrate:
+        logger.info("CODE_REVIEW_AUTO_MIGRATE=0; skipping review schema migration")
+        return PostgresReviewStore(dsn=dsn)
 
     missing = _missing_deps()
     if missing:

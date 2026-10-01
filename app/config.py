@@ -181,6 +181,17 @@ class Settings:
             os.getenv("EMBEDDING_TIMEOUT_S"), 10.0, name="EMBEDDING_TIMEOUT_S"
         )
 
+        # 进程启动时是否自动跑 review 表的建表 DDL。
+        #
+        # 默认开（保持既有行为：以前每次 build_review_store 都会跑）。D3 的 worker
+        # 是独立进程，应显式关掉：迁移要 ACCESS EXCLUSIVE 锁，worker 与 gateway
+        # 都在启动时跑迁移会互相排队，而任何一条在途的只读连接就能让迁移挂死
+        # （真库实测）。schema 的所有权归 gateway / 显式迁移命令，消费方不该在
+        # 启动时改 schema。详见 apps/code_review_pipeline/storage/review_store.py。
+        self.code_review_auto_migrate: bool = _parse_bool(
+            os.getenv("CODE_REVIEW_AUTO_MIGRATE"), True
+        )
+
         # ── 鉴权与端口（原 main.py / __main__.py 的旁路 env 读取，收编统一校验）──
         self.webhook_auth_token: str = os.getenv("WEBHOOK_AUTH_TOKEN", "")
         self.dashboard_password: str = os.getenv("DASHBOARD_PASSWORD", "")
