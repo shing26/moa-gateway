@@ -58,7 +58,7 @@ class FeishuReviewNotifier:
         # 拿 webhook 存在当"已配置"的凭证，会在真正发出去时仍然把 repo 名当 chat_id。
         if not self._default_target:
             logger.info(
-                "no notification destination configured (FEISHU_HOME_CHANNEL); "
+                "no notification destination configured (CODE_REVIEW_FEISHU_CHANNEL); "
                 "skipping feishu summary trace=%s",
                 notification.trace_id,
             )
@@ -149,7 +149,16 @@ class FeishuReviewNotifier:
         import os
 
         webhook_url = os.getenv("FEISHU_REVIEW_WEBHOOK")
-        default_target = os.getenv("FEISHU_HOME_CHANNEL")
+        # **审查链路的收件目标是独立的开关**（2026-10-02）。
+        #
+        # 此前这里读 FEISHU_HOME_CHANNEL——那是**聊天链路**的默认会话。于是一次
+        # golden path /demo review 就会往用户自己的聊天窗口里推一张 PR 审查摘要卡，
+        # 而用户对这条链路毫无预期：他在跑可靠性底座的演示，不是在订阅审查通知。
+        #
+        # 与其"配置了聊天目标就默认推审查通知"，不如让这条链路默认沉默、要发必须
+        # 显式开口。这也让 send_summary 里那个"没配目标就不发"的守卫真正有意义
+        # （它此前读的就是这个变量，所以守卫形同虚设）。
+        default_target = os.getenv("CODE_REVIEW_FEISHU_CHANNEL", "")
         card_sender = None
         from app.config import settings
 

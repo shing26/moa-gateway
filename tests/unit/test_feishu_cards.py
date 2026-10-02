@@ -125,3 +125,53 @@ def test_card_omits_blank_applicant_and_reason() -> None:
 
     assert not any("申请人" in t for t in texts)
     assert not any("事由" in t for t in texts)
+
+
+class _FakeAuth:
+    """只实现 send_card 用到的那一个方法；不该被调用的路径一调就炸。"""
+
+    def __init__(self) -> None:
+        self.config = type("C", (), {"base_url": "https://open.feishu.cn/open-apis"})()
+        self.token_calls = 0
+
+    async def get_token(self) -> str:
+        self.token_calls += 1
+        raise AssertionError("非飞书渠道不应该走到取 token")
+
+
+@pytest.mark.asyncio
+async def test_non_feishu_channel_is_not_sent() -> None:
+    # web 渠道的卡片**不发**——它没有飞书目的地。
+    #
+    # 回归（2026-10-02）：send_card 此前没有渠道判断，而 dashboard 的
+    # /dashboard/api/chat 是 pipeline.run(..., channel="web", target=sid)，
+    # target 是 session id；send_card 又固定用 receive_id_type=chat_id，
+    # 于是 session id 被当成飞书会话发出去，实测报 invalid receive_id。
+    #
+    # 断言的是"没去取 token"而不只是返回 False：取不到 token 同样返回 False，
+    # 那样凭据一坏这条用例也绿，它就验不到守卫本身了。
+    from app.channels.feishu_cards import FeishuCardSender
+
+    auth = _FakeAuth()
+    sender = FeishuCardSender(auth)  # type: ignore[arg-type]
+    card = ApprovalCard(
+        session_id="s", trace_id="t", agent_name="coder", intent="coding",
+        agent_output="out", channel="web", target="web:sess-1",
+    )
+    assert await sender.send_card(card) is False
+    assert auth.token_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_feishu_channel_still_attempts_to_send() -> None:
+    # 守卫不能误伤飞书渠道：它应该真的去取 token（即真的去发）。
+    from app.channels.feishu_cards import FeishuCardSender
+
+    auth = _FakeAuth()
+    sender = FeishuCardSender(auth)  # type: ignore[arg-type]
+    card = ApprovalCard(
+        session_id="s", trace_id="t", agent_name="coder", intent="coding",
+        agent_output="out", channel="feishu", target="oc_abc",
+    )
+    await sender.send_card(card)
+    assert auth.token_calls == 1, "飞书渠道应该走到取 token"

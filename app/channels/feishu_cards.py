@@ -110,6 +110,31 @@ class FeishuCardSender:
         self.timeout = timeout
 
     async def send_card(self, card: ApprovalCard) -> bool:
+        # 渠道守卫（2026-10-02）。**与 FeishuChannelAdapter.send 的同名判断对齐**——
+        # 那个适配器有一句 `if message.channel != "feishu": return False`，而这里
+        # 没有，于是结构上就允许"把 web 渠道的卡片发去飞书"。
+        #
+        # 实测（scripts/probe_feishu_target_mismatch.py）：dashboard 的
+        # `/dashboard/api/chat` 是 `pipeline.run(..., channel="web", target=sid)`，
+        # target 是 **session id**。而这里固定用 `receive_id_type=chat_id`，于是
+        # 一个 session id 被当成飞书会话 id 发出去：
+        #
+        #   receive_id='web:web-probe-1'  -> code=230001 invalid receive_id
+        #   receive_id='oc_5e2a…'         -> code=0    success
+        #
+        # 也就是说，只要在 dashboard 上触发一次 HITL（REVIEW 判定走 pipeline.py:599
+        # 的 card_sender.send_card），就必然产生一次飞书报错——错误码随 target 里
+        # 装的是什么而变（200671 / 230001 都见过），所以之前一直对不上号。
+        #
+        # 这里必须**在发之前**拒绝：卡片本来就是按渠道寻址的，web 渠道的卡片没有
+        # 飞书目的地，不发才是正确行为，不是"发失败"。
+        if card.channel != "feishu":
+            logger.info(
+                "skip card for non-feishu channel: channel=%s session=%s",
+                card.channel,
+                card.session_id,
+            )
+            return False
         try:
             token = await self._auth.get_token()
             payload = card.to_message_payload()
