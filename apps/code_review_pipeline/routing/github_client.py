@@ -9,6 +9,16 @@ import httpx
 GITHUB_API = "https://api.github.com"
 
 
+def _trust_env_default() -> bool:
+    # 默认**不走**系统代理。实测（2026-10-03）：本机代理在 127.0.0.1:31181 上做
+    # TLS 拦截，而它的根证书不在信任链里（SSL_CERT_FILE 指向 anaconda 的
+    # cacert.pem），于是 httpx 默认的 trust_env=True 会让每一次 GitHub 调用死在
+    # CERTIFICATE_VERIFY_FAILED；trust_env=False 直连是通的（HTTP 200）。
+    # 需要代理的环境用 CODE_REVIEW_GITHUB_TRUST_ENV=1 显式打开。
+    raw = os.getenv("CODE_REVIEW_GITHUB_TRUST_ENV", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class GitHubRepo:
     owner: str
@@ -16,7 +26,13 @@ class GitHubRepo:
 
 
 class GitHubClient:
-    def __init__(self, token: str, *, timeout: float = 15.0) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        timeout: float = 15.0,
+        trust_env: bool | None = None,
+    ) -> None:
         self._token = token
         self._client = httpx.AsyncClient(
             base_url=GITHUB_API,
@@ -27,6 +43,7 @@ class GitHubClient:
                 "User-Agent": "moa-code-review-pipeline",
             },
             timeout=httpx.Timeout(timeout),
+            trust_env=_trust_env_default() if trust_env is None else trust_env,
         )
 
     async def aclose(self) -> None:
