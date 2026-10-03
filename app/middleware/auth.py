@@ -15,6 +15,14 @@ _LARK_VERIFIED_PATHS = ("/feishu/event", "/webhook/callback")
 _WEBHOOK_PREFIX = "/webhook"
 _DASHBOARD_PREFIX = "/dashboard"
 _DASHBOARD_STATIC = "/dashboard/static"
+# 这两组路由既不在 _WEBHOOK_PREFIX 也不在 _DASHBOARD_PREFIX 里，此前因此**完全
+# 绕过**中间件——`/knowledge/upload` 能匿名写向量库，`DELETE
+# /api/v1/privacy/user/{id}` 能匿名删某个用户的全部向量。2026-10-03 公网 Funnel
+# 暴露后实测确认两条都返回 200。
+#
+# 正确的姿势是**反过来列放行项**（_ALLOWED），其余一律要鉴权；继续靠"记得把新
+# 前缀加进受保护列表"来兜住新增路由，必然漏。
+_DASH_PROTECTED_PREFIXES = (_DASHBOARD_PREFIX, "/knowledge", "/api/")
 _DASHBOARD_USER = "admin"
 _BASIC_CHALLENGE = {"WWW-Authenticate": 'Basic realm="dashboard"'}
 _INSECURE_TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -106,7 +114,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     return _unauthorized("auth_not_configured")
             elif not _secret_eq(request.headers.get("X-Gateway-Token"), self._token):
                 return _unauthorized()
-        elif path.startswith(_DASHBOARD_PREFIX) and not path.startswith(_DASHBOARD_STATIC):
+        elif any(
+            path.startswith(prefix) and not path.startswith(_DASHBOARD_STATIC)
+            for prefix in _DASH_PROTECTED_PREFIXES
+        ):
             if not self._dashboard_password:
                 if not self._allow_insecure:
                     return _unauthorized("auth_not_configured", challenge=True)

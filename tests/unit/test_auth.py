@@ -44,6 +44,18 @@ def build_client(
     async def static_asset():
         return {"ok": True}
 
+    @inner.get("/knowledge/list")
+    async def knowledge_list():
+        return {"documents": []}
+
+    @inner.post("/knowledge/upload")
+    async def knowledge_upload():
+        return {"ok": True}
+
+    @inner.delete("/api/v1/privacy/user/{user_id}")
+    async def privacy_erase(user_id: str):
+        return {"user_id": user_id, "status": "ok"}
+
     inner.add_middleware(
         AuthMiddleware,
         token=token,
@@ -152,6 +164,35 @@ def test_allow_list_always_passes():
         assert client.post("/feishu/event").status_code == 200
         assert client.get("/docs").status_code == 200
         assert client.get("/openapi.json").status_code == 200
+
+
+def test_knowledge_and_privacy_routes_fail_closed():
+    """`/knowledge/*` 与 `/api/v1/privacy/*` 此前完全绕过中间件（2026-10-03）。
+
+    公网 Funnel 暴露后实测：`POST /knowledge/upload` 匿名可写向量库，
+    `DELETE /api/v1/privacy/user/{id}` 匿名可删某用户全部向量，两者都返回 200。
+    它们既不在 `_WEBHOOK_PREFIX` 也不在 `_DASHBOARD_PREFIX` 里。
+    """
+    with build_client() as client:
+        assert client.get("/knowledge/list").status_code == 401
+        assert client.post("/knowledge/upload").status_code == 401
+        assert client.delete("/api/v1/privacy/user/someone").status_code == 401
+
+
+def test_knowledge_and_privacy_require_basic_auth_when_configured():
+    with build_client(dashboard_password="pw") as client:
+        cred = base64.b64encode(b"admin:pw").decode()
+        auth = {"Authorization": f"Basic {cred}"}
+        assert client.get("/knowledge/list").status_code == 401
+        assert client.delete("/api/v1/privacy/user/someone").status_code == 401
+        assert client.get("/knowledge/list", headers=auth).status_code == 200
+        assert client.delete("/api/v1/privacy/user/someone", headers=auth).status_code == 200
+
+
+def test_insecure_mode_still_opens_the_newly_covered_routes():
+    """insecure 只该放宽"已覆盖"的端点，不该因为新增前缀而改变语义。"""
+    with build_client(allow_insecure=True) as client:
+        assert client.get("/knowledge/list").status_code == 200
 
 
 def test_feishu_event_fail_open_when_not_configured():
