@@ -44,6 +44,36 @@ $env:PYTHONUNBUFFERED = "1"
 # 判据在一轮 demo 里跑得完——不改默认值，只把这个折中调小。
 $env:TASK_RECLAIM_MIN_IDLE_MS = "4000"
 
+# 演示网关用**自己的**端口，不跟常驻网关共用。共用会有两种假象：本轮起的进程
+# bind 失败退出，而判据全打在常驻那个旧实例上；或者常驻网关顺手接走了投递，
+# 验的其实不是"worker 起来之前也能返回 202"。端口被**别人**占着时直接拒绝，
+# 不去抢——2026-10-03 本机 8082 就被另一个项目的容器抢走过。
+$Port = if ($env:GOLDEN_PATH_PORT) { [int]$env:GOLDEN_PATH_PORT } else { 8081 }
+$occupied = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue
+if ($occupied) {
+    $procName = (Get-Process -Id $occupied[0].OwningProcess -ErrorAction SilentlyContinue).ProcessName
+    throw "端口 $Port 上已有 $($procName) (pid $($occupied[0].OwningProcess)) 在听。换端口：设置 GOLDEN_PATH_PORT 后重跑。"
+}
+# `app.cli` 的 --port 默认读 settings.gateway_port，也就是 .env 的 GATEWAY_PORT。
+# 本机常驻网关就开着（8083），不钉死的话 CLI 会把投递打到**常驻那个**上——
+# 于是"worker 故意不起也返回 202"验的是常驻网关，本轮起的演示网关全程闲置，
+# 而判据照样全绿。显式传 --port 断开这条捷径。
+function Invoke-Demo([string[]]$rest) {
+    # 名字不能叫 `Cli`：`cli` 是 PowerShell 内置别名（Clear-Item），函数定义会被
+    # 静默忽略，于是每次调用都去执行 Clear-Item，报出来的是
+    # "Provider operation stopped because the provider does not support this
+    # operation" —— 与真正的原因毫无关系。
+    #
+    # 只 `review` 会发 HTTP，所以只有它需要 --port；`status` / `approve` 直接读 PG，
+    # 给它们加会被 argparse 判成 unrecognized arguments（gateway_args 只挂在
+    # review 上，app/cli.py:316）。
+    $cliArgs = $rest
+    # $rest[0] 是 "demo"，子命令在 $rest[1]——判断 $rest[0] 会永远为假，于是
+    # --port 静默不生效，投递照旧打到常驻网关，而判据照样全绿。
+    if ($rest[1] -eq "review") { $cliArgs = $rest + @("--port", "$Port") }
+    uv run python -m app.cli @cliArgs
+}
+
 function Psql($sql) {
     docker exec moa-gateway-postgres-1 psql -U gateway -d gateway -t -A -c $sql
 }
@@ -158,16 +188,22 @@ try {
     }
 
     Step "1. 起网关（worker 故意**不**起：投递不该依赖 worker 存在）" {
-        $script:Gateway = Start-Proc @("-m", "app", "--port", "8081") "gateway.log" "gateway.err"
-        $health = Wait-Http "http://127.0.0.1:8081/healthz"
+        $script:Gateway = Start-Proc @("-m", "app", "--port", "$Port") "gateway.log" "gateway.err"
+        $health = Wait-Http "http://127.0.0.1:$Port/healthz"
         Write-Host "   healthz: $($health.status) redis=$($health.checks.redis)"
     }
 
     Step "2. 投递 PR 审查：<1s 返回 202（不跑 agent、不等分析）" {
-        $out = uv run python -m app.cli demo review 42
+        $out = Invoke-Demo @("demo", "review", "42")
         $out | ForEach-Object { Write-Host "   $_" }
         $text = $out -join "`n"
         Assert-True ($text -match "HTTP 202") "首次投递返回 202"
+        # 自证：**这一发真的打在本轮起的演示网关上**。CLI 的 --port 默认读 .env 的
+        # GATEWAY_PORT，本机常驻网关就开着（8083）——一旦没钉死，投递会打到常驻那个，
+        # 本轮起的网关全程闲置，而上面每一条判据照样全绿（202、耗时、幂等都对）。
+        # 只有"演示网关自己的访问日志里出现这条 POST"才能排除这种假绿。
+        $access = Select-String -Path "$Root\demo\gateway.log" -Pattern "POST /webhook/github/review" -SimpleMatch
+        Assert-True ($access.Count -ge 1) "投递落在演示网关 ($Port) 上，不是常驻网关"
         # 量的是**网关处理这次投递**的耗时（CLI 自己打的），不是整个 CLI 进程。
         # 后者含 ~1.3s 的解释器启动与 import，拿它当判据只会得到一个与底座无关
         # 的数字。
@@ -181,7 +217,7 @@ try {
 
     Step "3. 重复投递：200 idempotent，任务行数不变" {
         $before = (Psql "SELECT count(*) FROM code_review_prs WHERE repo='shing26/moa-gateway'").Trim()
-        $out = uv run python -m app.cli demo review 42
+        $out = Invoke-Demo @("demo", "review", "42")
         $out | ForEach-Object { Write-Host "   $_" }
         Assert-True ($out -join "`n") -match "HTTP 200" "重投返回 200"
         Assert-True ($out -join "`n") -match "idempotent" "重投被识别为 idempotent"
@@ -197,20 +233,20 @@ try {
     }
 
     Step "5. dry-run 批准：零副作用（不写评论、不记 id、不推进状态）" {
-        uv run python -m app.cli demo approve $TaskKey 2>&1 | ForEach-Object { Write-Host "   $_" }
+        Invoke-Demo @("demo", "approve", $TaskKey) 2>&1 | ForEach-Object { Write-Host "   $_" }
         $st = (Psql "SELECT status || '/' || coalesce(posted_review_id,'-') FROM code_review_prs WHERE pr_number=42").Trim()
         Assert-True ($st -eq "waiting_approval/-") "状态仍是 $st（dry-run 没动它）"
     }
 
     Step "6. 真批准 -> 写回一条评论" {
-        uv run python -m app.cli demo approve $TaskKey --real 2>&1 | ForEach-Object { Write-Host "   $_" }
+        Invoke-Demo @("demo", "approve", $TaskKey, "--real") 2>&1 | ForEach-Object { Write-Host "   $_" }
         Wait-State "done" 42 | Out-Null
         $reviews = (Get-Content "$Root\data\demo_reviews.json" -Raw | ConvertFrom-Json).PSObject.Properties.Count
         Assert-True ($reviews -eq 1) "PR 上有 $reviews 条 review"
     }
 
     Step "7. 再批准一次：报 already_posted，评论数仍是 1" {
-        $out = uv run python -m app.cli demo approve $TaskKey --real 2>&1
+        $out = Invoke-Demo @("demo", "approve", $TaskKey, "--real") 2>&1
         $out | ForEach-Object { Write-Host "   $_" }
         Assert-True ($out -join "`n") -match "already_posted" "重复批准命中幂等"
         $reviews = (Get-Content "$Root\data\demo_reviews.json" -Raw | ConvertFrom-Json).PSObject.Properties.Count
@@ -234,7 +270,7 @@ try {
 
     Step "9. kill -9 worker：崩溃遗留的 running 任务由重启后的 worker 接管" {
         # PR 43 专供这一步：上一个任务已经 done，done 是终态，接不住任何东西。
-        $out = uv run python -m app.cli demo review 43
+        $out = Invoke-Demo @("demo", "review", "43")
         $out | ForEach-Object { Write-Host "   $_" }
         Assert-True ($out -join "`n") -match "HTTP 202" "PR #43 已入队"
 

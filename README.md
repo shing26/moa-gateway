@@ -138,7 +138,7 @@ uv sync --all-extras --dev
 
 cp .env.template .env           # 填入真实配置
 uv run python scripts/doctor.py  # 检查 Redis / Ollama / pgvector / 端口
-.venv\Scripts\python.exe -m app --host 0.0.0.0 --port 8081
+.venv\Scripts\python.exe -m app --port 8081
 ```
 
 Windows 上请使用 `python -m app`，它会在 Uvicorn 建 loop 前切换到
@@ -152,6 +152,20 @@ Windows 上请使用 `python -m app`，它会在 Uvicorn 建 loop 前切换到
 - 依赖级健康检查：<http://localhost:8081/healthz>
 
 8081 是项目推荐的本地端口，用于避开常见的 8080 占用；仍可用 `GATEWAY_PORT` 改端口。
+
+默认只监听 `127.0.0.1`。要对外暴露，用同机的 Tailscale Funnel：
+
+```powershell
+tailscale funnel --bg 8081        # 起/改指，后台常驻
+tailscale funnel status           # 看当前指向哪个本地端口
+```
+
+不需要 `--host 0.0.0.0`——Funnel 与网关同机，走回环即可。只有跨机访问才要绑
+`0.0.0.0`，而那时必须先给 `DASHBOARD_PASSWORD` 设值（默认是空的）。
+
+> Funnel 指向的端口必须真的有本网关在听。指错了（端口被别的容器占走、或网关
+> 停机），飞书卡片回调就报 `200671 回调地址不可达`——它只说明"公网地址没人应答"，
+> 不区分是没起、起错端口还是被占。
 
 ### 本机环境复活
 
@@ -185,9 +199,14 @@ powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1 -Action status
 powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1 -Action stop
 ```
 
-按顺序探测并拉起三样依赖：容器（redis 6380 / postgres 5433）→ Ollama（11434）→ 网关（8081），
-最后等 `/healthz` 通过。**为什么需要它**：2026-09-20 出过一次事故——容器停了，网关启动阻塞/退出，
-飞书卡片回调打到隧道后 origin 无响应，客户端报 `200671 回调地址不可达`。演示前跑一次即可避免。
+按顺序探测并拉起三样依赖：容器（redis 6380 / postgres 5433）→ Ollama（11434）→ 网关，
+最后等 `/healthz` 通过。网关端口依次读 `-GatewayPort` 参数、`.env` 的
+`GATEWAY_PORT` / `APP_PORT`，都没有才用 8081。**为什么需要它**：2026-09-20 出过一次
+事故——容器停了，网关启动阻塞/退出，飞书卡片回调打到隧道后 origin 无响应，客户端报
+`200671 回调地址不可达`。演示前跑一次即可避免。
+
+端口被占时脚本会**报出占用者是谁**并拒绝动手（不会替你杀别人的进程），例如
+`端口 8082 被 Docker 容器 shoppilot-gateway-1（转发到 8082，宿主进程 com.docker.backend）占用`。
 
 开机自启（可选，管理员执行一次）：
 

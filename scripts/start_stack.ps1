@@ -13,7 +13,16 @@
   打到隧道后 origin 无响应 → 客户端报 200671「回调地址不可达」。演示前先跑本脚本。
 
 .PARAMETER Action
-  start（默认）| stop | status
+  start（默认）| stop | restart | status
+
+.PARAMETER GatewayPort
+  网关端口。省略（0）时依次读 .env 的 GATEWAY_PORT、APP_PORT，都没有则用 8081。
+  端口被别的容器/进程占用时脚本会**报出占用者是谁**并拒绝动手——本机 8082 曾被
+  另一个项目的容器抢走（2026-10-03），所以这条报错要看，不要直接换端口绕过去。
+
+.PARAMETER Host
+  绑定地址，默认 127.0.0.1（只给本机和同机隧道用）。公网暴露走 Tailscale Funnel：
+  `tailscale funnel --bg <端口>`。跨机访问才需要 0.0.0.0，且必须先设 DASHBOARD_PASSWORD。
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1
@@ -30,7 +39,15 @@
 param(
     [ValidateSet("start", "stop", "status", "restart")]
     [string]$Action = "start",
-    [int]$GatewayPort = 8081,
+    # 0 = "去 .env 里找 GATEWAY_PORT / APP_PORT，都没有再用 8081"。显式传 -GatewayPort
+    # 仍然优先。此前默认值硬编码 8081，而本机 8082/8083 被别的项目占着（2026-10-03：
+    # shoppilot-gateway-1 抢走 8082），于是"改了 .env 的端口却还得每次带参数"，
+    # 而漏带时脚本会去和别人的容器抢端口。
+    [int]$GatewayPort = 0,
+    # 只给本机 / 同机隧道用时保持 127.0.0.1。公网暴露走 Tailscale Funnel
+    # （tailscale funnel --bg <端口>），不要为了"能访问"就绑 0.0.0.0：
+    # .env 里 DASHBOARD_PASSWORD 与 WEBHOOK_AUTH_TOKEN 默认都是空的。
+    [string]$GatewayHost = "127.0.0.1",
     [int]$RedisPort = 6380,
     [int]$PostgresPort = 5433,
     [int]$OllamaPort = 11434
@@ -40,6 +57,24 @@ $ErrorActionPreference = "Continue"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $LogDir = Join-Path $RepoRoot "logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+
+function Resolve-GatewayPort([int]$Requested) {
+    if ($Requested -ne 0) { return $Requested }
+    $envFile = Join-Path $RepoRoot ".env"
+    if (Test-Path $envFile) {
+        foreach ($key in @("GATEWAY_PORT", "APP_PORT")) {
+            $line = Select-String -Path $envFile -Pattern "^\s*$key\s*=\s*(\d+)\s*$" |
+                Select-Object -First 1
+            if ($line -and $line.Matches[0].Groups[1].Value) {
+                $fromEnv = [int]$line.Matches[0].Groups[1].Value
+                if ($fromEnv -ge 1 -and $fromEnv -le 65535) { return $fromEnv }
+            }
+        }
+    }
+    return 8081
+}
+
+$GatewayPort = Resolve-GatewayPort $GatewayPort
 
 function Test-Port([int]$Port) {
     try {
@@ -146,7 +181,21 @@ function Ensure-Gateway {
         return $true
     }
     if (Test-Port $GatewayPort) {
-        Write-Host "  [!!] 端口 $GatewayPort 被别的进程占用（/healthz 不是本应用的形状）。换 -GatewayPort 或自行停掉它——本脚本不会替你杀别人的进程"
+        # 说出**是谁**占的：2026-10-03 光说"被别的进程占用"时，排查绕了三步
+        # （看 netstat → 看 docker ps → 才发现是 shoppilot-gateway-1 的端口转发）。
+        $owner = Get-NetTCPConnection -State Listen -LocalPort $GatewayPort -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        $who = "未知进程"
+        if ($owner) {
+            $procName = (Get-Process -Id $owner.OwningProcess -ErrorAction SilentlyContinue).ProcessName
+            $container = (docker ps --format "{{.Names}}`t{{.Ports}}" 2>$null |
+                Where-Object { $_ -match ":$GatewayPort->" } | Select-Object -First 1)
+            $who = if ($container) {
+                "Docker 容器 $($container.Split("`t")[0])（转发到 $GatewayPort，宿主进程 $procName）"
+            } else { "进程 $procName (pid $($owner.OwningProcess))" }
+        }
+        Write-Host "  [!!] 端口 $GatewayPort 被 $who 占用（/healthz 不是本应用的形状）。"
+        Write-Host "       改 -GatewayPort / .env 的 GATEWAY_PORT，或自行停掉它——本脚本不会替你杀别人的进程"
         return $false
     }
     $python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
@@ -155,7 +204,7 @@ function Ensure-Gateway {
     # 端口必须真的传给网关（探索性验收 D1，2026-09-29）：此前 -GatewayPort 只改了健康
     # 探测的目标，`python -m app` 仍按 settings.gateway_port 绑定 —— 端口被别的进程
     # 占住时，网关 bind 失败退出，健康探测却还在探测那个被占的端口，80 秒后才报未就绪。
-    Start-Process -FilePath $python -ArgumentList "-m", "app", "--port", "$GatewayPort" -WorkingDirectory $RepoRoot -WindowStyle Hidden `
+    Start-Process -FilePath $python -ArgumentList "-m", "app", "--host", $GatewayHost, "--port", "$GatewayPort" -WorkingDirectory $RepoRoot -WindowStyle Hidden `
         -RedirectStandardOutput (Join-Path $LogDir "gateway.out.log") `
         -RedirectStandardError (Join-Path $LogDir "gateway.err.log")
     for ($i = 0; $i -lt 40; $i++) {
