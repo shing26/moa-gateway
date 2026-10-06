@@ -26,6 +26,19 @@ from app.routes.knowledge import router as knowledge_router
 from apps.code_review_pipeline.routing.github_review_route import github_review_router
 
 
+# 网关此前**从不配置根 logger**：root level 是默认的 WARNING 且没有任何 handler，
+# 于是全仓的 `logger.info(...)` 都被静默丢弃。后果不是"日志少几行"，而是**专门为
+# 定位某个故障而写的判据从未生效过**——典型如卡片回调的
+# `card_action 已受理 action=... elapsed_ms=...`：2026-09-29 加它就是为了把
+# "服务端超时"和"网络往返吃窗口"分开，而它一次都没出现过，于是那条判断一直只能靠猜。
+#
+# `app/worker.py` 一直有 basicConfig，所以 worker 的日志是全的、网关的不是——
+# 这个不一致正是"网关日志里什么都查不到"的来源。
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
+)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global tracer
