@@ -27,6 +27,7 @@ from app.command_mode import CommandMode, parse_command
 from app.knowledge import KnowledgeBase
 from app.obsidian_sync import ObsidianVaultSync
 from app.pipeline import MoAPipeline
+from apps.code_review_pipeline.merge_store import build_merge_store
 
 logger = logging.getLogger("moa.gateway")
 tracer: trace.Tracer = trace.get_tracer("moa-gateway")
@@ -51,6 +52,9 @@ memory = ConversationMemory(
     )
 )
 knowledge_base = KnowledgeBase(vector_client)
+# ADR-021 合并通道的持久化。与 review_store 同一策略：有 DSN 走 PG，否则内存。
+# 不建表（表由 gateway 启动迁移建），worker 与 gateway 同时启动时不会互相等锁。
+merge_store = build_merge_store()
 # M4：领域层（agents/agent_core 的工具 handler）经由中立 port 取用知识能力，
 # 不再反向 import 本组合根。
 from app.knowledge_access import configure as _configure_knowledge_access

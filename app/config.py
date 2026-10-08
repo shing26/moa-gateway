@@ -199,6 +199,22 @@ class Settings:
             os.getenv("CODE_REVIEW_PUBLISH_DRY_RUN"), True
         )
 
+        # ── 合并通道（ADR-021）────────────────────────────────────────────
+        # 默认关：合并是有外部后果的写操作，必须显式开启才生效。
+        self.code_review_merge_enabled: bool = _parse_bool(
+            os.getenv("CODE_REVIEW_MERGE_ENABLED"), False
+        )
+        # 合并审批卡片的收件目标（飞书 chat_id）。**独立于**审查通知的
+        # CODE_REVIEW_FEISHU_CHANNEL：合并审批是"人做决策"的动作，与审查报告
+        # 的推送目标分开，避免审查报告把审批卡片淹没。
+        self.code_review_merge_channel: str = os.getenv("CODE_REVIEW_MERGE_CHANNEL", "")
+        # 轮询间隔（秒）。网关跑在笔记本上，经 Tailscale Funnel 暴露，
+        # 休眠时 GitHub 推来的事件会丢，轮询在恢复后能补上。
+        self.code_review_merge_poll_interval_s: int = _parse_int(
+            os.getenv("CODE_REVIEW_MERGE_POLL_INTERVAL_S"), 60,
+            name="CODE_REVIEW_MERGE_POLL_INTERVAL_S",
+        )
+
         # ── 鉴权与端口（原 main.py / __main__.py 的旁路 env 读取，收编统一校验）──
         self.webhook_auth_token: str = os.getenv("WEBHOOK_AUTH_TOKEN", "")
         self.dashboard_password: str = os.getenv("DASHBOARD_PASSWORD", "")
@@ -307,6 +323,11 @@ class Settings:
                 raise ValueError(f"{name} 不能为负（0 表示禁用该预算），得到 {value}")
         if self.log_retention_days <= 0:
             raise ValueError(f"LOG_RETENTION_DAYS 必须为正整数，得到 {self.log_retention_days}")
+        if self.code_review_merge_poll_interval_s <= 0:
+            raise ValueError(
+                f"CODE_REVIEW_MERGE_POLL_INTERVAL_S 必须为正整数，"
+                f"得到 {self.code_review_merge_poll_interval_s}"
+            )
 
     def to_redis_config(self) -> dict[str, Any]:
         return {

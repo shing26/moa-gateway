@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 
 from app.channels.feishu_cards import parse_card_callback
 from app.config import settings
-from app.deps import adapter, engine, logger, pipeline, tracer
+from app.deps import adapter, engine, logger, merge_store, pipeline, tracer
 from app.fsm.state_machine import Event as FsmEvent
 from app.limit_providers.rate_limiter import rate_limiter
 from app.channels.feishu_signature import verify_verification_token
@@ -14,6 +14,8 @@ from app.middleware.auth import approver_gate_error, insecure_mode_enabled
 from app.middleware.request_logger import bind_trace, log_request
 from app.models.errors import ErrorCode
 from app.models.events import MoAEvent, PlatformEvent, new_trace_id
+from apps.code_review_pipeline.merge_executor import MergeExecutor
+from apps.code_review_pipeline.routing.github_provider import build_github_client
 
 webhook_router = APIRouter()
 
@@ -77,6 +79,15 @@ async def webhook_callback(request: Request) -> JSONResponse:
     if hitl is None:
         logger.warning("hitl request not available hitl_id=%s session=%s", hitl_id, session_id)
         return JSONResponse({"error": ErrorCode.HITL_REQUEST_NOT_FOUND.value}, status_code=404)
+    # ADR-021 合并审批分叉：merge_approval 不走聊天 FSM，直接执行合并
+    if hitl.hitl_kind == "merge_approval":
+        return await _handle_merge_approval(
+            hitl_id=hitl_id,
+            action=action,
+            operator_id=operator_id,
+            session_id=session_id,
+            trace_id=trace_id,
+        )
     session_context, expired = await engine.decide_hitl(
         session_id=session_id, trace_id=trace_id, approve=(action == "approve"),
     )
@@ -226,3 +237,52 @@ def _map_event(platform_event: PlatformEvent):
     if text in _SENSITIVE_COMMANDS:
         return FsmEvent.SENSITIVE_DETECTED
     return FsmEvent.MESSAGE_RECEIVED
+
+
+async def _handle_merge_approval(
+    *,
+    hitl_id: str,
+    action: str,
+    operator_id: str,
+    session_id: str,
+    trace_id: str,
+) -> JSONResponse:
+    """ADR-021 合并审批回调：执行合并并写审计。
+
+    **不走** ``engine.decide_hitl()``：合并审批是独立的写操作，与聊天 FSM 的
+    会话状态无关。
+    """
+    from apps.code_review_pipeline.task_audit import record_human_decision
+
+    executor = MergeExecutor(merge_store, build_github_client())
+    try:
+        outcome = await executor.execute(hitl_id, action, operator_id)
+    except Exception as exc:
+        logger.exception("merge approval execution failed: %s", exc)
+        return JSONResponse(
+            {"error": "merge_execution_failed", "message": str(exc)},
+            status_code=500,
+        )
+
+    # 写审计：谁批的、批了什么
+    try:
+        await record_human_decision(
+            task_id=hitl_id,
+            repo=hitl_id.split("#")[0],
+            operator=operator_id,
+            decision=action,
+        )
+    except Exception:
+        logger.exception("failed to record human decision for %s", hitl_id)
+
+    if outcome.merged:
+        return JSONResponse({
+            "trace_id": trace_id,
+            "status": "merged",
+            "sha": outcome.sha,
+        })
+    return JSONResponse({
+        "trace_id": trace_id,
+        "status": outcome.status,
+        "message": outcome.message,
+    })

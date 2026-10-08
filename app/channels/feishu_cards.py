@@ -16,6 +16,7 @@ logger = logging.getLogger("moa.channels.feishu_cards")
 _HITL_TITLES = {
     "failure_escalation": "Agent Gateway - 失败升级待处理",
     "notification": "Agent Gateway - 通知",
+    "merge_approval": "Agent Gateway - PR 合并审批",
 }
 _HITL_TEMPLATES = {"failure_escalation": "red", "notification": "blue"}
 _HITL_OUTPUT_LABELS = {"failure_escalation": "失败详情", "notification": "详情"}
