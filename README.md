@@ -305,11 +305,11 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   `opentelemetry-exporter-otlp` 未声明依赖（`uv.lock` 里 0 次），所以设了
   `OTEL_EXPORTER_OTLP_ENDPOINT` 也只会落到 console；无 context propagation，OTel trace_id
   与审计 trace_id 是两套 ID。真接线是标准管道工作（collector 本地 Docker 可跑），未做。
-- **PR 审查是只读审查，不是闭环**：`GitHubClient` 只有 `get_pr` / `get_pr_files`，
-  没有写回（评论 / review state / Checks）；该链路的"需要人工复核"卡片是**通知形态**
-  （不带批准/拒绝按钮，`hitl_kind="notification"`），因为它从不 `store_hitl`——渲染审批按钮
-  等于承诺一个点了必然失效的动作。**要变成闭环需要：写回接口 + HITL 存储与回调 + 该链路的
-  审计**，三件都缺。
+- **PR 审查有写回，但合并是独立的经审批通道**（ADR-021）：`GitHubClient` 有
+  `create_review` / `list_reviews`（写回评论），审查链路的"需要人工复核"卡片是**通知形态**
+  （不带批准/拒绝按钮，`hitl_kind="notification"`）。**合并通道**（`CODE_REVIEW_MERGE_ENABLED=1`）
+  是独立的写操作：CI 绿 → 飞书弹审批卡片 → 人点批准 → 网关合并 → 审计。合并**必须过审批门**，
+  全程留痕（谁批的、批了什么、何时）。详见 ADR-021。
 - **HITL 回调的可信度（2026-09-23 补，ADR-013）**：① **验签真的生效了**——此前
   `verify_verification_token` 只在**顶层**找 token，而 v2 事件把 token 放在 `header.token`，
   于是"配了 `FEISHU_VERIFICATION_TOKEN` 却从未比对过"（旧行为是刻意 fail-open 且有测试钉住，
