@@ -7,6 +7,7 @@ from app.deps import command_mode, knowledge_base, memory
 from app.main import app
 import app.routes.dashboard as dashboard_routes
 from tests.support import app_client
+from tests.conftest import _needs_vector_db
 
 
 def test_dashboard_pages_render():
@@ -33,6 +34,7 @@ def test_dashboard_logs_api_returns_list():
         assert isinstance(data.get("logs"), list)
 
 
+@_needs_vector_db
 def test_dashboard_upload_and_delete_document():
     with app_client(app) as client:
         res = client.post("/dashboard/upload", json={"title": "dashboard test", "content": "hello world"})
@@ -80,6 +82,7 @@ def test_dashboard_session_detail_and_mode():
         command_mode.clear(sid)
 
 
+@_needs_vector_db
 def test_dashboard_knowledge_file_upload_detail_search():
     with app_client(app) as client:
         res = client.post(

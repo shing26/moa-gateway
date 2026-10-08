@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from app.deps import _retriever, knowledge_base
 import app.pipeline as pipeline_module
 from app.main import app
+from tests.conftest import _needs_vector_db
 
 
 class FakeAgent:
@@ -35,6 +36,7 @@ def _event(text: str) -> dict:
     }
 
 
+@_needs_vector_db
 async def _cleanup() -> None:
     await _retriever._client.delete_by_metadata({"session_id": "c-search-test"})
     for doc in await knowledge_base.list_docs():
@@ -42,6 +44,7 @@ async def _cleanup() -> None:
 
 
 # 2026-09-23 起不再 skip：conftest 隔离了 DSN（走内存向量库）与飞书验签凭据。
+@_needs_vector_db
 def test_feishu_message_injects_knowledge_context(monkeypatch) -> None:
     agent = FakeAgent()
     monkeypatch.setattr(pipeline_module, "get_agent", lambda name: agent)
@@ -58,6 +61,7 @@ def test_feishu_message_injects_knowledge_context(monkeypatch) -> None:
 
 
 # 2026-09-23 起不再 skip：conftest 隔离了 DSN（走内存向量库）与飞书验签凭据。
+@_needs_vector_db
 def test_feishu_message_writes_request_log(monkeypatch) -> None:
     agent = FakeAgent()
     calls = []

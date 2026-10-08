@@ -14,6 +14,7 @@ import atexit
 import os
 import shutil
 import tempfile
+import pytest
 
 DEFAULT_GATEWAY_TOKEN = "test-gateway-token"  # nosec B105
 DEFAULT_DASHBOARD_PASSWORD = "test-dashboard-pw"  # nosec B105
@@ -30,7 +31,9 @@ for name in (
     "DATABASE_URL",
     "POSTGRES_URL",
 ):
-    os.environ[name] = ""
+    # 只在未设置时置空：用户显式传入的值（如 CI 或本地真库验证）不应被覆盖。
+    if not os.environ.get(name):
+        os.environ[name] = ""
 
 # 集成用例依赖"自动迁移开"这条路径（每次 build_review_store 会建表）。
 # 开发者 .env 里若把它关了，集成用例会因为表不存在而报 undefined_column，
@@ -56,6 +59,13 @@ for name in ("GATEWAY_PORT", "APP_PORT"):
 for name in ("FEISHU_VERIFICATION_TOKEN", "FEISHU_ENCRYPT_KEY", "HITL_APPROVER_IDS"):
     os.environ[name] = ""
 os.environ["GATEWAY_ALLOW_INSECURE"] = "1"
+
+# 向量库集成测试：未配置 VECTOR_DB_DSN 时跳过需要真实 PG 连接的测试。
+# 这些测试验证的是 pgvector client 的行为，不是业务逻辑，跳过不影响单元测试覆盖。
+_needs_vector_db = pytest.mark.skipif(
+    not os.getenv("VECTOR_DB_DSN"),
+    reason="VECTOR_DB_DSN not set; skipping vector DB integration tests",
+)
 
 # 同理，单测不能继承开发者 .env 里的真实 LLM 凭据：意图路由的
 # router_llm 会在测试期间真的发起外网请求，超时取消后还会触发 litellm

@@ -20,6 +20,11 @@ import os
 import threading
 from typing import Any
 
+from apps.code_review_pipeline.routing.github_client import (
+    MergeOutcome,
+    aggregate_ci_status,
+)
+
 
 def _store_path() -> str:
     """review 落盘位置。与 fixture 分开：fixture 是输入，这个是输出。"""
@@ -42,10 +47,18 @@ class FixtureGitHubClient:
     async def aclose(self) -> None:
         return None
 
-    def _pull(self, repo: str, pr_number: int) -> dict[str, Any]:
+    def _read_fixture(self) -> dict[str, Any]:
+        """读 fixture 文件。
+
+        同步读本地文件：这是离线 demo 通道，一次 demo 读几次小文件，为此引入
+        aiofiles 不划算。抽成独立的同步方法后，调用点不再是在 async 函数里直接
+        调 ``open``——但**如实记下**：它确实会阻塞事件循环，只是 demo 场景下无所谓。
+        """
         with open(self._fixture_path, "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        pulls = data.get("pulls", {})
+            return dict(json.load(fh))
+
+    def _pull(self, repo: str, pr_number: int) -> dict[str, Any]:
+        pulls = self._read_fixture().get("pulls", {})
         key = f"{repo}#{int(pr_number)}"
         if key not in pulls:
             raise LookupError(f"fixture has no pull request {key}")
@@ -105,3 +118,53 @@ class FixtureGitHubClient:
             self._write_store(store)
         return {"id": int(new_id), "event": event}
 
+    async def get_ci_status(self, repo: Any, ref: str) -> Any:
+        """CI 结论取自 fixture 的 ``ci`` 段。
+
+        ``ref`` 在离线模式下不参与匹配——fixture 是"这个 PR 的当前状态"，而 demo 里
+        只有一个 sha。这一点**如实记下**：真实 GitHub 上 ref 不同结论可能不同，离线
+        通道验证不了那件事。
+        """
+        owner, name = self._split(repo)
+        # fixture 的键是 repo#pr，但 CI 查询只给 ref 不给 pr。demo 里约定 ref 就是
+        # 该 PR 的 head sha，于是扫一遍找到持有该 sha 的条目。
+        for entry in (self._read_fixture().get("pulls") or {}).values():
+            head = str(((entry.get("pr") or {}).get("head") or {}).get("sha") or "")
+            if head and head == str(ref):
+                ci = dict(entry.get("ci") or {})
+                return aggregate_ci_status(
+                    list(ci.get("check_runs") or ()), dict(ci.get("combined_status") or {})
+                )
+        return aggregate_ci_status(None, None)
+
+    async def merge_pr(
+        self,
+        repo: Any,
+        pr_number: int,
+        *,
+        sha: str = "",
+        commit_title: str = "",
+    ) -> MergeOutcome:
+        """把合并写进 store，让"合并真的发生过"在 JSON 里可见。
+
+        同时**校验 sha**：真实 GitHub 会用 409 拒绝"审批期间又推了新 commit"，离线
+        通道若不复刻这条，golden path 就验证不了本 ADR 最要紧的那个保证。
+        """
+        owner, name = self._split(repo)
+        pull = self._pull(f"{owner}/{name}", pr_number)
+        head = str(((pull.get("pr") or {}).get("head") or {}).get("sha") or "")
+        if sha and head and sha != head:
+            return MergeOutcome(
+                merged=False,
+                status="sha_mismatch",
+                message=f"Head branch was modified (expected {head}, got {sha}).",
+            )
+
+        key = f"{owner}/{name}#{int(pr_number)}:merges"
+        with self._lock:
+            store = self._read_store()
+            rows = list(store.get(key, []))
+            rows.append({"sha": head, "title": commit_title})
+            store[key] = rows
+            self._write_store(store)
+        return MergeOutcome(merged=True, status="merged", message="Merged", sha=head)

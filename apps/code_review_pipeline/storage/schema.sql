@@ -156,3 +156,31 @@ ALTER TABLE code_review_prs ALTER COLUMN status SET DEFAULT 'queued';
 -- 'pending' 这个遗留值在老库里真实存在（有行已经被写过 pending）。统一成 queued
 -- 否则同一批任务里会并存两套词汇：老行 pending / 新行 queued。
 UPDATE code_review_prs SET status = 'queued' WHERE status = 'pending';
+
+-- ── ADR-0021: 合并通道 (2026-10-08) ─────────────────────────────────────
+--
+-- 与 code_review_prs **分表**：两条状态线不同（见 merge_state.py 的模块注释），
+-- 共用一张表会让 status 列变成两套词汇的杂糅——本文件上面已经记录过那次教训。
+--
+-- 主键是 (repo, pr_number, head_sha) 三元组，与 code_review_prs 的幂等键同构。
+-- **sha 变了就是另一条记录**：审批是在某个 sha 上做出的，新 commit 到来意味着那张
+-- 审批已经作废，不能续用。
+CREATE TABLE IF NOT EXISTS pr_merge_gate (
+    repo TEXT NOT NULL,
+    pr_number INTEGER NOT NULL,
+    head_sha TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'watching',
+    ci_state TEXT NOT NULL DEFAULT '',
+    ci_failing JSONB NOT NULL DEFAULT '[]'::jsonb,
+    card_message_id TEXT NOT NULL DEFAULT '',
+    approver TEXT NOT NULL DEFAULT '',
+    merged_sha TEXT NOT NULL DEFAULT '',
+    failure_reason TEXT NOT NULL DEFAULT '',
+    transitions JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (repo, pr_number, head_sha)
+);
+
+-- 轮询每轮都按 state 捞非终态记录，不必全表扫。
+CREATE INDEX IF NOT EXISTS idx_pr_merge_gate_state ON pr_merge_gate (state);
