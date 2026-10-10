@@ -85,6 +85,25 @@ delta: hit_at_1 -0.087, hit_at_3 0.0, hit_at_5 0.0, recall_at_5 0.0,
 而覆盖率排序会牺牲"词频高但只覆盖部分 query"的文档。它证明的是**度量能跑通、
 能分辨正负**，不是"精排有用"。
 
+### 摊开一条 query 看
+
+聚合数字之外，`scripts/rag_case.py` 把**同一个 query** 在精排关/开下的 Top-k 并排
+打出来，带 gold 标注：
+
+```bash
+uv run python scripts/rag_case.py                 # 默认案例
+uv run python scripts/rag_case.py --reranker none # 自检：两侧应完全相同
+```
+
+默认案例「请求链路是如何工作的？」是一处**变差了**的真实样本：
+`01-gateway-overview:chunk:0`（gold 分级 2）本来在第一位，开精排后被 `chunk:1`
+（分级 1）顶到第二。两条 chunk 都还在 Top-3 里，所以 `Hit@3` 完全看不出变化，
+nDCG 才会掉——上面表里 `ndcg_at_5 -0.0356` 就含这一份。挑默认案例的标准是
+"差异看得见"，不是"结果好看"。
+
+扫过全部 23 条 gold query：10 条在开/关之间排序有变化，其中 2 条 Top-1 由对变错，
+**0 条**由错变对。
+
 ## 精排怎么接
 
 ```text
