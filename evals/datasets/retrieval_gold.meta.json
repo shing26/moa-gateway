@@ -1,0 +1,12 @@
+{
+  "created_at": "2026-10-09T14:32:43.582548+00:00",
+  "annotator": "llm-annotator+human-spot-check",
+  "annotator_mode": "llm-annotator+human-spot-check",
+  "spot_check_required": false,
+  "spot_check_completed": true,
+  "row_count": 23,
+  "corpus_dir": "evals\\datasets\\retrieval_corpus",
+  "chunk_size": 500,
+  "chunk_overlap": 50,
+  "note": "annotator != chunker author (ADR-020). heuristic mode is provisional until a human spot-check passes --finalize."
+}

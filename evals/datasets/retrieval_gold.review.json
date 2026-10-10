@@ -1,0 +1,7 @@
+{
+  "keep": "all",
+  "drop": [],
+  "graded": {},
+  "annotator": "llm-annotator+human-spot-check",
+  "note": "All 23 LLM-annotated rows reviewed on 2026-10-09: queries are answerable by the marked chunks, multi-chunk labels present, no spurious relevance. Annotator is the local LLM (independent of the chunker author, ADR-020)."
+}
