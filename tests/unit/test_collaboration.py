@@ -560,3 +560,160 @@ async def test_session_id_defaults_to_a_collab_namespaced_value() -> None:
     result = await orch.run(task="x", trace_id="t-sid")
     # 不给 session_id 时用协作自己的前缀，避免与请求路径的会话撞
     assert result.trace_id == "t-sid"
+
+
+# ── 协作层自身的成本记账 ──────────────────────────────────────────────────
+
+
+class _SpendingLLM:
+    """每次调用都记账的协作 LLM 替身（验证 plan/critique 的开销真的进了成本）。"""
+
+    def __init__(self, plan, critiques=None) -> None:
+        self._plan = plan
+        self._critiques = list(critiques or [])
+        self._spend = {"cost_usd": 0.0, "llm_latency_ms": 0.0, "calls": 0}
+
+    async def plan(self, *, task: str):
+        self._spend["cost_usd"] += 0.11
+        self._spend["llm_latency_ms"] += 100.0
+        self._spend["calls"] += 1
+        return self._plan
+
+    async def critique(self, **kwargs):
+        self._spend["cost_usd"] += 0.22
+        self._spend["llm_latency_ms"] += 200.0
+        self._spend["calls"] += 1
+        if self._critiques:
+            return self._critiques.pop(0)
+        return {"decision": "approve", "reasons": [], "targets": []}
+
+    def take_metrics(self) -> dict[str, float]:
+        out = dict(self._spend)
+        self._spend = {"cost_usd": 0.0, "llm_latency_ms": 0.0, "calls": 0}
+        return out
+
+
+@pytest.mark.asyncio
+async def test_collaboration_layer_spend_lands_in_cost() -> None:
+    """plan 与 critique 的 token 开销必须计入 cost_usd。
+
+    此前只有专家侧 llm_metrics 进成本，协作层自己花的钱恒为 0——跑两轮反思
+    和一轮放行在成本上看不出区别。
+    """
+    orch = CollabOrchestrator(
+        collaboration_llm=_SpendingLLM(TWO_SUBTASKS),
+        experts=_experts(),
+        settings_obj=_cfg(),
+    )
+    result = await orch.run(task="规划一次，评审一次", trace_id="t-spend")
+    # 一次 plan + 一次 critique = 0.11 + 0.22；专家侧是 ScriptedExpert/Recording
+    # 替身，不产生 llm_metrics。
+    assert result.cost_usd == pytest.approx(0.33)
+    assert result.llm_latency_ms == pytest.approx(300.0)
+
+
+@pytest.mark.asyncio
+async def test_spend_is_counted_once_not_doubled_across_nodes() -> None:
+    """同一段花费不能被多个节点重复累加（take 走的是取走即清零）。"""
+    llm = _SpendingLLM(TWO_SUBTASKS)
+    orch = CollabOrchestrator(
+        collaboration_llm=llm,
+        experts=_experts(),
+        settings_obj=_cfg(),
+    )
+    result = await orch.run(task="规划一次，评审一次", trace_id="t-spend-once")
+    # 两次调用各记一次：0.33 说明既没漏记也没重复计
+    assert result.cost_usd == pytest.approx(0.33)
+    assert result.rounds == 1
+
+
+def test_mock_task_llm_take_metrics_is_zero() -> None:
+    """mock 后端的 take_metrics 必须存在且恒为 0，否则编排层要为两种后端分叉。"""
+    assert MockCollaborationLLM().take_metrics() == {
+        "cost_usd": 0.0,
+        "llm_latency_ms": 0.0,
+        "calls": 0,
+    }
+
+
+def test_build_collaboration_llm_respects_subtask_cap() -> None:
+    """mock 后端的上限必须来自配置，而不是写死的常数。"""
+    from app.orchestration.collaboration import build_collaboration_llm
+
+    cfg = _cfg(collab_llm="mock", collab_max_subtasks=2)
+    llm = build_collaboration_llm(cfg)
+    assert isinstance(llm, MockCollaborationLLM)
+    assert llm._max_subtasks == 2
+
+
+def test_stream_and_finish_agree_with_run(tmp_path, monkeypatch) -> None:
+    """``run_streamed`` + ``finish`` 与一次性 ``run`` 必须给出同一份结果。"""
+    import asyncio
+
+    from app.audit import recorder
+
+    async def fake_record(entry):
+        return None
+
+    monkeypatch.setattr(recorder, "record", fake_record)
+    import app.orchestration.collaboration as collab
+
+    monkeypatch.setattr(collab, "record", fake_record)
+
+    async def _collect(streamed: bool) -> CollabResult:
+        orch = CollabOrchestrator(
+            collaboration_llm=StubLLM(lambda task: TWO_SUBTASKS),
+            experts=_experts(),
+            settings_obj=_cfg(),
+        )
+        if not streamed:
+            return await orch.run(task="一起做两件事", trace_id="t-parity")
+        events = []
+        async for event in orch.run_streamed(task="一起做两件事", trace_id="t-parity"):
+            events.append(event)
+        assert events, "流式模式一条事件都不该少"
+        return orch.finish("t-parity")
+
+    one_shot = asyncio.run(_collect(False))
+    streamed = asyncio.run(_collect(True))
+    assert streamed.node_path == one_shot.node_path
+    assert streamed.final_text == one_shot.final_text
+    assert streamed.status == one_shot.status
+    assert streamed.cost_usd == one_shot.cost_usd
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("critiques", "expected_hint"),
+    [
+        # 一直打回且点名了子任务：撞上轮次上限
+        (
+            [
+                {"decision": "revise", "reasons": ["r1"], "targets": [0]},
+                {"decision": "revise", "reasons": ["r2"], "targets": [0]},
+                {"decision": "revise", "reasons": ["r3"], "targets": [0]},
+            ],
+            "已达反思轮次上限",
+        ),
+        # 打回但没点名：根本谈不到上限
+        (
+            [{"decision": "revise", "reasons": ["r"], "targets": []}],
+            "未指明改哪些子任务",
+        ),
+    ],
+)
+async def test_unresolved_critique_says_which_case_it_is(critiques, expected_hint) -> None:
+    """未通过交付的标注必须说清是哪种未决。
+
+    "已达反思轮次上限"和"评审要求改但没说改谁"是两回事。把前者的话术安给
+    后者，等于拿一件没发生的事当解释——而这句文本是交给用户看的。
+    """
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(lambda task: TWO_SUBTASKS, critiques=critiques),
+        experts=_experts(),
+        settings_obj=_cfg(collab_max_rounds=2),
+    )
+    result = await orch.run(task="一起做两件事", trace_id="t-unresolved")
+    assert result.need_human_review is True
+    assert "【critic 未通过】" in result.final_text
+    assert expected_hint in result.final_text

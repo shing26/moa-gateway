@@ -39,7 +39,7 @@ import asyncio
 import logging
 import operator
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Any, Protocol, TypedDict
 
@@ -160,6 +160,24 @@ class CollabResult:
     error_code: str = ""
 
 
+@dataclass(frozen=True)
+class CollabEvent:
+    """图跑过一步的一帧（``run_streamed`` 的产出）。
+
+    ``update`` 是该节点**写回的状态片段**，不是完整状态——同一个节点的多个
+    字段会一起出现，而别的节点写的字段不在里面。
+
+    ``Send`` 扇出的多个 ``execute_expert`` 在同一个 superstep 里并发，LangGraph
+    并发，但 ``updates`` 模式会**逐个** yield（实测三个子任务收到三条
+    ``execute_expert`` 事件）。所以终端可以按专家一条条实时显示，不必等整轮
+    跑完；``update["node_path"]`` 里带下标的 ``execute_expert:N`` 标明这是哪个
+    子任务。
+    """
+
+    node: str
+    update: dict[str, Any]
+
+
 # ── 协作 LLM 协议 ────────────────────────────────────────────────────────
 
 
@@ -249,6 +267,13 @@ class MockCollaborationLLM:
     def __init__(self, *, max_subtasks: int = 4) -> None:
         self._max_subtasks = max(1, int(max_subtasks))
 
+    def take_metrics(self) -> dict[str, float]:
+        """与 ``LiteLLMCollaborationLLM`` 同形：mock 不花 token，恒为 0。
+
+        存在的意义是让编排层不必为两种后端写分支——调用点只认这个方法在不在。
+        """
+        return {"cost_usd": 0.0, "llm_latency_ms": 0.0, "calls": 0}
+
     async def plan(self, *, task: str) -> list[dict[str, Any]]:
         # 一次性按全部连接词/断句标点切，而不是"找到第一个能切开的就用它"：
         # 后者会把 "写函数，然后审查它，并且总结" 切成两段且第一段仍含着连接词，
@@ -310,7 +335,12 @@ class LiteLLMCollaborationLLM:
     _PLAN_PROMPT = (
         "你是多 Agent 系统的 Supervisor。把用户任务拆成可并行的子任务，"
         "只回 JSON 数组，每项含 index(从0开始)、instruction、agent、depends_on。"
-        "agent 只能是 coder / general / review 之一。不要输出 JSON 以外的内容。"
+        "不要输出 JSON 以外的内容。\n"
+        "可选专家的分工（选错人等于白干，按子任务的实质工作选）：\n"
+        "- coder：写代码、改代码、修 bug、做静态分析。凡是需要产出或修改代码的都给它。\n"
+        "- general：解释概念、写文档、总结要点、问答。不碰代码的思考型工作。\n"
+        "- review：审查 GitHub Pull Request。它**只服务 PR 审查**，需要 PR 地址；"
+        "把'审查这段代码'交给它是错的——那是 coder 的活。"
     )
     _CRITIQUE_PROMPT = (
         "你是多 Agent 系统的 Critic。评审下面各子任务的输出，只回 JSON 对象："
@@ -324,13 +354,39 @@ class LiteLLMCollaborationLLM:
 
             client = LLMClient(LLMConfig.from_env("LLM"))
         self._client = client
+        self._spend: dict[str, float] = {"cost_usd": 0.0, "llm_latency_ms": 0.0, "calls": 0}
 
     async def _complete(self, prompt: str, payload: str) -> str:
         messages = [
             {"role": "system", "content": prompt},
             {"role": "user", "content": payload},
         ]
-        return await self._client.chat(messages)
+        raw = await self._client.chat(messages)
+        self._record()
+        return raw
+
+    def _record(self) -> None:
+        """把这次调用的用量累加起来。
+
+        来源是 ``LLMClient.last_metrics``——它是 ``_acompletion`` 每次调用后
+        覆写的，所以必须在**紧接着**这次 chat 读，隔一次调用就串了。
+        """
+        metrics = getattr(self._client, "last_metrics", None) or {}
+        self._spend["cost_usd"] += float(metrics.get("cost_usd", 0.0) or 0.0)
+        self._spend["llm_latency_ms"] += float(metrics.get("llm_latency_ms", 0.0) or 0.0)
+        self._spend["calls"] += 1
+
+    def take_metrics(self) -> dict[str, float]:
+        """取走累计用量并清零，供编排层并入会话成本。
+
+        为什么要有这个方法：协作层的 plan / critique **也是真金白银的 LLM 调用**，
+        但此前只有专家侧的 ``llm_metrics`` 进了 ``cost_usd``，于是报告里协作
+        开销恒为 0——一个跑了两轮反思的协作和一个一轮放行的协作，在成本上看
+        不出区别。取走即清零，避免同一段花费被多个节点重复累加。
+        """
+        out = dict(self._spend)
+        self._spend = {"cost_usd": 0.0, "llm_latency_ms": 0.0, "calls": 0}
+        return out
 
     @staticmethod
     def _loads(raw: str) -> Any:
@@ -385,9 +441,6 @@ def build_collaboration_llm(settings_obj: Any = None) -> CollaborationLLM:
     # 规划结果与真实派发的不一致。
     cap = int(getattr(cfg, "collab_max_subtasks", 4) or 4)
     return MockCollaborationLLM(max_subtasks=cap)
-    return MockCollaborationLLM(
-        max_subtasks=int(getattr(cfg, "collab_max_subtasks", 4) or 4),
-    )
 
 
 # ── 图状态 ───────────────────────────────────────────────────────────────
@@ -745,6 +798,28 @@ class CollabOrchestrator:
             "plan": tuple(item.to_dict() for item in assignments),
             "round": 0,
             "node_path": ["plan"],
+            **self._llm_spend(),
+        }
+
+    def _llm_spend(self) -> dict[str, float]:
+        """取走协作 LLM 自上次以来的花费，转成可并入状态的键。
+
+        只有专家侧的 ``llm_metrics`` 进过 ``cost_usd``，于是 plan 与每轮
+        critique 的真实 token 开销在报告里恒为 0——跑两轮反思和一论放行
+        在成本上看不出差别。后端没实现 ``take_metrics``（如测试替身）时返回 0，
+        记账失败也只 warning，不反过来拖垮协作。
+        """
+        take = getattr(self._llm, "take_metrics", None)
+        if not callable(take):
+            return {"cost_usd": 0.0, "llm_latency_ms": 0.0}
+        try:
+            spent = take() or {}
+        except Exception as exc:  # noqa: BLE001 - 记账失败不该影响主流程
+            logger.warning("collab llm metrics failed: %s", exc)
+            return {"cost_usd": 0.0, "llm_latency_ms": 0.0}
+        return {
+            "cost_usd": float(spent.get("cost_usd", 0.0) or 0.0),
+            "llm_latency_ms": float(spent.get("llm_latency_ms", 0.0) or 0.0),
         }
 
     async def _node_dispatch(self, state: CollabState) -> dict[str, Any]:
@@ -895,7 +970,7 @@ class CollabOrchestrator:
         """Critic 评审本轮输出，给出结构化裁决。"""
         if state.get("status") in _ESCALATED_STATUSES:
             # 已有子任务重试耗尽并升级人工：不再评审，直接放行到 HITL。
-            return {"node_path": ["critic"]}
+            return {"node_path": ["critic"], **self._llm_spend()}
         plan = [item for item in (state.get("plan") or ()) if isinstance(item, dict)]
         outputs = dict(state.get("outputs") or {})
         try:
@@ -922,6 +997,7 @@ class CollabOrchestrator:
             "critique_history": [verdict.to_dict()],
             "round": round_no,
             "node_path": [f"critic:{round_no}"],
+            **self._llm_spend(),
         }
         if verdict.decision == DECISION_REVISE and not looping:
             # 到上限仍不通过，或"要改但没说改谁"：标记未决，交付时显式说明。
@@ -957,8 +1033,15 @@ class CollabOrchestrator:
         text = f"多 Agent 协作结果（{len(plan)} 个子任务，评审 {rounds} 轮）\n\n{body}"
         if state.get("critique_unresolved"):
             # 不把没通过的输出伪装成成功：前置一句显式标注。
+            # **两种未决要分开说**：到上限，和"要改但没说改谁"。后者把前者的
+            # 话术安上来，就是拿一句没发生的事当解释。
+            rounds = int(state.get("round", 0) or 0)
+            if rounds >= self._max_rounds:
+                why = "已达反思轮次上限"
+            else:
+                why = "评审要求修改但未指明改哪些子任务，无法定向重跑"
             text = (
-                "【critic 未通过】已达反思轮次上限，以下结果未经评审确认，"
+                f"【critic 未通过】{why}，以下结果未经评审确认，"
                 "请人工复核后再使用。\n\n" + text
             )
         return {"raw_output": text, "node_path": ["summarize"]}
@@ -1311,6 +1394,57 @@ class CollabOrchestrator:
         state = await self._graph.ainvoke(initial, self._config(trace_id))
         return self._to_result(state)
 
+    async def run_streamed(
+        self,
+        *,
+        task: str,
+        trace_id: str | None = None,
+        session_id: str = "",
+        channel: str = "",
+        target: str = "",
+        user_id: str = "",
+    ) -> AsyncIterator[CollabEvent]:
+        """跑一次协作，边跑边吐事件。
+
+        与 ``run`` 只差观测方式：这里用 ``astream(stream_mode="updates")``，每个
+        superstep 完成后 yield 一条 ``(node, update)``，而不是在一个 ``ainvoke``
+        上等到底。两者共用同一份 checkpoint config，所以 HITL 挂起 / ``resume``
+        的语义完全一致——流式是观测的改动，不是行为的改动。
+
+        **``updates`` 给的是增量写入，不是完整状态。** 所以最终结果要另用
+        ``finish()`` 从 checkpoint 取，不能从最后一条事件里拼。
+        """
+        trace_id = trace_id or new_trace_id()
+        sid = session_id or f"collab:{trace_id}"
+        bind_trace(trace_id)
+        initial: CollabState = {
+            "trace_id": trace_id,
+            "session_id": sid,
+            "user_id": user_id,
+            "task": str(task or "").strip(),
+            "channel": channel,
+            "target": target,
+            "node_path": [],
+        }
+        async for chunk in self._graph.astream(
+            initial, self._config(trace_id), stream_mode="updates"
+        ):
+            for node, update in chunk.items():
+                yield CollabEvent(node=str(node), update=dict(update or {}))
+
+    def finish(self, trace_id: str) -> CollabResult:
+        """从 checkpoint 取这次协作的结果（``run_streamed`` 跑完后调用）。
+
+        ``get_state().values`` 是完整状态；中断标记不在 values 里时按
+        ``snapshot.interrupts`` 补上，使 ``_to_result`` 的挂起判定与 ``run``
+        走 ``ainvoke`` 时一致。
+        """
+        snapshot = self._graph.get_state(self._config(trace_id))
+        state = dict(snapshot.values or {})
+        if getattr(snapshot, "interrupts", ()) and "__interrupt__" not in state:
+            state["__interrupt__"] = snapshot.interrupts
+        return self._to_result(state)
+
     async def resume(self, thread_id: str, decision: str) -> CollabResult:
         """放行一次挂起——HITL 的 ``Command(resume=...)`` 那一半。"""
         state = await self._graph.ainvoke(
@@ -1334,6 +1468,7 @@ class CollabOrchestrator:
 __all__ = [
     "COLLAB_AGENT_NAME",
     "COLLAB_INTENT",
+    "CollabEvent",
     "EXPERT_KEYS",
     "CollabOrchestrator",
     "CollabResult",

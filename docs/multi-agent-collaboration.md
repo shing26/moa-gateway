@@ -133,6 +133,20 @@ curl -X POST localhost:8000/api/v1/collab/approve -H 'X-Gateway-Token: $TOKEN' \
 输出为空或含失败标记就打回。`ScriptedExpert` 产出确定性文本。两者都不碰网络，
 所以 CI 里同一输入必然得到同一条 `node_path`（`test_collaboration.py` 有这条断言）。
 
+## 怎么看它跑起来
+
+```bash
+uv run python scripts/run_collaboration.py                    # mock：零网络零 token
+uv run python scripts/run_collaboration.py --scripted-revise  # 演示一次打回→靶向重跑→放行
+uv run python scripts/run_collaboration.py --live "..."       # 真实 LLM，读 .env.local
+```
+
+三条命令共用一套流式渲染：`run_streamed()` 用 `graph.astream(stream_mode="updates")`
+逐个 superstep yield 事件，终端因此能**当场**看到派发、打回与放行，而不是对着一份
+跑完才出现的 JSON。`--scripted-revise` 的存在是因为本地 7B 模型很可能第一轮就
+approve，"Critic 打回"这条链路就永远看不见；它的评审台词是预设的，脚本标题会写明
+这一点，但裁决结构、靶向重跑、回边与轮次计数仍是图在跑。
+
 ## 已知边界
 
 这些是**没做**，不是忘了：
@@ -148,3 +162,27 @@ curl -X POST localhost:8000/api/v1/collab/approve -H 'X-Gateway-Token: $TOKEN' \
   协作链路自己不含 Agent 实现。
 * **没有 task-LLM 降级转换。** 协作不走 ReAct 那条降级路径（专家池里没有 `task`），
   所以 `_task_degradation_issues` 在这个图里没有输入可用。
+
+## 活体跑过之后才知道的事
+
+以下是用本地 Ollama（`qwen2.5:7b`，`.env.local`）跑 `--live` 的实际观察，
+不是推测：
+
+* **Supervisor 的专家归属不可靠。** 同一个任务（"审查这段异步代码并修复缺陷"）跑了两
+  次，一次拆成 3 个子任务、一次拆成 1 个，两次都把子任务判给了 `review`——而 `review`
+  是要 `GITHUB_TOKEN` 的 PR 审查器，于是一次真代码都没跑。把三个专家的分工写进
+  `_PLAN_PROMPT` 之后仍然如此。`agent not in EXPERT_KEYS` 只挡住了**非法**的归属，
+  挡不住**语义错**的归属。
+* **Critic 的反思是真的。** 同一输入下 Critic 第一轮给出 revise（ reasons 里确实点了
+  `ClientSession` 未关闭、缺少错误处理、`counter` 未定义），第二轮换了一批理由继续
+  revise，触顶后走 `need_human_review` 并通过 `【critic 未通过】` 标注交付——没有
+  伪装成功。这条链路的形状是对的。
+* **但 Critic 也会放行非答案。** 另一轮里专家返回的是"PR 审查需要配置 GITHUB_TOKEN"，
+  Critic 判了 approve，于是这句失败应答以 `need_human_review=False` 交付。专家"我干
+  不了"与"我干完了"在协议上都是 `execute() -> str`，协作层区分不出来（同"已知边界"
+  最后一条：没有降级信号可读）。
+* **协作层自己的 token 一度不计价。** `cost_usd` 只累计专家侧 `llm_metrics`，plan 与
+  每轮 critique 的开销恒为 0，跑两轮反思和一轮放行在成本上毫无差别。已修：
+  `LiteLLMCollaborationLLM` 现在读 `LLMClient.last_metrics` 累计并暴露
+  `take_metrics()`，编排层在 `plan`/`critic` 两个节点取走并入。本地模型
+  `cost_usd` 仍是 0（Ollama 不计费），但 `llm_latency_ms` 从 0 变成 9~20 秒，可观测。
