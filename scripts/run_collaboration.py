@@ -32,6 +32,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
+import types
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -54,6 +55,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="mock 模式下演示一次 Critic 打回→定向重跑→放行（评审是预设的，不是模型说的）",
     )
     parser.add_argument("--full", action="store_true", help="专家输出不截断")
+    parser.add_argument(
+        "--scripted-failure",
+        action="store_true",
+        help="mock 模式下演示专家返回失败信封→Critic 不评审→升级人工",
+    )
     parser.add_argument("--max-rounds", type=int, default=None, help="覆盖 COLLAB_MAX_ROUNDS")
     parser.add_argument("--max-subtasks", type=int, default=None, help="覆盖 COLLAB_MAX_SUBTASKS")
     parser.add_argument("--trace-id", default="", help="固定 trace_id，便于复跑比对")
@@ -98,22 +104,42 @@ def _build(args: argparse.Namespace):
     llm: Any = MockCollaborationLLM(max_subtasks=max_subtasks)
     if args.scripted_revise:
         llm = _ReviseOnceLLM()
+    if args.scripted_failure:
+        # 真实专家在依赖缺失时就是这么回答的：把失败当普通答案 return。
+        return CollabOrchestrator(
+            collaboration_llm=MockCollaborationLLM(max_subtasks=max_subtasks),
+            settings_obj=_mock_cfg(max_rounds, max_subtasks, hitl_enabled=False),
+            experts={
+                key: ScriptedExpert(reply=_FAILURE_ENVELOPE)
+                for key in ("coder", "general", "review")
+            },
+        )
 
-    class Cfg:
-        collab_llm = "mock"
-        collab_max_rounds = max_rounds
-        collab_max_subtasks = max_subtasks
-        # mock 演示刻意关掉审批：脚本是一次性命令，没有人会来点"批准"，
-        # 挂在 interrupt 上只会让演示看起来像卡住了。
-        hitl_enabled = False
-        default_role = settings.default_role
-
-    cfg = Cfg()
+    cfg = _mock_cfg(max_rounds, max_subtasks, hitl_enabled=False)
     return CollabOrchestrator(
         collaboration_llm=llm,
         settings_obj=cfg,
         experts={key: ScriptedExpert() for key in ("coder", "general", "review")},
     )
+
+
+def _mock_cfg(max_rounds: int, max_subtasks: int, *, hitl_enabled: bool):
+    from app.config import settings
+
+    # 用 SimpleNamespace 而不是 class：class 体不参与闭包，在类体里写
+    # ``hitl_enabled = hitl_enabled`` 引用不到外层参数（实测 NameError）。
+    return types.SimpleNamespace(
+        collab_llm="mock",
+        collab_max_rounds=max_rounds,
+        collab_max_subtasks=max_subtasks,
+        # mock 演示刻意关掉审批：脚本是一次性命令，没有人会来点"批准"，
+        # 挂在 interrupt 上只会让演示看起来像卡住了。
+        hitl_enabled=hitl_enabled,
+        default_role=settings.default_role,
+    )
+
+
+_FAILURE_ENVELOPE = "PR 审查需要配置 GITHUB_TOKEN；请设置后重试。"
 
 
 class _ReviseOnceLLM:
@@ -230,8 +256,12 @@ class _View:
         elapsed = time.monotonic() - self.expert_started.get(idx, time.monotonic())
         outputs = update.get("outputs") or {}
         text = str(outputs.get(idx, "") or "").strip()
+        failed = int(update.get("failure_envelopes", 0) or 0) > 0
         print(
-            paint(f"  ✅ 子任务{idx} → @{agent} · {elapsed:.1f}s", "green")
+            paint(
+                f"  {'❌' if failed else '✅'} 子任务{idx} → @{agent} · {elapsed:.1f}s",
+                "red" if failed else "green",
+            )
         )
         if text:
             shown = text if self.full else text[:240] + ("…" if len(text) > 240 else "")
@@ -241,6 +271,16 @@ class _View:
     def on_critic(self, update: dict) -> None:
         verdict = update.get("verdict") or {}
         self.round = int(update.get("round", self.round) or 0)
+        if update.get("retry_reason") or update.get("hitl_kind") == "failure_escalation":
+            # 专家返回了失败信封：Critic 没有评审，图直接走升级腿。
+            # 这里不能落到下面的 approve 分支——那会把"没评审"显示成"通过了"。
+            # 不带轮次：这条分支里 critic 没有推进 round，显示的会是上一轮的编号。
+            print(rule("③ Critic 未评审"))
+            print(paint("  ⛔ 专家返回失败信封，升级人工", "bold", "red"))
+            print(wrap(str(update.get("retry_reason") or ""), indent="     ", initial="     "))
+            print(paint("     → 不评审：在错误提示上打转几轮都不会有结论", "dim"))
+            print()
+            return
         decision = str(verdict.get("decision") or "")
         print(rule(f"③ Critic 评审 · 第 {self.round} 轮"))
         if decision == "revise":
@@ -340,6 +380,8 @@ async def _run(args: argparse.Namespace) -> int:
         mode = paint("live（真实 LLM）", "bold", "magenta")
     elif args.scripted_revise:
         mode = paint("mock + 预设评审（打回是台词，不是模型说的）", "bold", "yellow")
+    elif args.scripted_failure:
+        mode = paint("mock + 预设失败信封（演示不评审直接升级）", "bold", "yellow")
     else:
         mode = "mock（零网络零 token）"
     print(kv("mode", mode))

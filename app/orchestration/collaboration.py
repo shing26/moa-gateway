@@ -86,6 +86,65 @@ _ESCALATED_STATUSES = frozenset({"pending_review", "error"})
 # AGENT_REGISTRY"的具体边界——协作链路不引入新的 Agent 实现。
 EXPERT_KEYS: tuple[str, ...] = ("coder", "general", "review")
 
+
+# ── 专家失败信封识别 ────────────────────────────────────────────────────
+#
+# ``SubAgent`` 协议至今是 ``execute() -> str``：失败与成功共用同一个出口，
+# 类型上分不出"这活我干不了"和"我干完了"。此前只有**抛异常**的路径会被识别成
+# 失败；而像 ``ReviewAgent`` 缺 ``GITHUB_TOKEN`` 那样把失败当答案返回的，会被
+# Critic 当成内容评审——实测里它甚至 approve 之后原样交付了。
+#
+# 识别规则**刻意收得很窄**。误杀的代价（把一条好答案提前送进人工复核）远高于
+# 漏认（Critic 多评审一次），所以只认三类不可能出自正常回答的形状：
+#   1. 我们自己的失败文案，来源受控（``FAILURE_ESCALATION_TEXT`` / 兜底话术）；
+#   2. 整条输出就是一条异常（异常前缀在**首行**）；
+#   3. "缺一个形如凭据的标识符" + "叫你去配置它"的组合。
+# 泛泛的"未配置"不在其列——讨论配置降级的正常回答里太常见了。
+
+# 异常前缀只认首行：讨论代码的正常回答里提到 ValueError 是家常便饭，
+# 不能因为答案里出现一个异常名就把整条当成失败。
+_EXCEPTION_PREFIXES = (
+    "Traceback (most recent call last)",
+    "ModuleNotFoundError:",
+    "ImportError:",
+    "RuntimeError:",
+    "ValueError:",
+    "KeyError:",
+    "TypeError:",
+    "AttributeError:",
+    "NameError:",
+    "IndexError:",
+    "FileNotFoundError:",
+    "TimeoutError:",
+)
+
+_CREDENTIAL_NAME_RE = re.compile(r"\b[A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD)\b")
+_ASK_TO_CONFIGURE_RE = re.compile(
+    r"需要配置|未配置|请设置|not configured|not set|missing", re.IGNORECASE
+)
+
+
+def expert_failure_reason(text: str) -> str:
+    """认出"失败被当成答案返回"的文本，返回原因；认不出返回空串。
+
+    返回非空即表示这次专家执行应当升级人工，而不是进入评审。
+    """
+    flat = (text or "").strip()
+    if not flat:
+        return ""
+    if FAILURE_ESCALATION_TEXT in flat:
+        return "输出是重试耗尽后的失败文案"
+    if "决策失败:" in flat:
+        return "决策层调用失败，输出是兜底文案而非模型判断"
+    first_line = flat.splitlines()[0]
+    for prefix in _EXCEPTION_PREFIXES:
+        if first_line.startswith(prefix):
+            return f"整条输出是一条异常（{prefix.rstrip(':')}）"
+    credential = _CREDENTIAL_NAME_RE.search(flat)
+    if credential and _ASK_TO_CONFIGURE_RE.search(flat):
+        return f"专家报告缺少凭据 {credential.group(0)}（依赖未配置）"
+    return ""
+
 # Critic 判定合法值。只认这两个，避免 LLM 自由发挥出第三种状态把图带进死路。
 DECISION_APPROVE = "approve"
 DECISION_REVISE = "revise"
@@ -502,6 +561,11 @@ class CollabState(TypedDict, total=False):
     hitl_decision: str
     # 子任务失败原因（多个 worker 可能同时失败，所以是 list 而不是 str）
     failure_reasons: Annotated[list[str], operator.add]
+    # 命中"失败信封"的子任务数。与 failure_reasons 是两条路：后者只是记账，
+    # 走"Critic 打回 → 轮次耗尽 → 转人工"；这个一旦非零就**立即**升级，
+    # 因为失败被当成答案时，再评审几轮都是在评审一句错误提示。
+    # 带 reducer：多个 worker 会在同一个 superstep 里同时命中。
+    failure_envelopes: Annotated[int, _add]
     retry_reason: str
     status: str
     delivered_text: str
@@ -874,6 +938,25 @@ class CollabOrchestrator:
             for item in pending
         ]
 
+    def _escalate_expert_failure(
+        self, updates: dict[str, Any], index: int, reason: str
+    ) -> str:
+        """记下一次专家失败，返回应当留下的输出文本。
+
+        **这里只记账，不改 ``status``。** 本节点是 ``Send`` 扇出的并发 worker，
+        多个子任务会在同一个 superstep 里同时返回，而 ``status`` / ``hitl_kind``
+        / ``retry_reason`` / ``raw_output`` 都是 LastValue 通道——并发写会直接
+        ``InvalidUpdateError``（第一版就是这么崩的）。所以只碰带 reducer 的
+        ``failure_reasons`` 与 ``failure_envelopes``，"要不要升级、升成什么"由
+        下游单个节点 ``_node_critic`` 决定。
+        """
+        logger.error(
+            "collab subtask %d escalated to human: %s", index, reason
+        )
+        updates["failure_reasons"] = [f"子任务 {index}：{reason}"]
+        updates["failure_envelopes"] = 1
+        return FAILURE_ESCALATION_TEXT
+
     async def _node_execute_expert(self, state: CollabState) -> dict[str, Any]:
         """执行一个子任务：复用 ``execute_with_retry`` 与真实专家。"""
         subtask = (
@@ -929,21 +1012,18 @@ class CollabOrchestrator:
                 )
                 # 重试预算耗尽 → 升级人工，与请求路径的同一条闭环
                 # （见 LangGraphOrchestrator._node_execute 的 escalate 分支）。
-                output = FAILURE_ESCALATION_TEXT
-                # raw_output 也要落：升级路径会跳过 summarize，不写的话
-                # await_human 的 interrupt 负载与随后的 deliver 都是空的。
-                updates["raw_output"] = FAILURE_ESCALATION_TEXT
                 metrics = dict(envelope.agent_local_slot.get("llm_metrics") or {})
-                if self._hitl_enabled():
-                    updates["status"] = "pending_review"
-                    updates["hitl_kind"] = "failure_escalation"
-                else:
-                    # 与请求路径同一条门：审批关闭时没有人可升级，退回错误语义。
-                    # 否则"自动处理失败"会以 status=ok 交付，看着像成功。
-                    updates["status"] = "error"
-                    updates["error_code"] = ErrorCode.AGENT_FAILED.value
-                updates["failure_reasons"] = [f"子任务 {subtask.index}：{reason}"]
-                updates["retry_reason"] = reason
+                output = self._escalate_expert_failure(
+                    updates, subtask.index, f"{reason}（重试 {attempts} 次后仍失败）"
+                )
+            else:
+                # 没抛异常不等于成功：SubAgent 协议只有一个字符串出口，失败可能
+                # 被当成答案返回。认出来的话走同一条升级路径，别流进 Critic。
+                failure_reason = expert_failure_reason(output)
+                if failure_reason:
+                    output = self._escalate_expert_failure(
+                        updates, subtask.index, failure_reason
+                    )
 
         cost_usd = float(metrics.get("cost_usd", 0.0) or 0.0)
         tool_calls = int(slot.get("tool_calls_total", 0) or 0)
@@ -971,6 +1051,23 @@ class CollabOrchestrator:
         if state.get("status") in _ESCALATED_STATUSES:
             # 已有子任务重试耗尽并升级人工：不再评审，直接放行到 HITL。
             return {"node_path": ["critic"], **self._llm_spend()}
+        if int(state.get("failure_envelopes", 0) or 0) > 0:
+            # 有专家把失败当成了答案（例如"需要配置 GITHUB_TOKEN"）。这时候再让
+            # Critic 评审就是在评审一句错误提示——实测里它甚至会 approve，
+            # 然后把这句话原样交付。所以不评审，直接升级。
+            # 这里是单个节点，可以安全写 LastValue 通道（execute_expert 不能写）。
+            return {
+                "node_path": ["critic"],
+                "raw_output": FAILURE_ESCALATION_TEXT,
+                "failure_reasons": [],
+                "retry_reason": (state.get("failure_reasons") or ["专家输出是失败信封"])[-1],
+                "hitl_kind": "failure_escalation",
+                # 审批开着就挂起等人工；关着则退回错误语义——"自动处理失败"
+                # 不能以 status=ok 交付，那看着像成功。
+                "status": "pending_review" if self._hitl_enabled() else "error",
+                "error_code": "" if self._hitl_enabled() else ErrorCode.AGENT_FAILED.value,
+                **self._llm_spend(),
+            }
         plan = [item for item in (state.get("plan") or ()) if isinstance(item, dict)]
         outputs = dict(state.get("outputs") or {})
         try:
@@ -1159,6 +1256,17 @@ class CollabOrchestrator:
             # status=error（审批关闭时的失败升级）不能被覆盖成 pending_review：
             # 那会把"没有人可升级"伪装成"正在等审批"。
             "status": state.get("status") or "pending_review",
+            # 升级路径会跳过 summarize，raw_output 还是空的，这里补失败文案，
+            # 否则 interrupt 负载与随后的 deliver 都是空的。
+            # **只在空的时候写**：从 guard review 走过来时 raw_output 已被
+            # summarize 填好，覆盖它等于把"待审批的正常输出"改成失败文案。
+            # 也不能让 execute_expert 写——它是 Send 扇出的并发节点，多个子任务
+            # 同时写一个 LastValue 通道会 InvalidUpdateError。
+            **(
+                {"raw_output": FAILURE_ESCALATION_TEXT}
+                if not state.get("raw_output")
+                else {}
+            ),
             "node_path": ["prepare_hitl"],
         }
 

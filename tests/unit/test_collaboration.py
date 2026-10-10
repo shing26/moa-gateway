@@ -28,6 +28,7 @@ from app.orchestration.collaboration import (
     MockCollaborationLLM,
     ScriptedExpert,
     SubtaskAssignment,
+    expert_failure_reason,
 )
 
 pytest.importorskip("langgraph", reason="langgraph 是可选 extra；未安装时跳过协作图测试")
@@ -717,3 +718,128 @@ async def test_unresolved_critique_says_which_case_it_is(critiques, expected_hin
     assert result.need_human_review is True
     assert "【critic 未通过】" in result.final_text
     assert expected_hint in result.final_text
+
+
+# ── 专家失败信封识别 ────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("text", "why"),
+    [
+        ("自动处理失败，已转人工处理", "我们自己的失败文案"),
+        ("决策失败: connection refused", "决策层兜底文案"),
+        (
+            "Traceback (most recent call last):\n  File x\nRuntimeError: boom",
+            "整条是异常",
+        ),
+        ("ValueError: 参数不对", "首行就是异常"),
+        ("PR 审查需要配置 GITHUB_TOKEN；请设置后重试。", "缺凭据"),
+        ("WEBHOOK_AUTH_TOKEN is not set", "缺凭据（英文）"),
+    ],
+)
+def test_expert_failure_reason_recognizes_envelopes(text: str, why: str) -> None:
+    assert expert_failure_reason(text) != ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "   ",
+        # 讨论代码的正常回答里提到异常名太常见，不能因此判失败
+        "这段代码在入参为空时会抛 ValueError，建议先校验 urls 列表。",
+        "RERANK_ENABLED 未配置时系统会退回 NoopReranker，保留 RRF 顺序。",
+        "配置降级路径写在 app/config.py 里，未配置即关闭语义检索。",
+        "已修复：给 pool.get 加了互斥锁，并在 finally 中关闭 ClientSession。",
+    ],
+)
+def test_expert_failure_reason_does_not_cry_wolf(text: str) -> None:
+    """误杀一条正常回答的代价远比漏认高：这些都必须放过。"""
+    assert expert_failure_reason(text) == ""
+
+
+@pytest.mark.asyncio
+async def test_failure_envelope_short_circuits_to_human_not_critic() -> None:
+    """失败被当成答案返回时，必须升级人工，而不是送进 Critic 评审。"""
+    llm = StubLLM(lambda task: TWO_SUBTASKS)
+    orch = CollabOrchestrator(
+        collaboration_llm=llm,
+        # expert 返回的是信封而非真答案
+        experts={"coder": ScriptedExpert(reply="PR 审查需要配置 GITHUB_TOKEN；请设置后重试。")},
+        settings_obj=_cfg(hitl_enabled=False),
+    )
+    result = await orch.run(task="审查这段代码", trace_id="t-envelope")
+    assert result.status == "error"
+    assert result.error_code == "agent_failed"
+    assert result.need_human_review is True
+    # 关键断言：Critic 一次都没被调用
+    assert llm.critique_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_failure_envelope_with_hitl_suspends_for_approval() -> None:
+    """审批开着时，同一封失败信封应该挂起等人工，而不是以错误收口。"""
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(lambda task: TWO_SUBTASKS),
+        experts={"coder": ScriptedExpert(reply="自动处理失败，已转人工处理")},
+        settings_obj=_cfg(hitl_enabled=True, default_role="operator"),
+    )
+    result = await orch.run(task="审查这段代码", trace_id="t-envelope-hitl")
+    assert result.status == "pending_review"
+    assert result.need_human_review is True
+    assert result.error_code == ""
+
+
+@pytest.mark.asyncio
+async def test_genuine_answer_still_reaches_critic() -> None:
+    """反向钉住：正常答案不能被这条规则误杀，照样要过评审。"""
+    llm = StubLLM(lambda task: TWO_SUBTASKS)
+    orch = CollabOrchestrator(
+        collaboration_llm=llm,
+        experts=_experts(),
+        settings_obj=_cfg(),
+    )
+    result = await orch.run(task="写代码然后总结", trace_id="t-genuine")
+    assert result.status == "ok"
+    assert llm.critique_calls == 1
+    assert result.error_code == ""
+
+
+@pytest.mark.asyncio
+async def test_two_subtasks_failing_together_does_not_break_the_graph() -> None:
+    """多个子任务同时失败不能把图炸掉。
+
+    ``execute_expert`` 是 Send 扇出的并发节点，两个 worker 在同一 superstep
+    返回。``status`` / ``retry_reason`` / ``raw_output`` 都是 LastValue 通道，
+    并发写会直接 InvalidUpdateError。第结果一版就是这么崩的，所以这条盯住：
+    记账只能走带 reducer 的字段，升级必须留给单个节点决定。
+    """
+    from app.agents.retry import AgentExecutionFailed
+
+    class AlwaysFails:
+        async def execute(self, envelope):
+            raise AgentExecutionFailed(attempts=1, last_error="boom")
+
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(lambda task: TWO_SUBTASKS),
+        experts={"coder": AlwaysFails(), "review": AlwaysFails()},
+        settings_obj=_cfg(hitl_enabled=False),
+    )
+    result = await orch.run(task="一起做两件事", trace_id="t-two-fail")
+    assert result.status == "error"
+    assert result.error_code == "agent_failed"
+    assert result.need_human_review is True
+
+
+@pytest.mark.asyncio
+async def test_two_envelope_subtasks_together_does_not_break_the_graph() -> None:
+    """两个子任务同时返回失败信封，同样不能炸图（同一类并发写）。"""
+    reply = "PR 审查需要配置 GITHUB_TOKEN；请设置后重试。"
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(lambda task: TWO_SUBTASKS),
+        experts={"coder": ScriptedExpert(reply=reply), "review": ScriptedExpert(reply=reply)},
+        settings_obj=_cfg(hitl_enabled=False),
+    )
+    result = await orch.run(task="一起做两件事", trace_id="t-two-envelope")
+    assert result.status == "error"
+    assert result.error_code == "agent_failed"
