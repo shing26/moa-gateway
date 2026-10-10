@@ -158,6 +158,38 @@ class Settings:
         self.vector_db_strict: bool = _parse_bool(os.getenv("VECTOR_DB_STRICT"), False)
         self.vector_db_auto_migrate: bool = _parse_bool(os.getenv("VECTOR_DB_AUTO_MIGRATE"), True)
 
+        # ── Rerank 与检索质量评测（ADR-016/020）──────────────────────────
+        # 默认关闭：未配置端点时保留 RRF 排序，不改变既有行为。
+        self.rerank_enabled: bool = _parse_bool(os.getenv("RERANK_ENABLED"), False)
+        self.rerank_base_url: str = (
+            os.getenv("RERANK_BASE_URL", "")
+            or os.getenv("RERANK_OPENAI_BASE_URL", "")
+        )
+        self.rerank_model: str = os.getenv("RERANK_MODEL", "")
+        self.rerank_api_key: str = (
+            os.getenv("RERANK_API_KEY", "")
+            or os.getenv("RERANK_OPENAI_API_KEY", "")
+            or os.getenv("OPENAI_API_KEY", "")
+        )
+        self.rerank_top_k: int = _parse_int(
+            os.getenv("RERANK_TOP_K"), 5, name="RERANK_TOP_K"
+        )
+        self.rerank_timeout_s: float = _parse_float(
+            os.getenv("RERANK_TIMEOUT_S"), 10.0, name="RERANK_TIMEOUT_S"
+        )
+
+        # ── 多 Agent 协作（ADR-022 / R6）──────────────────────────────────
+        # 默认关闭：协作是新增路径，不进入请求主路径，关闭时行为零变化。
+        self.collab_enabled: bool = _parse_bool(os.getenv("COLLAB_ENABLED"), False)
+        self.collab_llm: str = (os.getenv("COLLAB_LLM", "mock") or "mock").strip().lower()
+        # 反思回边与子任务数的双重上限：达到上限仍不通过时转人工。
+        self.collab_max_rounds: int = _parse_int(
+            os.getenv("COLLAB_MAX_ROUNDS"), 2, name="COLLAB_MAX_ROUNDS"
+        )
+        self.collab_max_subtasks: int = _parse_int(
+            os.getenv("COLLAB_MAX_SUBTASKS"), 4, name="COLLAB_MAX_SUBTASKS"
+        )
+
         # ── Embedding ─────────────────────────────────────────────────────
         # 未配置则整条语义检索关闭，走 BD-01 关键词回退。仅在配置了
         # VECTOR_DB_DSN 时才会真正发起调用，因此不会影响现有的内存存储路径。
@@ -327,6 +359,17 @@ class Settings:
             raise ValueError(
                 f"CODE_REVIEW_MERGE_POLL_INTERVAL_S 必须为正整数，"
                 f"得到 {self.code_review_merge_poll_interval_s}"
+            )
+        if self.rerank_enabled and not self.rerank_base_url:
+            raise ValueError(
+                "RERANK_ENABLED=1 时必须配置 RERANK_BASE_URL；"
+                "未配置端点时无法安全地启用精排"
+            )
+        if self.collab_max_rounds < 0:
+            raise ValueError(f"COLLAB_MAX_ROUNDS 不能为负，得到 {self.collab_max_rounds}")
+        if self.collab_max_subtasks < 1:
+            raise ValueError(
+                f"COLLAB_MAX_SUBTASKS 必须为正整数，得到 {self.collab_max_subtasks}"
             )
 
     def to_redis_config(self) -> dict[str, Any]:
