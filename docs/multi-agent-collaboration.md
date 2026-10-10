@@ -33,6 +33,7 @@ flowchart TD
     critic -->|revise<br/>round+1 有界| dispatch
     critic -->|approve| summarize[summarize<br/>汇总专家输出]
     critic -->|子任务重试耗尽| hitl[prepare_hitl]
+    critic -->|专家返回失败信封| hitl
     summarize --> evaluate[evaluate<br/>RuleEvaluator]
     evaluate --> guard[guard<br/>三级合并]
     guard -->|allow| deliver[deliver]
@@ -60,8 +61,11 @@ flowchart TD
    `critique_unresolved=True`：照常交付，但文本前置「critic 未通过」标注，
    并把 `need_human_review` 置真——HITL 开着则直接转人工。
 * **HITL 拆成两个节点。** `interrupt()` 被中断的节点在 resume 时会从第一行重放，
-   所以"记下挂起原因"（`prepare_hitl`）和"等人"（`await_human`）必须分开，
-   否则每次 resume 都会重写一遍，`pending_review` 也永远落不进 checkpoint。
+  所以"记下挂起原因"（`prepare_hitl`）和"等人"（`await_human`）必须分开，
+  否则每次 resume 都会重写一遍，`pending_review` 也永远落不进 checkpoint。
+* **失败信封在评审前就被拦下。** 专家把"我干不了"当答案返回时（缺凭据、整条是
+  异常、我们自己的失败文案），`expert_failure_reason()` 认出来，Critic 不再
+  评审，直接升级人工。识别规则见下文「失败信封短路」。
 
 ## 与 ADR-008 对照适配器的区别
 
@@ -139,6 +143,9 @@ curl -X POST localhost:8000/api/v1/collab/approve -H 'X-Gateway-Token: $TOKEN' \
 uv run python scripts/run_collaboration.py                    # mock：零网络零 token
 uv run python scripts/run_collaboration.py --scripted-revise  # 演示一次打回→靶向重跑→放行
 uv run python scripts/run_collaboration.py --live "..."       # 真实 LLM，读 .env.local
+
+# 第四个模式演示失败信封短路：专家返回"需要配置 GITHUB_TOKEN"，Critic 不评审、直接升级
+uv run python scripts/run_collaboration.py --scripted-failure
 ```
 
 三条命令共用一套流式渲染：`run_streamed()` 用 `graph.astream(stream_mode="updates")`
@@ -178,6 +185,39 @@ approve，"Critic 打回"这条链路就永远看不见；它的评审台词是�
   revise，触顶后走 `need_human_review` 并通过 `【critic 未通过】` 标注交付——没有
   伪装成功。这条链路的形状是对的。
 * **但 Critic 也会放行非答案。** 另一轮里专家返回的是"PR 审查需要配置 GITHUB_TOKEN"，
+   Critic 判了 approve，于是这句失败应答以 `need_human_review=False` 交付。专家"我干
+  不了"与"我干完了"在协议上都是 `execute() -> str`，协作层区分不出来（同"已知边界"
+  最后一条：没有降级信号可读）。**这条已经修掉，见下节。**
+
+### 失败信封短路
+
+`SubAgent` 协议至今是 `execute() -> str`，类型上分不出"这活我干不了"和"我干完了"。
+此前只有**抛异常**的路径会被识别，把失败当答案返回的会流进 Critic 评审——上面那条
+就是实例。现在 `expert_failure_reason()` 在专家调用外层识别三类形状：
+
+| 形状 | 例子 |
+| --- | --- |
+| 我们自己的失败文案 | `自动处理失败，已转人工处理` / `决策失败: ...` |
+| 整条输出就是一条异常 | 首行是 `Traceback...` 或 `SomeError:` |
+| 缺凭据 + 叫你去配 | `需要配置 GITHUB_TOKEN`、`... is not set` |
+
+**规则刻意收得很窄**，因为误杀一条正常回答（提前送进人工、链路提前结束）的代价
+远高于漏认（Critic 多评审一次）。所以异常名只在**首行**才算——讨论代码的正常回答
+里提到 `ValueError` 是家常便饭；泛泛的"未配置"也不认，`RERANK_ENABLED 未配置时退回
+NoopReranker` 这样的正常回答里太常见。`tests/unit/test_collaboration.py` 对正反两类
+都有参数化钉子。
+
+命中的子任务走 `pending_review`（审批开）/ `error` + `agent_failed`（审批关），
+不新增 `status` 值：那两个已在 `_ESCALATED_STATUSES` 里，Critic 与审批腿都依它们
+短路，而 `status` 是对外契约，给同一件事发第二张身份证只会让消费方多判一种情况。
+
+**并发写是这个改动的暗坑。** `execute_expert` 是 `Send` 扇出的并发节点，两个 worker
+在同一 superstep 返回，而 `status` / `retry_reason` / `raw_output` 都是 LastValue
+通道，并发写直接 `InvalidUpdateError`。所以 worker 只记带 reducer 的
+`failure_reasons` / `failure_envelopes`，把"要不要升级、升成什么"留给单个节点
+`_node_critic` 决定；`raw_output` 由 `prepare_hitl` 补（只在空的时候写，否则会把
+"待审批的正常输出"改成失败文案）。第一版就是在这儿崩的，
+`test_two_subtasks_failing_together_does_not_break_the_graph` 盯住它。
   Critic 判了 approve，于是这句失败应答以 `need_human_review=False` 交付。专家"我干
   不了"与"我干完了"在协议上都是 `execute() -> str`，协作层区分不出来（同"已知边界"
   最后一条：没有降级信号可读）。
