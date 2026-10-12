@@ -295,6 +295,13 @@ def build_parser() -> argparse.ArgumentParser:
     demo = sub.add_parser("demo", help="golden path 演示命令")
     demo_sub = demo.add_subparsers(dest="command", required=True)
 
+    collab = sub.add_parser(
+        "collab", help="跑一次多 Agent 协作链路（ADR-022 / R6）"
+    )
+    collab.add_argument("task", nargs="?", default="写一个 Python 函数，然后审查这段代码，并且总结一下要点")
+    collab.add_argument("--live", action="store_true", help="用已配置的 LLM 做规划与评审（会花钱）")
+    collab.set_defaults(func=cmd_collab)
+
     def gateway_args(p: argparse.ArgumentParser) -> None:
         from app.config import settings
 
@@ -332,6 +339,47 @@ def build_parser() -> argparse.ArgumentParser:
     approve.set_defaults(func=cmd_demo_approve)
 
     return parser
+
+
+def cmd_collab(args: argparse.Namespace) -> int:
+    """跑一次协作并打印摘要。完整执行轨迹看 ``scripts/run_collaboration.py``。
+
+    两个入口分工：CLI 给"顺手看一眼"的人，脚本给想读 ``node_path`` 与每轮裁决的
+    人。默认都是 mock（零网络零 token），``--live`` 才动真模型。
+    """
+    # Windows 控制台默认不是 UTF-8，中文产出会变乱码；只在本次命令里收口。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    from app.orchestration.collaboration import (
+        CollabOrchestrator,
+        MockCollaborationLLM,
+        ScriptedExpert,
+    )
+
+    if args.live:
+        orchestrator = CollabOrchestrator.from_deps()
+    else:
+        orchestrator = CollabOrchestrator(
+            collaboration_llm=MockCollaborationLLM(),
+            experts={key: ScriptedExpert() for key in ("coder", "general", "review")},
+        )
+
+    async def run():
+        return await orchestrator.run(task=args.task, session_id="collab-cli")
+
+    result = asyncio.run(run())
+    print(f"trace_id : {result.trace_id}")
+    print(f"status   : {result.status}  need_human_review={result.need_human_review}")
+    print(f"rounds   : {result.rounds}  guard_action={result.guard_action or '-'}")
+    print(f"plan     : {[(i.index, i.agent) for i in result.plan]}")
+    for verdict in result.critique_history:
+        print(f"critic   : {verdict.decision} targets={list(verdict.targets)} {list(verdict.reasons)}")
+    print(f"node_path: {' -> '.join(result.node_path)}")
+    print("text     :")
+    print(result.final_text or "(empty)")
+    if result.need_human_review:
+        print("（未通过人工确认，请勿当作成功交付）")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

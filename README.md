@@ -254,6 +254,20 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 **默认运行时仍是 FSM，不替换。** 适配器的价值是"用代码回答标准框架在同约束下能否等价实现"，而不是把控制流
 交给框架：FSM 才是这个项目可控性与审计叙事的基础，替换它等于把既有测试、ADR 与守卫/HITL 闭环一起推倒重来。
 
+### 那么 LangGraph 到底用在了哪里
+
+用在**新增能力**上，不在主路径上。`app/orchestration/collaboration.py`（ADR-022）是一张真实的
+`StateGraph`：Supervisor 规划 → 按子任务 `Send` fan-out 给专家并发执行 → Critic 反思 → 有界 revise 回边
+→ 汇总 → 同一套 guard/HITL/审计。用的是 `StateGraph`、条件回边、`InMemorySaver` checkpointer 与
+`interrupt()/Command(resume=...)` 承接审批，不是包一层的伪用法。
+
+它与上面那个适配器是**两件事**：适配器证明"同一条路径换成图运行时仍然等价"，协作图提供 FSM 管道**没有的**
+多 Agent 分工与反思能力。两者共用同一批治理原语（`execute_with_retry` / `RuleEvaluator` / `_merge_guard` /
+审计 WAL），所以"多 Agent"不会变成守卫的旁门——这是它与"套个框架就算多 Agent"的区别。
+
+入口是显式的（`POST /api/v1/collab` + CLI + `scripts/run_collaboration.py`），默认关闭
+（`COLLAB_ENABLED=false`），**不进入意图路由**。详见 [docs/multi-agent-collaboration.md](docs/multi-agent-collaboration.md)。
+
 ### 双引擎开关
 
 `ENGINE=langgraph` 时消息路径交给图，四类路径仍回落 FSM：`/` 开头的命令、`RESET`/`CANCEL`、敏感消息挂起、
@@ -275,6 +289,8 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
 > - 任务状态机覆盖完整请求生命周期（`INIT→ROUTED→EXECUTING→OUTPUT_READY→COMPLETED`，失败走 `RETRY→SUSPENDED`）；执行期失败带归因重试一次、再失败自动升级人工审批。重试预算由状态机结构决定并有漂移守卫，双引擎事件序列逐字段等价（golden 含失败升级场景）。
 > - 策略守卫 + RBAC + 飞书 HITL 审批闭环，红队 200 条对抗用例召回率/精确率 100%。
 > - 自建 Eval 体系（150 条数据集 + LLM-as-judge），每次改动离线回归出 JSON 报告。
+> - 多 Agent 协作链路（LangGraph `StateGraph`，默认关闭、不进主路径）：Supervisor 拆任务 → `Send` fan-out 给专家并发执行 → Critic 反思 → 有界回边 → 汇总后过同一条 guard/HITL/审计；反思轮次耗尽时显式标注"critic 未通过"而不是伪装成功。
+> - 检索质量度量：固定语料 + 23 条人工抽检 gold set，离线算 Hit@k/MRR/nDCG/Recall；精排 off/on 前后对比脚本可复现（当前 delta 六项无一为正，如实记录，不调参凑数字）。
 > - 后端工程：鉴权中间件、Redis 会话存储（对话记忆 / HITL 审批状态 / 健康探活）、审计 WAL（用 ContextVar 把 trace 贯通 16 个调用点）、Docker + CI；OTel 为**预留接口**（未接 exporter，见"已知边界"——别写成"OTel 链路"）。
 > - 支持 FSM / LangGraph 双引擎可切换（`ENGINE`），3 个 golden 场景逐字段等价验证进 CI。
 > - 统一错误契约（`ErrorCode` 枚举贯穿双引擎与路由层）+ per-session 预算拦截（`BUDGET_SESSION_LIMIT_USD`），配置层非法值启动即 fail-fast。
@@ -402,5 +418,17 @@ GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Dock
   （`app/services/audit_stats.py` 甚至一直在读从未落盘的 `violation` / `hitl_duration_ms`）。
   `tests/unit/test_audit_field_coverage.py` 现在守住"每个字段都落盘"，并自测该守卫会红。
   两个 sink 的**唯一**表示差异：WAL 日志行不落 `agent_output` 全文（只留 `agent_output_len`）
-  以控制体积，ES 保留全文以便检索。
+ 以控制体积，ES 保留全文以便检索。
+- **多 Agent 协作链路的边界**（ADR-022）：① **不进意图路由**——它是显式入口
+  （`POST /api/v1/collab` + CLI），不是请求主路径的一站，接路由要改 `INTENT_AGENT_MAP`
+  与 `_AGENT_KEYS` 自检，属独立议题；② **不驱动会话 FSM**——协作挂起活在 LangGraph
+  checkpoint 里，由 `resume()` 放行，飞书卡片回调**不**服务协作（它驱动 FSM，对协作会话
+  只会得到"已失效"）；③ `depends_on` **只记录不调度**——当前图把所有 pending 子任务
+  一次性 fan-out，不按拓扑排序；④ checkpointer 是进程内 `InMemorySaver`，可注入但未接
+  Redis/Postgres；⑤ `COLLAB_LLM=litellm` 走已配置的 LLM，解析失败会降级到规则式 mock
+  （ADR-018 姿势：协作抽风不该让链路崩）。
+- **检索精排默认关闭**（`RERANK_ENABLED=false`）：固定语料只有 12 个 chunk、gold set 只有
+  23 条，度量能跑通但不足以支撑"更准"的宣称；实测 base vs `DeterministicLexicalReranker`
+  六项 delta 无一为正，详见 [docs/retrieval-evaluation.md](docs/retrieval-evaluation.md)。
+  CI 只门禁"检索维度真的跑过"，**不设质量阈值**（一行标注就是 4.3 个百分点），加入条件写在同一文档里。
 - 所有密钥通过环境变量注入，`.env`、`logs/`、`data/`、`evals/reports/` 不入库。

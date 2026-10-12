@@ -14,6 +14,7 @@ from app.prompt_registry import PromptEntry, PromptRegistry
 from app.router.intent_router import IntentRouter
 from app.router.llm_classifier import LLMIntentClassifier
 from app.vectordb import build_vector_client
+from app.vectordb.rerank import build_reranker
 from app.vectordb.retriever import ContextRetriever
 from app.audit.es_writer import EsWriter, build_es_writer
 from app.budget.guard import BudgetGuard
@@ -39,7 +40,8 @@ _flag_client = FeatureFlagClient()
 _prompt_registry = PromptRegistry()
 # 后端由 VECTOR_DB_DSN 决定：为空即内存存储（现状），配置后由 PostgreSQL 接管。
 vector_client = build_vector_client()
-_retriever = ContextRetriever(vector_client)
+# 精排器按配置选择；未启用时是 NoopReranker（恒等），行为零变化。
+_retriever = ContextRetriever(vector_client, reranker=build_reranker(settings))
 # 长期记忆与知识库共用同一个向量后端；无 DSN 时退化为进程内存存储。
 long_term_memory = LongTermMemory(vector_client)
 

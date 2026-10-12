@@ -13,7 +13,63 @@ from app.config import settings
 logger = logging.getLogger("moa.agents")
 
 
+class MockExpertLLM:
+    """离线确定性 mock LLM，给专家池在 ``AGENT_LLM=mock`` 时使用。
+
+    与 ``MockTaskLLM`` 不同：这个实现 ``LLMClient`` 协议
+    （``chat`` / ``chat_with_tools``），返回基于输入的确定性文本，
+    不发起网络调用。``last_metrics`` 恒为空字典——mock 不花钱，
+    但 ``_execute_with_runtime_or_injected`` 的 ``capture_metrics``
+    会读它，属性必须存在。
+
+    为什么需要这个类：``CoderAgent`` / ``GeneralAgent`` / ``ReviewAgent``
+    的 ``__init__`` 默认 ``llm=None``，此前 ``_default_llm()`` 无条件
+    创建真实 ``LLMClient``，完全不看 ``settings.agent_llm``。结果是
+    ``AGENT_LLM=mock``（默认）下专家仍发起真实调用，``LLM_API_KEY``
+    为空时调用失败、被 ``expert_failure_reason()`` 认出后升级人工——
+    与 ``AGENT_LLM=mock`` 的语义承诺矛盾。
+    """
+
+    def __init__(self) -> None:
+        self.last_metrics: dict[str, Any] = {}
+
+    async def __aenter__(self) -> "MockExpertLLM":
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+    async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> str:
+        last_user = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                last_user = str(msg.get("content", ""))
+                break
+        system = str(messages[0].get("content", "")) if messages else ""
+        if "编程" in system or "代码" in system:
+            return f"已完成编码任务：{last_user[:200]}"
+        if "审查" in system or "review" in system.lower():
+            return f"已完成审查任务：{last_user[:200]}"
+        return f"已完成：{last_user[:200]}"
+
+    async def chat_with_tools(
+        self, messages: list[dict], tools: list[dict], **kwargs: Any
+    ) -> Any:
+        from app.agents.provider import ChatResult
+
+        content = await self.chat(messages)
+        return ChatResult(
+            messages=messages + [{"role": "assistant", "content": content}],
+            content=content,
+            tool_calls=[],
+        )
+
+
 def _default_llm() -> LLMClient:
+    # 专家池也要遵守 AGENT_LLM 的语义承诺：mock 时不建真实客户端。
+    # 此前这里无条件创建 LLMClient，导致默认配置下协作链路必然失败。
+    if settings.agent_llm == "mock":
+        return MockExpertLLM()  # type: ignore[return-value]
     return LLMClient(LLMConfig.from_env("LLM"))
 
 

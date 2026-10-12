@@ -238,6 +238,144 @@ async def run_guard_eval(cases: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+# ── 检索质量评测（ADR-020 验收 3）─────────────────────────────────────────
+
+_RETRIEVAL_CORPUS_DIR = ROOT / "evals" / "datasets" / "retrieval_corpus"
+
+
+def load_corpus_chunks() -> list[tuple[str, int, str]]:
+    """把固定语料切成 (doc_id, chunk_index, text)。
+
+    分块器与知识库写入用的是同一个 ``chunk_text``，因此 gold set 的 chunk id
+    （``{doc_id}:chunk:{i}``）与检索时实际写入的 id 一致——这是"gold set 能
+    被检索到"的前提，不是巧合。
+    """
+    from app.knowledge import CHUNK_OVERLAP, CHUNK_SIZE, chunk_text
+
+    if not _RETRIEVAL_CORPUS_DIR.exists():
+        return []
+    out: list[tuple[str, int, str]] = []
+    for path in sorted(_RETRIEVAL_CORPUS_DIR.glob("*.md")):
+        doc_id = path.stem
+        text = path.read_text(encoding="utf-8")
+        for i, piece in enumerate(chunk_text(text, CHUNK_SIZE, CHUNK_OVERLAP)):
+            out.append((doc_id, i, piece))
+    return out
+
+
+def _dcg(graded: dict[str, int], ranked_ids: list[str], k: int) -> float:
+    """Discounted cumulative gain@k，按 gold set 的相关度分级。"""
+    import math
+
+    total = 0.0
+    for rank, doc_id in enumerate(ranked_ids[:k], start=1):
+        rel = graded.get(doc_id, 0)
+        if rel:
+            total += (2 ** rel - 1) / math.log2(rank + 1)
+    return total
+
+
+async def run_retrieval_eval(
+    cases: list[dict[str, Any]],
+    *,
+    retrieve_fn: Any,
+    top_k: int = 5,
+) -> dict[str, Any]:
+    """检索质量：Hit@k / Recall@k / MRR / nDCG@k。
+
+    ``retrieve_fn(query, top_k) -> list[str]`` 返回 chunk id 列表（已排序）。
+    调用方决定它背后是纯 store、还是 store + reranker——本函数只负责度量，
+    因此 base 与 rerank 两条路径可以共用同一把尺子做前后对比。
+
+    **不判分、不宣称更准**：这里只出数字。"rerank 是否有用"由调用方在 gold set
+    上跑两条路径后自己读 delta，本函数不替它下结论（ADR-015 口径）。
+    """
+    if not cases:
+        return _retrieval_skipped("gold set 为空")
+
+    hit = {1: 0, 3: 0, 5: 0}
+    recall_sum = 0.0
+    mrr_sum = 0.0
+    ndcg_sum = 0.0
+    per_case: list[dict[str, Any]] = []
+    evaluated = 0
+    for case in cases:
+        query = str(case.get("query", ""))
+        relevant = set(case.get("relevant_chunk_ids", []) or [])
+        graded = case.get("graded") or {}
+        if not relevant:
+            # 没有相关 chunk 的行无法评分。分母必须用**实际评过的行数**：
+            # 用 len(cases) 的话，一条坏行会把所有指标静默稀释成 (n-1)/n，
+            # 而报告里看不出少评了一条。
+            continue
+        evaluated += 1
+        ranked = list(await retrieve_fn(query, top_k))
+        topk = ranked[:top_k]
+        for k in hit:
+            if relevant & set(topk[:k]):
+                hit[k] += 1
+        recall_sum += len(relevant & set(topk)) / len(relevant)
+        first_rank = next(
+            (i for i, doc_id in enumerate(topk, start=1) if doc_id in relevant),
+            0,
+        )
+        if first_rank:
+            mrr_sum += 1.0 / first_rank
+        ideal = [doc_id for doc_id, _ in sorted(graded.items(), key=lambda kv: -kv[1])]
+        idcg = _dcg(graded, ideal, top_k)
+        ndcg_sum += (_dcg(graded, topk, top_k) / idcg) if idcg else 0.0
+        per_case.append(
+            {
+                "id": case.get("id", ""),
+                "query": query[:60],
+                "first_relevant_rank": first_rank or None,
+                "retrieved": topk[:5],
+            }
+        )
+    total = len(cases)
+    skipped = total - evaluated
+    return {
+        "total": total,
+        "evaluated": evaluated,
+        "hit_at_1": _ratio(hit[1], evaluated),
+        "hit_at_3": _ratio(hit[3], evaluated),
+        "hit_at_5": _ratio(hit[5], evaluated),
+        "recall_at_5": round(recall_sum / evaluated, 4) if evaluated else 0.0,
+        "mrr": round(mrr_sum / evaluated, 4) if evaluated else 0.0,
+        "ndcg_at_5": round(ndcg_sum / evaluated, 4) if evaluated else 0.0,
+        "per_case": per_case,
+        # 有行被跳过必须说出来，否则"少评了一条"在报告里不可见
+        "note": (
+            f"{skipped} 行缺少 relevant_chunk_ids，未参与评分" if skipped else ""
+        ),
+    }
+
+
+def _retrieval_skipped(reason: str) -> dict[str, Any]:
+    return {
+        "total": 0,
+        "evaluated": 0,
+        "hit_at_1": 0.0,
+        "hit_at_3": 0.0,
+        "hit_at_5": 0.0,
+        "recall_at_5": 0.0,
+        "mrr": 0.0,
+        "ndcg_at_5": 0.0,
+        "per_case": [],
+        "note": reason,
+    }
+
+
+def _build_store_retrieve_fn(store: Any) -> Any:
+    """retrieve_fn：包装任意 ``VectorStore.search``，零网络（离线用内存后端）。"""
+
+    async def _retrieve(query: str, top_k: int) -> list[str]:
+        result = await store.search(query, top_k=top_k)
+        return [doc.id for doc in result.documents]
+
+    return _retrieve
+
+
 # 显式"离线不判分"的哨兵。用哨兵而不是 `judge=None`，是因为 None 已经被
 # `judge or default_judge` 用作"用默认 judge"的意思，两者必须分得开。
 _SKIP_JUDGE = object()
@@ -487,13 +625,24 @@ def build_summary(report: dict[str, Any]) -> str:
     # 离线路径不判分。同样必须写在脸上，否则 avg_judge_score 的 0.0 会被读成"答案差"。
     if e2e.get("judge_skipped"):
         e2e_part += f" judge未跑={e2e['judge_skipped']}"
+    retrieval = report.get("retrieval", {})
+    if retrieval.get("total"):
+        retrieval_part = (
+            f"retrieval Hit@1={retrieval.get('hit_at_1')} "
+            f"Hit@3={retrieval.get('hit_at_3')} Hit@5={retrieval.get('hit_at_5')} "
+            f"Recall@5={retrieval.get('recall_at_5')} MRR={retrieval.get('mrr')} "
+            f"nDCG@5={retrieval.get('ndcg_at_5')} ({retrieval.get('total')} 条)"
+        )
+    else:
+        retrieval_part = f"retrieval {retrieval.get('note', 'skipped')}"
     return (
         f"intent accuracy={intent['accuracy']} ({intent['correct']}/{intent['total']}), "
         f"{consistency_part}, "
         f"guard deny recall={guard['deny_recall']} precision={guard['deny_precision']}, "
         f"tool_select acc={tool.get('accuracy')} ({tool.get('correct')}/{tool.get('total')}), "
         f"{e2e_part}, "
-        f"{hitl_part}"
+        f"{hitl_part}, "
+        f"{retrieval_part}"
     )
 
 
@@ -615,6 +764,37 @@ async def run_all(
         if offline
         else await run_e2e_eval(e2e_cases, pipeline=resolve_engine(engine))
     )
+    # 检索质量（ADR-020 验收 3）：离线用内存后端的真实词法检索，活体用真 pgvector。
+    # gold set 不存在时如实标 skipped，而不是编 0。
+    gold_path = datasets_dir / "retrieval_gold.jsonl"
+    if not gold_path.exists():
+        retrieval = _retrieval_skipped("retrieval_gold.jsonl 不存在")
+    elif offline:
+        from app.vectordb import VectorDBClient, VectorDocument
+
+        store = VectorDBClient()
+        for doc_id, idx, text in load_corpus_chunks():
+            await store.upsert(
+                VectorDocument(
+                    id=f"{doc_id}:chunk:{idx}",
+                    content=text,
+                    metadata={"source": "knowledge", "doc_id": doc_id, "chunk": idx},
+                )
+            )
+        retrieval = await run_retrieval_eval(
+            load_dataset(gold_path), retrieve_fn=_build_store_retrieve_fn(store)
+        )
+    else:
+        from app.deps import vector_client
+
+        await vector_client.start()
+        try:
+            retrieval = await run_retrieval_eval(
+                load_dataset(gold_path),
+                retrieve_fn=_build_store_retrieve_fn(vector_client),
+            )
+        finally:
+            await vector_client.close()
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "git_sha": git_sha(),
@@ -626,6 +806,7 @@ async def run_all(
         "hitl_feedback": hitl_feedback,
         "agent_metrics": build_agent_metrics(e2e, tool_selection, hitl_feedback),
         "e2e": e2e,
+        "retrieval": retrieval,
         "summary": "",
     }
     report["summary"] = build_summary(report)
@@ -672,6 +853,16 @@ def main(argv: list[str] | None = None) -> int:
         failures.append(
             f"tool selection accuracy {report['tool_selection']['accuracy']} < 1.0 "
             f"(misses: {report['tool_selection']['misses']})"
+        )
+    # 检索维度必须**真的跑过**，不是"有代码但被 skip"。gold set 与固定语料都随仓库
+    # 提交，所以 skip 只有一种解释：有人删了文件或改了名字。这半条门禁不设质量阈值——
+    # 23 条 gold set 上一行好坏就是 4.3 个百分点，拿单次实测当阈值只会让 CI 在合法
+    # 增删标注时误红。质量下限的加入条件记在 docs/retrieval-evaluation.md。
+    retrieval = report.get("retrieval", {})
+    if not retrieval.get("total"):
+        failures.append(
+            "retrieval 维度未运行（gold set 或固定语料缺失）："
+            f"{retrieval.get('note', 'unknown')}"
         )
     if failures:
         for failure in failures:
