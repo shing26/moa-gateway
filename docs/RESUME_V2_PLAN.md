@@ -270,4 +270,4 @@ evals/
 > - 策略守卫 + RBAC + 飞书 HITL 审批闭环，redteam 对抗 200 条拦截率 100%
 > - 自建 Eval 体系（150 条数据集 + LLM-as-judge），每次改动回归出报告
 > - 后端工程：鉴权中间件、Redis 状态栈/Lua 锁、审计 WAL、OTel 链路、Docker + CI
-> - 垂直应用：GitHub PR 多 Agent 代码审查（Triage→静态→语义RAG→测试→报告）
+> - 垂直应用：GitHub PR 多阶段审查流水线（Triage→静态→语义RAG→测试→报告）

@@ -16,6 +16,7 @@ from apps.code_review_pipeline.merge_state import (
     is_terminal,
     next_state,
     should_notify_approval,
+    should_notify_ci_failure,
 )
 
 
@@ -85,10 +86,56 @@ class TestNotifySemantics:
         assert should_notify_approval(MergeState.MERGED, MergeAction.CI_GREEN) is False
 
 
+class TestNotifyCiFailure:
+    """ADR-021 验收 2：CI 红要推失败 job 名与链接。"""
+
+    def test_first_red_notifies_failure(self) -> None:
+        assert should_notify_ci_failure(MergeState.WATCHING, MergeAction.CI_RED) is True
+
+    def test_card_invalidation_notifies_failure(self) -> None:
+        """卡片发出后 CI 变红：那张卡片作废，人必须被告知。"""
+        assert (
+            should_notify_ci_failure(MergeState.AWAITING_APPROVAL, MergeAction.CI_RED)
+            is True
+        )
+
+    def test_repeated_red_does_not_notify_failure(self) -> None:
+        """CI 一直红时每轮都推一条会把人的消息流淹没。"""
+        assert should_notify_ci_failure(MergeState.CI_FAILED, MergeAction.CI_RED) is False
+
+    def test_green_does_not_notify_failure(self) -> None:
+        assert should_notify_ci_failure(MergeState.WATCHING, MergeAction.CI_GREEN) is False
+
+
+class TestSupersede:
+    """同一个 PR 推新 commit：旧 sha 的记录收尾，不再为它弹卡片。"""
+
+    @pytest.mark.parametrize(
+        "state",
+        [MergeState.WATCHING, MergeState.CI_FAILED, MergeState.AWAITING_APPROVAL],
+    )
+    def test_open_states_can_be_superseded(self, state: MergeState) -> None:
+        assert can(state, MergeAction.SUPERSEDE) is True
+        assert next_state(state, MergeAction.SUPERSEDE) is MergeState.SUPERSEDED
+
+    def test_merging_cannot_be_superseded(self) -> None:
+        """合并请求已经交给 GitHub 了，此刻取代它会制造两条互相矛盾的真相。"""
+        assert can(MergeState.MERGING, MergeAction.SUPERSEDE) is False
+
+    def test_supersede_notifies_nothing(self) -> None:
+        assert should_notify_approval(MergeState.WATCHING, MergeAction.SUPERSEDE) is False
+        assert should_notify_ci_failure(MergeState.WATCHING, MergeAction.SUPERSEDE) is False
+
+
 class TestTerminalsAreFinal:
     @pytest.mark.parametrize(
         "terminal",
-        [MergeState.MERGED, MergeState.REJECTED, MergeState.FAILED],
+        [
+            MergeState.MERGED,
+            MergeState.REJECTED,
+            MergeState.FAILED,
+            MergeState.SUPERSEDED,
+        ],
     )
     @pytest.mark.parametrize("action", list(MergeAction))
     def test_no_action_is_allowed(self, terminal: MergeState, action: MergeAction) -> None:

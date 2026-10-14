@@ -77,7 +77,7 @@
 | 章节 | 内容摘要 |
 | --- | --- |
 | D1, §2.1 `app/`（网关核心） | 通用编排、路由、守卫、渠道、可观测、审计。含 `main.py`（入口+lifespan）、`pipeline.py`（主流程编排）、`engine.py`（FSM+HITL 存储）、`router/`（三级意图路由）、`agents/`（Agent 协议/注册表/Coder·General·Review 三实现/provider）、`channels/`（飞书）、`guard/`（策略守卫：policies/rbac/redteam/permission_guard）、`fsm/`、`vectordb/`、`knowledge.py`、`memory.py`、`obsidian_sync.py`、`routes/`（feishu/webhook/health/dashboard/knowledge）、`redis_state/`、`limit_providers/`、`feature_flags/`、`prompt_registry/`、`audit/`、`evaluator/`、`observability/`、`middleware/`、`config.py`、`deps.py`（核心装配中心） |
-| D1, §2.2 `apps/`（垂直业务） | 当前仅 `code_review_pipeline/`：GitHub PR 多 Agent 审查流水线（triage/static/semantic/test/report 五 Agent + RAG + GitHub 路由 + 通知 + 存储） |
+| D1, §2.2 `apps/`（垂直业务） | 当前仅 `code_review_pipeline/`：GitHub PR 多阶段审查流水线（triage/static/semantic/test/report 五阶段串行 `await`，非 agent 间协同 + RAG + GitHub 路由 + 通知 + 存储） |
 | D1, §2.3 `scripts/` | 27 个脚本，其中 9 个用字符串 `.replace()` 直接改写源码（`gen_main.py`、`patch_main.py`、`fix_main_all.py`、`fix_hitl.py`、`fix_name.py` 等） |
 | D1, §2.4 `evals/` | 离线评估（intent/guard/e2e 数据集 + LLM-as-judge） |
 | D1, §2.5 `tests/unit/` | 70+ 单测（报告指大量用 monkeypatch 掩盖真实接线缺陷） |

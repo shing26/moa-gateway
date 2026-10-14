@@ -37,6 +37,10 @@ class MergeState(str, Enum):
     # 合并失败（冲突 / 被保护分支拒绝 / 权限不足）。**终态**：原因已经如实告诉人，
     # 要不要重来由人决定，不由系统悄悄重试。
     FAILED = "failed"
+    # 同一个 PR 推了新 commit，这条记录盯的那个 sha 已经不是 head 了。**终态**：
+    # 没人会再去合这个版本，继续轮询只会为它弹一张点了必然失败的卡片。
+    # 与 REJECTED 分开：拒绝是"人明确说不要"，取代是"这个版本被新的顶掉了"。
+    SUPERSEDED = "superseded"
 
 
 class MergeAction(str, Enum):
@@ -46,18 +50,29 @@ class MergeAction(str, Enum):
     REJECT = "reject"
     COMPLETE = "complete"
     FAIL = "fail"
+    SUPERSEDE = "supersede"
 
 
 # 状态 -> 允许的动作集合。
 ALLOWED_ACTIONS: dict[MergeState, frozenset[MergeAction]] = {
     # 等 CI 期间只可能有两种结论；FAIL 是"读 CI 本身失败了"（网络、权限）。
     MergeState.WATCHING: frozenset(
-        {MergeAction.CI_GREEN, MergeAction.CI_RED, MergeAction.FAIL}
+        {
+            MergeAction.CI_GREEN,
+            MergeAction.CI_RED,
+            MergeAction.FAIL,
+            MergeAction.SUPERSEDE,
+        }
     ),
     # CI 红了之后仍然要能收到"绿了"——否则一次红就永久锁死这个 PR，
     # 而 CI 重跑（修一下再推）是最常见的路径。
     MergeState.CI_FAILED: frozenset(
-        {MergeAction.CI_GREEN, MergeAction.CI_RED, MergeAction.FAIL}
+        {
+            MergeAction.CI_GREEN,
+            MergeAction.CI_RED,
+            MergeAction.FAIL,
+            MergeAction.SUPERSEDE,
+        }
     ),
     # **CI_RED 必须在允许集合里**：卡片发出之后、人点之前，CI 可能被重跑或
     # 因为新 commit 变红。此时那张卡片描述的是一个已经不成立的结论——它必须
@@ -68,6 +83,7 @@ ALLOWED_ACTIONS: dict[MergeState, frozenset[MergeAction]] = {
             MergeAction.REJECT,
             MergeAction.CI_RED,
             MergeAction.FAIL,
+            MergeAction.SUPERSEDE,
         }
     ),
     # 合并中不允许再批准/拒绝：动作已经交出去了，此刻的状态由 GitHub 决定。
@@ -75,6 +91,7 @@ ALLOWED_ACTIONS: dict[MergeState, frozenset[MergeAction]] = {
     MergeState.MERGED: frozenset(),
     MergeState.REJECTED: frozenset(),
     MergeState.FAILED: frozenset(),
+    MergeState.SUPERSEDED: frozenset(),
 }
 
 
@@ -85,6 +102,7 @@ ACTION_TARGET: dict[MergeAction, MergeState] = {
     MergeAction.REJECT: MergeState.REJECTED,
     MergeAction.COMPLETE: MergeState.MERGED,
     MergeAction.FAIL: MergeState.FAILED,
+    MergeAction.SUPERSEDE: MergeState.SUPERSEDED,
 }
 
 
@@ -130,6 +148,24 @@ def should_notify_approval(state: MergeState, action: MergeAction) -> bool:
     由调用方发一条"已作废"的通知。
     """
     return can(state, action) and ACTION_TARGET[action] is MergeState.AWAITING_APPROVAL
+
+
+def should_notify_ci_failure(state: MergeState, action: MergeAction) -> bool:
+    """这一步之后该不该发"CI 红"的失败信息卡片（ADR-021 验收 2）。
+
+    只有"**进入** ``CI_FAILED``"才发：
+
+    * ``WATCHING`` → 红：第一次看到这个 commit 红，发。
+    * ``AWAITING_APPROVAL`` → 红：卡片发出后 CI 变红，那张卡片描述的是已经
+      不成立的结论，必须作废并告诉人，发。
+    * ``CI_FAILED`` → 红：同一个结论的重复轮询（每 60s 一次），**不发**——
+      否则 CI 一直红就变成每轮一条消息，人会被自己的监控淹没。
+    """
+    return (
+        can(state, action)
+        and ACTION_TARGET[action] is MergeState.CI_FAILED
+        and state is not MergeState.CI_FAILED
+    )
 
 
 def initial_transition(at: str) -> list[dict[str, str | None]]:

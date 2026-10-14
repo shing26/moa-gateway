@@ -17,13 +17,23 @@ _HITL_TITLES = {
     "failure_escalation": "Agent Gateway - 失败升级待处理",
     "notification": "Agent Gateway - 通知",
     "merge_approval": "Agent Gateway - PR 合并审批",
+    "merge_ci_failure": "Agent Gateway - CI 未通过",
 }
-_HITL_TEMPLATES = {"failure_escalation": "red", "notification": "blue"}
-_HITL_OUTPUT_LABELS = {"failure_escalation": "失败详情", "notification": "详情"}
+_HITL_TEMPLATES = {
+    "failure_escalation": "red",
+    "notification": "blue",
+    "merge_ci_failure": "red",
+}
+_HITL_OUTPUT_LABELS = {
+    "failure_escalation": "失败详情",
+    "notification": "详情",
+    "merge_ci_failure": "失败详情",
+}
 # 只有真的接了审批闭环的卡片才该有按钮。"notification" 用于**没有审批落地**的链路
 # （如 PR 审查报告）：那条路径从不 store_hitl，渲染审批按钮等于承诺一个点了必然
-# 失效的动作（2026-09-23 修正）。
-_NO_ACTION_KINDS = frozenset({"notification"})
+# 失效的动作（2026-09-23 修正）。"merge_ci_failure" 同理：CI 红时没有可批准的东西，
+# 人只能去看日志（2026-10-09 修正——此前失败卡片也渲染了批准/拒绝）。
+_NO_ACTION_KINDS = frozenset({"notification", "merge_ci_failure"})
 
 
 @dataclass

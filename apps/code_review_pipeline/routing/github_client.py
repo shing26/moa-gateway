@@ -110,9 +110,18 @@ def aggregate_ci_status(
         checks.append(CiCheck(name=name, conclusion=conclusion, url=url))
 
     # Commit Status 的整体 state 已被 GitHub 聚合过，直接当成一条 check 参与判定。
+    #
+    # 但**空 status 不是"进行中"**：对一个完全没有 status 的 commit，GitHub 返回
+    # ``{"state": "pending", "total_count": 0, "statuses": []}``——这个 pending 是
+    # 默认值，不代表任何真实工作。把它算成一条 pending check，会让"check-runs 全绿"
+    # 的 commit 永远判不成绿。实测（2026-10-09）真实 PR #1 卡在 ``ci_failed`` 正是
+    # 这个原因：``test=success``、``docker=skipped``，却因为这条假 pending 被判红。
+    #
+    # 只在 ``total_count`` **显式**为 0 时跳过：调用方没给这个字段时维持原语义
+    # （见 ``test_commit_status_pending``——那条用例传的是 ``{"state": "pending"}``）。
     if combined_status:
         state = str(combined_status.get("state") or "").lower()
-        if state:
+        if state and combined_status.get("total_count") != 0:
             checks.append(
                 CiCheck(
                     name="commit-status",

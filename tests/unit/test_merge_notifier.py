@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from app.channels.feishu_cards import ApprovalCard
@@ -41,6 +43,61 @@ class _FakeCardSender:
     async def send_card(self, card: ApprovalCard) -> bool:
         self.sent_cards.append(card)
         return True
+
+
+class _FailingCardSender:
+    async def send_card(self, card: ApprovalCard) -> bool:
+        return False
+
+
+class _FakeSessionStore:
+    """最小 SessionStore 替身，只记 store_hitl / remove_hitl。"""
+
+    def __init__(self) -> None:
+        self.stored: dict[str, Any] = {}
+        self.removed: list[str] = []
+
+    def store_hitl(self, session_id: str, request: Any) -> None:
+        self.stored[request.trace_id or session_id] = request
+
+    def remove_hitl(self, hitl_id: str) -> None:
+        self.removed.append(hitl_id)
+        self.stored.pop(hitl_id, None)
+
+
+@pytest.mark.asyncio
+async def test_approval_card_registers_hitl_pending_entry() -> None:
+    """发卡必须登记待批记录，否则点击只会得到"已失效"（2026-10-09 实测）。"""
+    record = _make_record()
+    sender = _FakeCardSender()
+    store = _FakeSessionStore()
+    notifier = MergeNotifier(
+        card_sender=sender, default_target="chat_123", session_store=store
+    )
+
+    ok = await notifier.send_approval_card(record)
+
+    assert ok
+    request = store.stored[record.task_key]
+    assert request.hitl_kind == "merge_approval"
+    assert request.trace_id == record.task_key
+    assert request.session_id == record.task_key
+
+
+@pytest.mark.asyncio
+async def test_failed_send_withdraws_pending_entry() -> None:
+    """卡片没发出去就不能留下待批记录，否则那条记录永远无人点击。"""
+    record = _make_record()
+    store = _FakeSessionStore()
+    notifier = MergeNotifier(
+        card_sender=_FailingCardSender(), default_target="chat_123", session_store=store
+    )
+
+    ok = await notifier.send_approval_card(record)
+
+    assert not ok
+    assert record.task_key in store.removed
+    assert store.stored == {}
 
 
 @pytest.mark.asyncio
@@ -107,6 +164,19 @@ async def test_ci_failure_card_contains_failing_job_names() -> None:
     assert "test" in full_text
     assert "https://github.com/owner/repo/runs/123" in full_text
     assert "lint" in full_text
+
+
+@pytest.mark.asyncio
+async def test_ci_failure_card_has_no_action_buttons() -> None:
+    """CI 红时没有可批准的东西：按钮点了必然无效，不该渲染。"""
+    record = _make_record(state=MergeState.CI_FAILED.value, ci_state="failure")
+    sender = _FakeCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    await notifier.send_ci_failure_card(record)
+
+    payload = sender.sent_cards[0].to_card_payload()
+    assert [el for el in payload["elements"] if el.get("tag") == "action"] == []
 
 
 @pytest.mark.asyncio

@@ -133,6 +133,26 @@ class MergeStore:
             key=lambda r: (r.repo, r.pr_number, r.head_sha),
         )
 
+    def supersede_older(
+        self, repo: str, pr_number: int, keep_sha: str, *, at: str
+    ) -> list[MergeRecord]:
+        """把同一 PR 上更早的、非终态的合并记录置为 ``SUPERSEDED``。
+
+        身份含 ``head_sha``（见 ``MergeRecord`` 的注释），所以"推了一个新 commit"
+        必然多出一条记录，而旧的那条会继续被轮询、继续弹卡片——点了必然失败
+        （GitHub 的 sha 乐观锁会拒绝）。新 sha 落库后立刻给旧的收尾。
+
+        返回被取代的记录，便于调用方记日志。
+        """
+        superseded: list[MergeRecord] = []
+        for identity, record in list(self._records.items()):
+            if record.repo != repo or record.pr_number != pr_number:
+                continue
+            if record.head_sha == keep_sha or record.is_terminal:
+                continue
+            superseded.append(self.transition(identity, MergeAction.SUPERSEDE, at=at))
+        return superseded
+
 
 class PostgresMergeStore:
     """Postgres 实现。生产走这条。
@@ -309,6 +329,30 @@ class PostgresMergeStore:
             )
             rows = cur.fetchall()
         return [self._row_to_record(r) for r in rows]
+
+    def supersede_older(
+        self, repo: str, pr_number: int, keep_sha: str, *, at: str
+    ) -> list[MergeRecord]:
+        """``MergeStore.supersede_older`` 的 Postgres 版，语义与返回值一致。
+
+        先查出旧 sha，再逐条走 ``transition``——**不写一条批量 UPDATE**：迁移历史
+        是整列替换，批量写会绕开乐观锁，两个 worker 同时收尾时会互相覆盖历史。
+        旧 sha 的条数等于"这个 PR 被推了几次"，量级很小，逐条走没有性能问题。
+        """
+        terminal = [s.value for s in MergeState if is_terminal(s)]
+        self._connect()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT head_sha FROM pr_merge_gate "
+                "WHERE repo = %s AND pr_number = %s AND head_sha <> %s "
+                "AND NOT (state = ANY(%s))",
+                (repo, int(pr_number), keep_sha, terminal),
+            )
+            shas = [str(row[0]) for row in cur.fetchall()]
+        return [
+            self.transition((repo, int(pr_number), sha), MergeAction.SUPERSEDE, at=at)
+            for sha in shas
+        ]
 
     async def close(self) -> None:
         if self._conn is not None:

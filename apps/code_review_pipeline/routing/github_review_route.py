@@ -14,6 +14,9 @@ from apps.code_review_pipeline.storage.review_store import ReviewStore, build_re
 from apps.code_review_pipeline.task_queue import TaskQueue
 from apps.code_review_pipeline.routing.github_signature import verify_signature
 from apps.code_review_pipeline.routing.github_provider import github_configured
+from apps.code_review_pipeline.merge_store import MergeRecord
+from apps.code_review_pipeline.merge_state import initial_transition
+from datetime import datetime, timezone
 
 github_review_router = APIRouter()
 logger = logging.getLogger("moa.code_review.route")
@@ -50,6 +53,36 @@ def _get_task_queue() -> TaskQueue:
             Redis.from_url(settings.redis_url, decode_responses=False)
         )
     return _task_queue
+
+
+def _ensure_merge_record(repo: str, pr_number: int, head_sha: str) -> None:
+    """确保合并通道里有这条 PR 的记录（ADR-021）。
+
+    **幂等**：记录已存在时只更新 updated_at，不覆盖状态（见 merge_store.save）。
+    这样 webhook 重投不会把一条已经推进到 awaiting_approval 的记录拽回 watching。
+
+    新 sha 落库后，把同一 PR 上更早的记录置为 ``superseded``：审批是按 sha 做的，
+    旧 sha 已经不可能再被合并（GitHub 的乐观锁会拒），留着它只会为它弹一张
+    **点了必然失败**的卡片——每推一次修复就多一张。
+    """
+    from app.deps import merge_store
+
+    now = datetime.now(timezone.utc).isoformat()
+    record = MergeRecord(
+        repo=repo,
+        pr_number=pr_number,
+        head_sha=head_sha,
+        transitions=initial_transition(now),
+    )
+    merge_store.save(record)
+    for stale in merge_store.supersede_older(repo, pr_number, head_sha, at=now):
+        logger.info(
+            "merge record %s superseded by %s#%d@%s",
+            stale.task_key,
+            repo,
+            pr_number,
+            head_sha,
+        )
 
 
 # 只有这三个 action 值得审一遍。worker 端把 action 固定成 "synchronize"（队列消息
@@ -186,6 +219,12 @@ async def github_review_webhook(request: Request) -> JSONResponse:
 
         store = _get_review_store()
         identity = (repo, int(pr_number or 0), head_sha)
+        # ADR-021：确保合并通道里有这条 PR 的记录。幂等，重投不会覆盖状态。
+        if settings.code_review_merge_enabled:
+            try:
+                _ensure_merge_record(repo, int(pr_number or 0), head_sha)
+            except Exception:
+                logger.exception("could not create merge record for %s", task_key)
         # 先看状态再落库：已经审过（含任何终态）就是重投，返回 200 且**不再入队**。
         # 不靠"入队前先查"来做幂等——查与写之间有窗口，而真正的幂等判据是消费端的
         # 条件 UPDATE 认领。这里查状态只为给出正确的 HTTP 语义（202 vs 200）。

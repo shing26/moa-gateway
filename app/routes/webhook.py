@@ -87,6 +87,7 @@ async def webhook_callback(request: Request) -> JSONResponse:
             operator_id=operator_id,
             session_id=session_id,
             trace_id=trace_id,
+            created_at=hitl.created_at,
         )
     session_context, expired = await engine.decide_hitl(
         session_id=session_id, trace_id=trace_id, approve=(action == "approve"),
@@ -246,11 +247,15 @@ async def _handle_merge_approval(
     operator_id: str,
     session_id: str,
     trace_id: str,
+    created_at: float = 0.0,
 ) -> JSONResponse:
     """ADR-021 合并审批回调：执行合并并写审计。
 
     **不走** ``engine.decide_hitl()``：合并审批是独立的写操作，与聊天 FSM 的
     会话状态无关。
+
+    这条路径的调用方是外部 agent，反馈就是 HTTP 响应体（不像飞书卡片回调
+    需要额外发消息），所以这里只把真实审批时延补进审计。
     """
     from apps.code_review_pipeline.task_audit import record_human_decision
 
@@ -264,13 +269,17 @@ async def _handle_merge_approval(
             status_code=500,
         )
 
-    # 写审计：谁批的、批了什么
+    # 写审计：谁批的、批了什么、从挂起到决定花了多久。
+    duration_ms = (
+        round((time.time() - created_at) * 1000, 1) if created_at > 0 else 0.0
+    )
     try:
         await record_human_decision(
             task_id=hitl_id,
             repo=hitl_id.split("#")[0],
             operator=operator_id,
             decision=action,
+            duration_ms=duration_ms,
         )
     except Exception:
         logger.exception("failed to record human decision for %s", hitl_id)

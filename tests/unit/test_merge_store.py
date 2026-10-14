@@ -105,3 +105,50 @@ class TestListOpen:
         store.transition(identity, MergeAction.CI_GREEN, at="t")
         store.transition(identity, MergeAction.REJECT, at="t")
         assert store.get(identity).is_terminal is True  # type: ignore[union-attr]
+
+
+class TestSupersedeOlder:
+    """推新 commit 后旧 sha 的记录必须收尾（见 ``supersede_older``）。"""
+
+    def test_older_open_records_are_superseded(self) -> None:
+        store = MergeStore()
+        store.save(_record(pr=7, sha="old"))
+        store.save(_record(pr=7, sha="new"))
+
+        superseded = store.supersede_older("o/r", 7, "new", at="t1")
+
+        assert [r.head_sha for r in superseded] == ["old"]
+        assert store.get(("o/r", 7, "old")).state == MergeState.SUPERSEDED.value  # type: ignore[union-attr]
+        assert store.get(("o/r", 7, "new")).state == MergeState.WATCHING.value  # type: ignore[union-attr]
+        # 旧记录不再被轮询，也就不会再为它弹卡片
+        assert [r.head_sha for r in store.list_open()] == ["new"]
+
+    def test_other_prs_are_untouched(self) -> None:
+        store = MergeStore()
+        store.save(_record(pr=7, sha="old"))
+        store.save(_record(pr=8, sha="other"))
+
+        store.supersede_older("o/r", 7, "new", at="t1")
+
+        assert store.get(("o/r", 8, "other")).state == MergeState.WATCHING.value  # type: ignore[union-attr]
+
+    def test_terminal_records_are_left_alone(self) -> None:
+        """终态记录不该被改写：历史已经写下，取代动作不回溯修改它。"""
+        store = MergeStore()
+        store.save(_record(pr=7, sha="done"))
+        identity = ("o/r", 7, "done")
+        store.transition(identity, MergeAction.CI_GREEN, at="t")
+        store.transition(identity, MergeAction.REJECT, at="t")
+
+        assert store.supersede_older("o/r", 7, "new", at="t1") == []
+        assert store.get(identity).state == MergeState.REJECTED.value  # type: ignore[union-attr]
+
+    def test_awaiting_approval_can_be_superseded(self) -> None:
+        """卡片已发出、人还没点，这时推了新 commit——那张卡片必须作废。"""
+        store = MergeStore()
+        store.save(_record(pr=7, sha="old"))
+        store.transition(("o/r", 7, "old"), MergeAction.CI_GREEN, at="t")
+
+        superseded = store.supersede_older("o/r", 7, "new", at="t1")
+
+        assert [r.state for r in superseded] == [MergeState.SUPERSEDED.value]

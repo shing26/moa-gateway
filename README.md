@@ -1,434 +1,295 @@
-# Agent Gateway
+<div align="center">
 
-**LLM 治理层**：把不受控的模型输出收进可审批、可审计、可回归的闭环——意图路由省成本、策略守卫 + 真人 HITL 刹车、评测门禁防退化，附 GitHub PR 审查垂直应用。
+# MoA Gateway
+### Multi-Agent Orchestration & Governance Gateway
 
-> **定位说明（重要）**：这个项目**不是**一个"什么都会的 agent"，而是一层治理框架。它做得最扎实的地方与模型聪不聪明无关：拦截、审批、留痕、回归。模型是它治下的对象，可以随便换（本机演示用小模型，生产接强 API 都行），闸门不动。能力清单（多 Provider、双引擎、长期记忆、任务 Agent）是第二层证据，不是卖点本身。见 [`delivery/定位与减法清单.md`](delivery/定位与减法清单.md)。
+面向企业级生产场景的高可靠多智能体编排与治理网关
 
-项目基于 FastAPI 自研状态机编排，默认运行时不依赖 LangChain/LangGraph；LLM 调用层使用 LiteLLM 支持多 Provider、fallback 与成本统计。另提供可选的 LangGraph 第二引擎（`ENGINE=langgraph`）用于框架等价性验证，默认关闭。
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688.svg)](https://fastapi.tiangolo.com/)
+[![LangGraph](https://img.shields.io/badge/LangGraph-StateGraph-orange.svg)](https://github.com/langchain-ai/langgraph)
+[![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white)](https://redis.io/)
+[![pgvector](https://img.shields.io/badge/pgvector-4169E1?logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector)
+[![Elasticsearch](https://img.shields.io/badge/Elasticsearch-005571?logo=elasticsearch&logoColor=white)](https://www.elastic.co/elasticsearch)
+<br>
+[![Tests](https://img.shields.io/badge/tests-1120%20passed-brightgreen.svg)](https://github.com/shing26/moa-gateway/actions)
+[![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+[![Security: Bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
 
-## 架构
+<p align="center">
+  <b>1120</b> 自动化测试 · <b>21</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
+</p>
+
+<p align="center">
+  <a href="#-核心工程防线">核心工程防线</a> •
+  <a href="#-真实节点拓扑">节点拓扑</a> •
+  <a href="#-秒级实测零网络依赖">秒级实测</a> •
+  <a href="#-本地运行">本地运行</a> •
+  <a href="#-项目结构概览">项目结构</a> •
+  <a href="#-核心架构决策记录-adr">架构决策 (ADR)</a> •
+  <a href="#-口径与边界">口径与边界</a>
+</p>
+
+</div>
+
+> [!NOTE]
+> **架构定位说明**：
+> 本项目命名中的 **MoA** 指代 **Multi-Agent Orchestration & Governance（多智能体编排与工程治理）**。
+> 区别于学术界的 Prompt-level 模型组合（Mixture-of-Agents），本项目聚焦于高可靠网关场景下的**状态流转确定性、自研 FSM 与 LangGraph 双引擎等价性对拍、双层安全质检（Evaluate + Guard）以及全链路离线度量闭环**。
+> 它首先是一层 **LLM 治理层**（拦截、审批、留痕、回归），其次才是多执行体运行时：主请求路径是"选一个执行体跑到底"的分发，多 Agent 分工与反思是**显式开启、默认关闭**的独立协作线（ADR-022）。
+
+---
+
+## 💡 为什么需要 MoA Gateway？
+
+多数 Demo 级 Agent 系统停留在 Prompt 串联或单向 ReAct 循环中，在生产落地时极易遭遇三大瓶颈：
+
+1. **状态黑盒与无限震荡**：缺乏严格的状态机约束，反思逻辑陷入死循环或 Token 跑飞。
+2. **协议虚假成功**：`SubAgent` 协议只有一个字符串出口（`execute() -> str`），失败与成功共用同一条通道——专家因环境缺失（如 `GITHUB_TOKEN` 未配置）把失败当答案返回时，下游会把它当正常内容放行（本仓实测出现过：Critic 甚至 approve 之后原样交付）。
+3. **技术盲目堆砌**：缺乏量化评测体系，盲目引入 Rerank 等模块，在特征同源时导致排序指标（nDCG）负向倒退。
+
+MoA Gateway 将多智能体系统收敛至**确定性工程治理**之下，提供高可用、可观测、防击穿的生产级运行时环境。
+
+---
+
+## 🛡️ 核心工程防线
+
+### 1. 双运行时（Dual-Runtime）等价性架构
+
+* **主路径轻量自研 FSM**：生产请求主干（`app/pipeline.py` + `app/fsm/state_machine.py`）运行在零外部编排框架依赖的自建有限状态机上（8 态全覆盖，重试预算由状态机结构决定）。状态转移表是全仓库唯一权威——图运行时试图走非法迁移会直接抛 `InvalidStateTransitionException`。
+* **LangGraph 对照适配器**：`app/orchestration/graph.py`（ADR-008）把同一条请求链表达成 `StateGraph`，与 FSM 管道共用同一批协作者对象；`test_langgraph_adapter.py` 的协作者表面漂移门禁 + `test_engine_parity_golden.py` 的三个确定性场景逐字段对拍，严防引擎间的行为漂移。LangGraph 是独立可选 extra（`uv sync --extra langgraph`），默认不参与运行时。
+
+### 2. 治理之下的专家分工与并发调度
+
+* **受控意图路由**：`route` 节点完成意图解析（正则 → 微模型 → 路由 LLM 三级降级），`execute` 节点把任务分发至专家池（`coder` / `general` / `review`，复用 `AGENT_REGISTRY`，不引入新的 Agent 实现）。
+* **Send 扇出并发治理**（`app/orchestration/collaboration.py`，ADR-022）：Supervisor 规划 → 按子任务 `Send` fan-out，多个 `execute_expert` 在同一 superstep 并发执行 → Critic 反思 → **有界** revise 回边（`COLLAB_MAX_ROUNDS=2` / `COLLAB_MAX_SUBTASKS=4`）→ 汇总后汇入同一条 guard/HITL/审计链。
+* **并发写收敛至单点裁决**：`status` / `raw_output` 等 LastValue 通道被多个 worker 并发写会直接 `InvalidUpdateError`（第一版实测正是这么崩的）。现在并发 worker 只碰带 reducer 的通道（`failure_reasons` / `outputs`），"是否升级、升成什么"由下游单个节点裁决；Critic 打回也只重跑 `targets` 指定的子任务，不全链重跑。
+* **默认关闭、显式入口**：`COLLAB_ENABLED=false`，不进意图路由；入口是 `POST /api/v1/collab`、`python -m app.cli collab` 与演示脚本。协作挂起活在 LangGraph checkpoint，由 `resume()` 放行（飞书卡片回调不服务协作）。
+
+### 3. Evaluate + Guard 双层运行时防御与 HITL
+
+* **双层内容质检**：专家执行结果依次经过 `evaluate` 节点（`RuleEvaluator` 规则与格式审查）与 `guard` 节点（`GuardService` 策略 / 预算 / 三态裁决：ALLOW / REVIEW / DENY）。三级守卫优先级只有一份定义（`_merge_guard`），两条引擎共用，不会分叉。
+* **原生断点人工介入（HITL）**：需审核任务流转至 `prepare_hitl` 与 `await_human` 节点——图路径用 LangGraph `interrupt()` 原语安全挂起、`Command(resume=...)` 恢复；生产审批走飞书回调驱动 FSM，挂起记录原子认领（`pop_hitl`：GETDEL → Lua 兜底），连点两次或并发回调只有一个生效。审批人白名单、申请人、审批原因全程进审计。
+* **非对称失败防御（失败信封识别）**：`SubAgent` 协议失败与成功共用一个字符串出口，识别规则因此**刻意收窄**到三类不可能出自正常回答的形状——我们自己的失败文案、整条输出是一条异常（异常前缀只认**首行**，讨论 `ValueError` 的正常回答不误伤）、"缺一个形如凭据的标识符"且要求去配置它。误杀的代价（把好答案提前送进人工复核）远高于漏认；认出的失败直接升级人工，不流进评审、不伪装成成功交付。
+
+### 4. 数据度量驱动的 RAG 架构止损
+
+* **度量基准在先**：固定语料（6 篇项目文档 → 12 chunk）+ **23 条人工抽检** gold set（两阶段标注：独立模型生成候选 → 人工逐条确认；标注者与分块器作者不是同一人，来源与时间记在 `retrieval_gold.meta.json`），离线计算 Hit@1/3/5、Recall@5、MRR、nDCG@5。
+* **同源特征归因与止损**：实测 base vs 纯词法精排器，六项 delta **无一为正**（Hit@1 `-0.087`、MRR `-0.0362`、nDCG@5 `-0.0356`，其余为 0）；23 条 query 中 **2 条 Top-1 由对变错、0 条由错变对**。覆盖率信号与稀疏腿高度同源，它只是在同一批候选里换了个排法——这个结果证明的是"度量能跑通、能分辨正负"，不是"精排有用"。
+* **默认关闭 + 严格准入门禁**：按"先度量、后优化"的触发线实施 `RERANK_ENABLED=false`，重开条件写死在 `docs/retrieval-evaluation.md`：换不同源的信号（cross-encoder）、召回不再是瓶颈（当前 Recall@5=0.8478，说明有 chunk 根本没进候选集）、≥100 条 gold set 且有第二位标注者独立抽检、nDCG@5 与 MRR 同时为正。
+
+### 5. 全链路审计与零成本 CI 确定性测试
+
+* **全生命周期记账**：共享 `trace_id` 经 ContextVar 贯穿路由、执行、质检全流程，协作层自身的 Token 与延迟也纳管记账；`budget_guard` 会话级成本熔断（`BUDGET_SESSION_LIMIT_USD`）；审计 WAL 写成链（`prev_hash` / `entry_hash`，能指出第一个被改过的行号——tamper-evident，不是 tamper-proof）。
+* **离线确定性保障**：Mock 协作 / 任务 LLM 与真机调合同构，CI 在 100% 零网络、零 Token 消耗下完成拓扑与流式验证，沉淀 **1120 passed / 4 skipped**（13.5s）。
+
+---
+
+## 🧭 真实节点拓扑
+
+默认运行时是自建 FSM，会话状态为 `INIT → ROUTED → EXECUTING → OUTPUT_READY → COMPLETED`（失败走 `RETRY → SUSPENDED`，审批拒绝到 `REJECTED`）。下面是把**同一条请求链**表达为 LangGraph `StateGraph` 的 10 节点图（ADR-008，与 FSM 逐字段对拍）：
 
 ```mermaid
-flowchart LR
-  A[飞书 / Webhook] --> B[AuthMiddleware]
-  B --> C[Engine FSM]
-  C --> D[IntentRouter 三级降级]
-  D --> E[Agent 注册表 Coder/General/Review]
-  E --> F[LiteLLM Provider + fallback]
-  E --> G[工具循环上限 AGENT_MAX_STEPS 默认 3 轮]
-  F --> H[GuardService ALLOW/REVIEW/DENY]
-  H --> I[HITL 飞书审批]
-  H --> J[Audit WAL / ES]
+flowchart TD
+    Start([用户请求]) --> Route
+
+    subgraph REQ["① 请求处理"]
+        direction TB
+        Route["route · 意图识别与路由（正则 → 微模型 → 路由 LLM）"]
+        Retrieve["retrieve · 混合检索（pgvector 稀疏腿 + RRF 融合）"]
+        Execute["execute · 分发专家池 coder / general / review"]
+        Route --> Retrieve --> Execute
+    end
+
+    subgraph GOV["② 治理链 · evaluate + guard 双层质检"]
+        direction TB
+        Evaluate["evaluate · RuleEvaluator 规则质检"]
+        Guard["guard · GuardService 三态裁决 ALLOW / REVIEW / DENY"]
+        Evaluate --> Guard
+    end
+
+    subgraph HITL["③ 人工闭环"]
+        direction TB
+        PrepareHITL["prepare_hitl · 组装审批上下文"]
+        AwaitHuman["await_human · interrupt() 挂起等待人工"]
+        PrepareHITL --> AwaitHuman
+    end
+
+    subgraph OUT["④ 交付与收口"]
+        direction TB
+        Deliver["deliver · 组装响应交付"]
+        Blocked["blocked · 终端阻断"]
+        Rejected["rejected · 终端拒绝"]
+        End([结束])
+    end
+
+    Execute -->|ok| Evaluate
+    Execute -->|预算超限| Blocked
+    Execute -->|重试耗尽| PrepareHITL
+    Execute -->|执行失败| End
+    Guard -->|ALLOW| Deliver
+    Guard -->|REVIEW| PrepareHITL
+    Guard -->|DENY| Blocked
+    AwaitHuman -->|approve · Command resume| Deliver
+    AwaitHuman -->|reject| Rejected
+    Deliver --> End
+    Blocked --> End
+    Rejected --> End
 ```
 
-请求链路：飞书/Webhook → 鉴权 → 限流 → FSM → 意图路由（正则 → 微模型 → 路由 LLM）→ Agent 执行 → 静态评估 → 守卫策略 → HITL/拦截 → 渠道适配 → 审计日志。
+多 Agent 协作线（ADR-022）是**另一张**真实运行的图，默认关闭、显式入口：
 
-## 三大卖点
+```text
+plan ──▶ dispatch ──▶ Send 扇出并发 ──▶ execute_expert ×N ──▶ critic ──▶ summarize
+             ▲                                                    │
+             └────────────────────────────────────────────────────┘
+                 Send 扇出：多个 execute_expert 在同一 superstep 并发执行；
+                 revise 回边只重跑 targets 子任务（有界 COLLAB_MAX_ROUNDS=2），其余产出保留
 
-### 1. 智能路由省钱
-
-- 三级降级意图路由：正则命中直接返回，不调 LLM；未命中的才升级到微模型/路由模型，**再失败才落默认意图**。
-- LiteLLM 内核：`chat` / `chat_with_tools` 接口保持兼容，内置多模型 fallback，网络/429/5xx 自动切换。
-- 每次调用记录 `model_used`、`cost_usd`、`llm_latency_ms`、`fallback_used`，随审计日志落盘。
-- Eval 实测（`evals/datasets/intent.jsonl`，50 条）：意图准确率 1.0，其中 **46 条（92%）由正则直接命中**。
-
-| 路由层级 | 说明 | 50 条用例命中 |
-|---|---|---|
-| 正则 | 0 LLM 调用，毫秒级返回 | 46（92%） |
-| 默认意图 | 未命中正则，且该维度**不注入 LLM** | 4（8%） |
-
-> ⚠️ 这个维度**只验证正则表**：`run_intent_eval` 构造的 `IntentRouter()` 不注入任何 LLM，
-> 所以未命中正则的 4 条直接拿到默认意图 `assistant`——而它们的 `expected_intent` 恰好也是
-> `assistant`，等于"默认值命中默认值"。**它不含模型兜底路径的任何信息。**
-> 模型兜底路径的稳定性由 `intent_consistency` 维度单独测（下面第 3 节），实测预热后
-> 11 条非正则输入 × 5 次重放 = 55/55 一致。
-
-每次真实调用的成本都会写入审计日志 `cost_usd` 字段，可据此按周聚合实际节省金额。
-
-### 2. 安全守卫 + HITL
-
-- 策略引擎覆盖内网 IP、密钥/Token、价格承诺，输出命中 `deny` 直接拦截，`review` 进入人工审批。
-- 静态评估器同样接入刹车（ADR-010）：AST 危险类问题（`exec`/`subprocess`/写模式 `open`…）直接
-  拦为 `deny`（不可审批），空输出、超长、非法 JSON 等质量问题进人工 `review`。此前
-  `need_human_review` 只是响应体里的一个字段，输出照样以 `ok` 送达。
-- 执行期失败带归因重试一次，再失败自动升级人工（复用同一套审批闭环，`hitl_kind` 区分来源）。
-- 策略命中 `review` 的输出强制人工审批，飞书审批卡片闭环：通过送达、拒绝丢弃；`execute_code` 工具未开放，避免占位桩造成假审批。
-- 红队实测：200 条对抗用例，期望拦截 120 条全部命中，漏网 0，误拦截 0，召回率/精确率 100%。
-- **审计写成链**（ADR-019，2026-09-28）：每条审计带 `prev_hash` / `entry_hash`，
-  `verify_chain()` 能指出**第一个**被改过的行号。⚠️ 这是 **tamper-evident（篡改可发现）**，
-  **不是 tamper-proof**——有磁盘权限的人仍可整条重写，链只证明"哪一行之后被动过"。
-  同时修好两处口径：容量按**实际写入字节**统计（此前算的是 `len(agent_output)`，
-  既不是写入量、也不是字节），缓冲满溢**有计数**（`wal.dropped`）而不是静默丢最旧；
-  落盘失败不中断审计，进程内继续接链并计 `wal.write_failures`。
-
-运行红队：
-
-```bash
-uv run python scripts/redteam/run_redteam.py
+之后汇入同一条治理链：evaluate ──▶ guard ──▶ prepare_hitl ──▶ await_human ──▶ deliver
+收口节点：blocked / rejected / failed
 ```
 
-### 3. 自建 Eval 评估体系
+---
 
-每次改动可以跑全部维度并输出 JSON 报告：
+## ⚡ 秒级实测（零网络依赖）
+
+以下四条命令全部在本机实测可跑：mock / 确定性模式，不依赖外部 API Key 与外部网络，单条约 3–8 秒（含启动开销）。
 
 ```bash
-uv run python evals/run_evals.py --offline   # 离线：e2e 真跑业务链路（真 pipeline + 正则路由 + mock agent，零 token），不跑需要模型的 judge；CI 用这条
-uv run python evals/run_evals.py             # 活体：真实编排 + 真实判分（需 Ollama/pgvector 就绪）
+# 1. 默认流式协作演示（Supervisor 规划 → Send 扇出并发执行 → Critic 放行 → 治理链 → 交付）
+uv run python scripts/run_collaboration.py
+
+# 2. 靶向回边重跑演示（Critic 打回 targets=[0] → 只重跑该子任务 → 第二轮 APPROVED 放行）
+uv run python scripts/run_collaboration.py --scripted-revise
+
+# 3. 失败信封演示（专家把失败当答案返回 → 评审前识别 → 直接升级人工，不伪装成功）
+uv run python scripts/run_collaboration.py --scripted-failure
+
+# 4. RAG 精排负向退化案例（同一 query 精排关/开 Top-k 并排对照，带 gold 标注）
+uv run python scripts/rag_case.py
 ```
 
-| 维度 | 数据量 | 当前指标 | **测的到底是什么** |
-|---|---|---|---|
-| Intent 意图路由 | 50 条 | 准确率 1.0 | **只测正则表**（不注入 LLM，见第 1 节警示） |
-| Intent 一致性 | 11 条 × 5 次 | 预热后 `stable 1.0 / degraded 0`（55/55 一致） | **模型兜底路径**：同输入重放看是否收敛。**没有期望值**，设计者无法自证 |
-| Guard 守卫对抗 | 50 条 | deny 召回 1.0 / 精确率 1.0 | 策略正则表 |
-| 工具选择 | 17 条 | 准确率 1.0（CI 硬门禁） | **`MockTaskLLM` 的规则表**，不是真实 Agent 的工具选择 |
-| E2E 端到端 | 30 条 | 活体 `run=30 skipped=0`，success 1.0；**intent_match 14/30**（2026-09-22，真实路由 LLM）；**离线（纯正则路由）28/30**（2026-09-28） | 真实编排；judge 均分与均时随机器/模型变化，不写死数字。⚠️ 两个 intent_match **不可比**：一个走路由 LLM、一个只走正则表。**`intent_match` 是"与数据集标签的偏离率"，不是"路由准确率"**——标签里 10 例的期望值其实是默认桶 `assistant`（哨兵而非真值），与路由 LLM 的判定天然不一致。数字以 `evals/reports/latest.json` 为准（内含生成时的 git_sha） |
-| HITL 决策回流 | 4 条 | approve_rate 0.5，介入率 0.0065 | **全部是本地模拟点击的种子**（会话前缀 `probe-*`），n=4 无统计意义 |
+---
 
-> **看这张表的方式**：前三行里有两行测的是"我自己写的规则表"，一行（一致性）测的是模型路径
-> 且无法自证；e2e 与 HITL 两行的数字目前不具统计意义。报告与命令行摘要会把
-> `degraded=…`、`(全为模拟)` 这类限定词直接打出来，就是为了不让"全绿"被误读。
-
-> **活体 e2e 的三次修复（2026-09-22）**：此前真跑必炸，`--offline` 是唯一跑法。三处原因都已修：
-> ① 判分器自建配置——base_url 取 `OPENAI_BASE_URL`（local 形态指向 Ollama）而 model 硬编码
-> `gpt-4o-mini`，两个来源混用导致 `model 'gpt-4o-mini' not found`；② eval 进程没有 FastAPI
-> lifespan，漏了 `vector_client.start()`，检索腿静默空转（且 Windows 默认 Proactor 循环与
-> psycopg 异步池不兼容，需 Selector 循环）；③ `--engine fsm|langgraph` 传入的是**真实** runner，
-> 却被 `use_store = pipeline is None` 判成"注入了假 pipeline"而跳过 `start()`——那两个引擎跑的
-> 其实是没有 RAG 上下文的链路，而 e2e 照样报 `success 1.0`，只在日志里刷
-> `后端已降级，search 返回空结果（None）`。现改为显式 `use_store` 参数，并由
-> `test_evals_runner.py` 钉住启停生命周期。**CI 仍跑 `--offline`**：门禁不引入网络依赖，
-> 活体那跑是本地/发布前的验收。
-
-红队基线（`scripts/redteam/cases.json`，200 条）：
-
-| 维度 | 数据量 | 当前指标 |
-|---|---|---|
-| 越狱 / 注入 / 诱导 | 150 条 | 期望拦截 120 条全部命中，漏网 0 |
-| 正常对照 | 50 条 | 误拦截 0 |
-| 汇总 | 200 条 | 召回率 1.0 / 精确率 1.0 / 误拦截率 0.0 |
-
-> 这三行**进 CI 硬门禁**（`run_redteam.py` 漏网或误拦即非零退出；零网络、约 1 秒）。
-> 口径要说清：**用例与策略正则出自同一设计者**，所以 100% 是"没有漂移"的不变量、
-> **不是泛化能力的证据**——它的作用是防回归，改了策略或改了用例任一侧都会红。
-
-报告写入 `evals/reports/latest.json`，包含 `git_sha`、混淆矩阵、拦截指标和 e2e 均分/延迟/成本；intent 准确率低于 0.9 或 guard deny 召回低于 0.95 时退出码非零。
-
-## PR 审查垂直应用
-
-内置 GitHub PR 多 Agent 审查流水线：Triage → 静态分析 → 语义 RAG → 测试覆盖 → 汇总报告。
-
-- Webhook 演示路径：`POST /webhook/github/review`（GitHub webhook body）
-- 网关指令：发送 `/review` 后输入 `owner/repo#PR号`
-- 无 `GITHUB_TOKEN` 时返回优雅降级文案，不会崩溃
-
-审查结果包含严重级别统计、建议结论和摘要文本，`need_human_review` 时会走守卫/HITL 审计闭环。
-
-## 快速开始
+## 🚀 本地运行
 
 ```bash
-cd moa-gateway
-
 python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Linux / macOS
+.venv\Scripts\activate        # Windows；Linux / macOS: source .venv/bin/activate
 
 pip install uv
-uv sync --all-extras --dev
+uv sync --all-extras --dev      # 已含 langgraph extra（协作链路需要；只跑主链路可不装）
 
-cp .env.template .env           # 填入真实配置
-uv run python scripts/doctor.py  # 检查 Redis / Ollama / pgvector / 端口
+cp .env.template .env           # 填入真实配置（留空也能跑离线演示与单测）
+uv run python scripts/doctor.py # 环境诊断：Python / .env / 端口 / Redis / Ollama / pgvector
 .venv\Scripts\python.exe -m app --port 8081
 ```
 
-Windows 上请使用 `python -m app`，它会在 Uvicorn 建 loop 前切换到
-`WindowsSelectorEventLoopPolicy`，确保 psycopg 异步 pgvector 连接池可用。
+> [!TIP]
+> **Windows 用户**：请用 `python -m app` 启动（而不是直接 `uvicorn`）——它会在 Uvicorn 建 loop 前切换到 Selector 事件循环，psycopg 的异步 pgvector 连接池需要它。
 
-访问：
+- 持久化依赖用仓库 Compose 起：`docker compose -f docker-compose.dev.yml up -d redis postgres`（Redis `6380` / pgvector `5433` / 网关 `8081`，避开常用端口）。
+- 演示前一键起停：`powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1`（按序拉起容器 → Ollama → 网关，等 `/healthz` 通过）。
+- 访问入口：`/dashboard`（管理后台）、`/dashboard/chat`（自主任务对话）、`/health` 与 `/healthz`（健康检查）。
 
-- 管理后台：<http://localhost:8081/dashboard>
-- 自主任务对话：<http://localhost:8081/dashboard/chat>
-- 健康检查：<http://localhost:8081/health>
-- 依赖级健康检查：<http://localhost:8081/healthz>
+---
 
-8081 是项目推荐的本地端口，用于避开常见的 8080 占用；仍可用 `GATEWAY_PORT` 改端口。
+## 📂 项目结构概览
 
-默认只监听 `127.0.0.1`。要对外暴露，用同机的 Tailscale Funnel：
-
-```powershell
-tailscale funnel --bg 8081        # 起/改指，后台常驻
-tailscale funnel status           # 看当前指向哪个本地端口
+```text
+moa-gateway/
+├── app/
+│   ├── agent_core/       # ReAct 执行循环、工具契约与 Mock/LiteLLM 运行时
+│   ├── agents/           # 专家契约、注册表、意图映射与请求级重试（coder / general / review）
+│   ├── audit/            # WAL 审计链（prev_hash / entry_hash）+ Elasticsearch 异步持久化
+│   ├── budget/           # 会话级 Token 与成本熔断（guard.py）
+│   ├── engine.py         # 会话 FSM 引擎（HITL 挂起与审批状态）
+│   ├── evaluator/        # RuleEvaluator 内容规则质检（判定接刹车）
+│   ├── fsm/              # 状态转移表（8 态，唯一权威）
+│   ├── guard/            # GuardService 三态裁决、RBAC、红队引擎
+│   ├── orchestration/
+│   │   ├── graph.py          # ADR-008：请求链的 LangGraph 表达（等价性对拍）
+│   │   └── collaboration.py # ADR-022：多 Agent 协作图（默认关闭）
+│   ├── pipeline.py       # 生产主链路：自建 FSM 管道
+│   ├── router/           # 意图路由三级降级（正则 → 微模型 → 路由 LLM）
+│   ├── routes/           # FastAPI 端点：chat / webhook / feishu / dashboard / collab
+│   └── vectordb/         # pgvector 双腿检索（稀疏 + 稠密，RRF 融合）与 rerank 接入点
+├── apps/
+│   └── code_review_pipeline/   # PR 审查垂直应用 + ADR-021 经审批合并通道
+├── docs/
+│   ├── adr/                           # ADR-002 ~ ADR-022（21 份）
+│   ├── multi-agent-collaboration.md # 协作链路架构与并发写治理说明
+│   └── retrieval-evaluation.md      # 检索 gold set、度量基线与精排止损归档
+├── evals/       # 数据集与 run_evals.py（intent / guard / e2e / retrieval / hitl_feedback）
+├── scripts/     # 演示与验收：run_collaboration / rag_case / compare_rerank / doctor / redteam …
+└── tests/       # 1120 单元测试 + 双引擎 Parity 对照集成测试
 ```
 
-不需要 `--host 0.0.0.0`——Funnel 与网关同机，走回环即可。只有跨机访问才要绑
-`0.0.0.0`，而那时必须先给 `DASHBOARD_PASSWORD` 设值（默认是空的）。
+---
 
-> Funnel 指向的端口必须真的有本网关在听。指错了（端口被别的容器占走、或网关
-> 停机），飞书卡片回调就报 `200671 回调地址不可达`——它只说明"公网地址没人应答"，
-> 不区分是没起、起错端口还是被占。
+## 📑 核心架构决策记录 (ADR)
 
-### 本机环境复活
+项目所有核心演化遵循「决策先行、代码在后」原则，完整归档于 `docs/adr/`（adr-002 ~ adr-022，共 21 份）：
 
-仓库自带环境诊断器，会逐项检查 Python、`.env`、鉴权配置、端口、Redis、
-Ollama 主模型、pgvector 和 embedding，并给出可直接执行的修复提示：
+| ADR 编号 | 核心决策主题 | 关键设计与约束 |
+| :---: | :--- | :--- |
+| **ADR-002** | RBAC 与运行时 Guard | 定义三态（ALLOW / REVIEW / DENY）安全阻断模型 |
+| **ADR-008** | LangGraph 第二引擎引入 | 主干采用自研 FSM；LangGraph 仅作等价性对照适配器（可选 extra） |
+| **ADR-009** | 错误契约与预算熔断 | 统一 `ErrorCode` 分类学，会话级强制实施成本截断 |
+| **ADR-010** | 请求生命周期与重试 | FSM 8 态全覆盖；重试预算由状态机结构决定（`RETRY_BUDGET=1`）；评估器判定接刹车 |
+| **ADR-016** | 剩余台账与触发线管理 | 确立"先度量基线、后实施优化"：精排 / 换嵌入模型 / 分块升级各有触发线 |
+| **ADR-019** | 审计链与保留 | WAL 哈希链（tamper-evident）；审计字段单一来源 |
+| **ADR-020** | 混合检索落地 | 独立稀疏腿 + RRF（k=60）+ 维度不符启动 fail-fast；精排登记回 ADR-016 台账 |
+| **ADR-021** | 审批门禁的合并通道 | PR 合并必须过人工审批门，全程留痕（谁批的、批了什么、何时） |
+| **ADR-022** | 多 Agent 协作立项 | 解除 R6 冻结：Supervisor + `Send` fan-out + Critic 有界回边；不进主路径、默认关闭、复用同一套治理原语 |
+
+---
+
+## 🔀 垂直应用：PR 审查与合并门禁
+
+`apps/code_review_pipeline/` 内置 GitHub PR 多阶段审查流水线：Triage → 静态分析 → 语义 RAG → 测试覆盖 → 汇总报告。
+
+> [!IMPORTANT]
+> **口径说明**：这是**固定顺序的多阶段流水线**，不是"多智能体协同"——五个审查器由 `run()` 依次 `await`，彼此没有 handoff、没有并行调度，唯一的数据传递是上一阶段的产出喂给下一阶段。
+
+- 入口：`POST /webhook/github/review`（GitHub webhook body）或网关指令 `/review` 后输入 `owner/repo#PR号`；无 `GITHUB_TOKEN` 时优雅降级，不崩溃。
+- 报告阶段出现 `critical` / `high` 发现，或 `medium` 发现 ≥3 条，或任一审查器返回无法解析的内容，即 `overall_need_human_review=True`，落库并进飞书卡片（2026-10-12 修复：此前该标记恒为 `False`，回归测试见 `tests/unit/test_review_hitl_escalation.py`）。
+- **合并是独立的经审批通道**（ADR-021，`CODE_REVIEW_MERGE_ENABLED=1`）：CI 绿 → 飞书弹审批卡片 → 人点批准 → 网关合并 → 审计。合并必须过审批门，全程留痕。
+
+---
+
+## 🧪 质量保障与门禁
 
 ```bash
-uv run python scripts/doctor.py
-uv run python scripts/doctor.py --json
+pytest tests/unit -q                          # 1120 passed / 4 skipped（CI 13.5s，零网络零 token）
+ruff check .                                  # 代码风格
+bandit -r app -q -s B105,B107,B110,B112,B324  # 安全扫描
+python evals/run_evals.py --offline           # e2e 真跑业务链路（真 pipeline + 正则路由 + mock agent）
+python scripts/redteam/run_redteam.py         # 200 条对抗用例，零网络约 1 秒，CI 硬门禁
+python scripts/compare_rerank.py              # 精排 off/on 前后对比（gold set 23 条）
 ```
 
-使用仓库 Compose 启动持久化依赖：
+GitHub Actions CI（Python 3.12）依次执行：pytest → ruff → 防源码补丁脚本 → bandit → eval offline → 红队基线 → 导入自检，全链路零网络；Docker 镜像（`python:3.12-slim` + uv）仅在打 tag 时构建。
 
-```bash
-docker compose -f docker-compose.dev.yml up -d redis postgres
-ollama serve
-ollama pull qwen2.5:7b
-ollama pull qwen2.5:3b
-ollama pull nomic-embed-text:latest
-```
+---
 
-Compose 默认将 Redis 映射到 `6380`、pgvector 映射到 `5433`、网关映射到 `8081`，
-避免与宿主机已有服务抢占默认端口。`VECTOR_DB_EMBEDDING_DIM` 与
-`CODE_REVIEW_EMBEDDING_DIM` 默认按本地 `nomic-embed-text` 的 768 维配置。
+## 📏 口径与边界
 
-### 一键起停（演示前必跑）
+- **红队 100% 是防漂移不变量**：用例与策略正则出自同一设计者，100% 证明"没有漂移"，不是泛化能力的证据；它的作用是防回归。
+- **意图 Eval 只测正则表**：50 条中 46 条（92%）正则直出、4 条落默认意图——该维度不注入 LLM，"默认值命中默认值"；模型兜底路径的稳定性由 `intent_consistency` 维度单独测（预热后 55/55 一致）。
+- **e2e 的 `intent_match` 是"与数据集标签的偏离率"，不是路由准确率**；judge 均分随机器 / 模型变化，不写死数字。
+- **HITL 不跨重启**：会话状态在进程内、挂起记录在 Redis，重启后未决审批按 ADR-012 惰性作废（审计 `hitl_expired`）并告知用户——这是有意为之，要么接外部状态存储，要么承认它只在进程生命周期内有效。
+- **OTel 是预留接口，不是链路**：全仓只有 2 个 span、未声明 exporter 依赖，设了端点也只落到 console。
+- **协作链路五条边界**（ADR-022）：不进意图路由、不驱动会话 FSM、`depends_on` 只记录不调度、checkpointer 是进程内 `InMemorySaver`、`COLLAB_LLM=litellm` 解析失败会降级规则式 mock。
+- **成本量化本地不可验**：`avg_cost_usd` 恒 0（本地 Ollama 不计费）；`hitl_feedback` 4 条全是本地模拟种子，介入率无统计意义。
+- **评测没有"本次 vs 上次"的基线对比**：报告覆盖写且不入库，结论目前不回流到任何决策点——这是"改进闭环"缺失的如实记录。
+- 更完整的边界与残留项见各 ADR 的「后果 / 残留」节与 `delivery/` 文档；所有密钥经环境变量注入，`.env` / `logs/` / `data/` / `evals/reports/` 不入库。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1            # 拉起容器 + Ollama + 网关并等 healthz
-powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1 -Action status
-powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1 -Action stop
-```
+---
 
-按顺序探测并拉起三样依赖：容器（redis 6380 / postgres 5433）→ Ollama（11434）→ 网关，
-最后等 `/healthz` 通过。网关端口依次读 `-GatewayPort` 参数、`.env` 的
-`GATEWAY_PORT` / `APP_PORT`，都没有才用 8081。**为什么需要它**：2026-09-20 出过一次
-事故——容器停了，网关启动阻塞/退出，飞书卡片回调打到隧道后 origin 无响应，客户端报
-`200671 回调地址不可达`。演示前跑一次即可避免。
-
-端口被占时脚本会**报出占用者是谁**并拒绝动手（不会替你杀别人的进程），例如
-`端口 8082 被 Docker 容器 shoppilot-gateway-1（转发到 8082，宿主进程 com.docker.backend）占用`。
-
-开机自启（可选，管理员执行一次）：
-
-```powershell
-schtasks /Create /TN "moa-gateway stack" /SC ONLOGON /RL LIMITED ^
-  /TR "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File <仓库路径>\scripts\start_stack.ps1"
-```
-
-`stop` 只停网关与容器，不停 Ollama（它常被本机其他工具共用）。
-
-## 测试与质量
-
-```bash
-# 单元测试
-.venv\Scripts\python.exe -m pytest tests/unit -q
-
-# 静态检查
-uv run ruff check .
-
-# 安全扫描
-uv run bandit -r app -q -s B105,B107,B110,B112,B324
-
-# 评估冒烟
-uv run python evals/run_evals.py --offline
-
-# 真实 pgvector + embedding 验收
-uv run python scripts/verify_vector_path.py
-uv run python scripts/verify_code_review_rag.py
-
-# 长期记忆生命周期验收（跨会话召回 / 冲突覆盖 / 遗忘）
-uv run python scripts/verify_long_term_memory.py
-```
-
-GitHub Actions CI 会依次执行 pytest、ruff、bandit 和 eval offline；Docker 镜像使用 `python:3.12-slim` + uv 构建。
-
-## 为什么不用 LangChain/LangGraph
-
-核心编排是自研 FSM：状态转移可控、依赖面小、便于学习与面试讲解。多 Agent 网关最需要的是稳定的路由、守卫、审计闭环，而不是再套一层编排框架；LLM 调用层交给 LiteLLM 统一 Provider/fallback/成本即可。
-
-结论不是"没比较过"：仓库里保留了 `app/orchestration/graph.py` 作为**可选的** LangGraph 适配器，把同一条请求链
-（route → retrieve → execute → evaluate → guard → HITL → deliver）表达成 `StateGraph`，与 FSM
-管道共用同一批协作者对象，并由 `tests/unit/test_langgraph_adapter.py` 做逐字段等价校验。它默认不参与运行时，
-依赖也是独立的可选 extra（`uv sync --extra langgraph`），因为解析 LangGraph 会连带拉入 langsmith 等约 20 个包。
-
-**默认运行时仍是 FSM，不替换。** 适配器的价值是"用代码回答标准框架在同约束下能否等价实现"，而不是把控制流
-交给框架：FSM 才是这个项目可控性与审计叙事的基础，替换它等于把既有测试、ADR 与守卫/HITL 闭环一起推倒重来。
-
-### 那么 LangGraph 到底用在了哪里
-
-用在**新增能力**上，不在主路径上。`app/orchestration/collaboration.py`（ADR-022）是一张真实的
-`StateGraph`：Supervisor 规划 → 按子任务 `Send` fan-out 给专家并发执行 → Critic 反思 → 有界 revise 回边
-→ 汇总 → 同一套 guard/HITL/审计。用的是 `StateGraph`、条件回边、`InMemorySaver` checkpointer 与
-`interrupt()/Command(resume=...)` 承接审批，不是包一层的伪用法。
-
-它与上面那个适配器是**两件事**：适配器证明"同一条路径换成图运行时仍然等价"，协作图提供 FSM 管道**没有的**
-多 Agent 分工与反思能力。两者共用同一批治理原语（`execute_with_retry` / `RuleEvaluator` / `_merge_guard` /
-审计 WAL），所以"多 Agent"不会变成守卫的旁门——这是它与"套个框架就算多 Agent"的区别。
-
-入口是显式的（`POST /api/v1/collab` + CLI + `scripts/run_collaboration.py`），默认关闭
-（`COLLAB_ENABLED=false`），**不进入意图路由**。详见 [docs/multi-agent-collaboration.md](docs/multi-agent-collaboration.md)。
-
-### 双引擎开关
-
-`ENGINE=langgraph` 时消息路径交给图，四类路径仍回落 FSM：`/` 开头的命令、`RESET`/`CANCEL`、敏感消息挂起、
-已有待审批或敏感挂起的会话。两条引擎共用同一个 `SessionStore`（审批）、同一份协作者对象与同一条请求日志
-（图路径由 dispatcher 统一落账），因此切换不会静默丢功能。
-
-- 缺 langgraph extra、`ENGINE` 取值未知、或图在运行中抛异常时，均告警并回退 FSM；启动不依赖可选依赖。
-- 等价性由 `tests/unit/test_engine_parity_golden.py` 的三个确定性场景（纯回答 / 真实 TaskAgent 工具循环 /
-  REVIEW→审批）逐字段比对，与 `test_langgraph_adapter.py` 一起进 CI。
-- `evals/run_evals.py --engine fsm|langgraph` 可把同一份 e2e 数据集指向任一引擎；`--offline` 跑的是假引擎，
-  不经过真实编排，所以门禁落在上面那组单测。**不带 `--offline` 则走真实编排 + 真实判分**（2026-09-22 起可用，
-  需 Ollama 与 pgvector 就绪；此前因判分器配置错与存储未初始化而必炸）。注：`--engine` 与默认路径现在都会
-  启停真实向量存储（此前 `--engine` 会静默跳过，跑的其实是没有 RAG 上下文的链路）。
-
-## 简历条目草稿
-
-> **agent-gateway**（FastAPI · Redis · LiteLLM · OpenTelemetry）
-> - 三级降级意图路由 + Provider fallback，微模型分流简单请求，Eval 实测 50 条用例中 46 条正则直出（0 LLM 调用），成本随审计日志逐次核算。
-> - 任务状态机覆盖完整请求生命周期（`INIT→ROUTED→EXECUTING→OUTPUT_READY→COMPLETED`，失败走 `RETRY→SUSPENDED`）；执行期失败带归因重试一次、再失败自动升级人工审批。重试预算由状态机结构决定并有漂移守卫，双引擎事件序列逐字段等价（golden 含失败升级场景）。
-> - 策略守卫 + RBAC + 飞书 HITL 审批闭环，红队 200 条对抗用例召回率/精确率 100%。
-> - 自建 Eval 体系（150 条数据集 + LLM-as-judge），每次改动离线回归出 JSON 报告。
-> - 多 Agent 协作链路（LangGraph `StateGraph`，默认关闭、不进主路径）：Supervisor 拆任务 → `Send` fan-out 给专家并发执行 → Critic 反思 → 有界回边 → 汇总后过同一条 guard/HITL/审计；反思轮次耗尽时显式标注"critic 未通过"而不是伪装成功。
-> - 检索质量度量：固定语料 + 23 条人工抽检 gold set，离线算 Hit@k/MRR/nDCG/Recall；精排 off/on 前后对比脚本可复现（当前 delta 六项无一为正，如实记录，不调参凑数字）。
-> - 后端工程：鉴权中间件、Redis 会话存储（对话记忆 / HITL 审批状态 / 健康探活）、审计 WAL（用 ContextVar 把 trace 贯通 16 个调用点）、Docker + CI；OTel 为**预留接口**（未接 exporter，见"已知边界"——别写成"OTel 链路"）。
-> - 支持 FSM / LangGraph 双引擎可切换（`ENGINE`），3 个 golden 场景逐字段等价验证进 CI。
-> - 统一错误契约（`ErrorCode` 枚举贯穿双引擎与路由层）+ per-session 预算拦截（`BUDGET_SESSION_LIMIT_USD`），配置层非法值启动即 fail-fast。
-> - 垂直应用：GitHub PR 多 Agent 代码审查（Triage → 静态分析 → 语义 RAG → 测试覆盖 → 报告）。
-
-## 已知边界
-
-- 执行期状态与重试（ADR-010）：FSM 覆盖完整请求生命周期
-  （`INIT→ROUTED→EXECUTING→OUTPUT_READY→COMPLETED`，失败走 `RETRY→SUSPENDED`），因此成功响应
-  的 `state` 是 `COMPLETED`（此前停在 `ROUTED`——四个状态当时是装饰）。重试预算是**状态机结构**
-  （`RETRY_BUDGET = 1`）而不是配置项，有漂移守卫钉住；失败原因经 `AgentEnvelope.failure_reason`
-  喂回 prompt，重试耗尽后升级人工审批。**工具级失败不走重试**：ReAct 把它转成 observation 让模型
-  自愈（那是更细粒度的恢复，且盲目重试有副作用的工具是危险的），只有上抛到 pipeline 的基础设施
-  异常（LLM 超时/网络/解析）才重试。`HITL_ENABLED=false`（`.env.template` 的默认值）时无人可升级，
-  退回原来的 error 返回——**两条引擎读同一个开关**（此前 graph 读的是另一个变量名 `MOA_HITL_ENABLED`
-  且默认相反，会让两引擎在只设其一的部署上给出不同答案）。
-- 评估器判定进 HITL 会让**更多**请求走人工：`empty_output`、`output_too_long` 这类原本直接返回的
-  输出现在需要批准。这是语义正确的代价；若演示体验优先，可把 `empty_output` 排除出 `review`。
-- 意图路由的兜底层需要模型是**热的**：`ROUTER_LLM_TIMEOUT_MS` 默认 2000ms，而本地小模型冷启动
-  首次调用实测约 4.2s；超时到期连接断开、那次调用拿不到判定，就会**降级成默认意图 `assistant`**
-  （2026-09-27 起（ADR-017）超时由 LLM 客户端内执行，不再用 `asyncio.wait_for` 外部取消——
-  取消会泄漏 litellm 协程，见上条；但"冷启动首次调用仍会降级"这一点不变）。审计里
-  `route_fallback` 字段记录路由层级（`none` = 降级到默认），`intent_consistency` 维度也会把
-  `degraded` 计数与警示语打出来。本地模型建议把超时上调到 8000ms 左右，或演示前先预热一次。
-- 微模型那一级（`MICRO_LLM_MODEL`）默认**未配置**，所以本地实际是"正则 → 路由 LLM → 默认意图"
-  两级。三级降级的能力在，但要配了 `MICRO_LLM_*` 才真的走三级。
-- **OTel 是预留接口，不是链路**（ADR-007 现状更正）：全仓库只有 2 个 span，
-  `opentelemetry-exporter-otlp` 未声明依赖（`uv.lock` 里 0 次），所以设了
-  `OTEL_EXPORTER_OTLP_ENDPOINT` 也只会落到 console；无 context propagation，OTel trace_id
-  与审计 trace_id 是两套 ID。真接线是标准管道工作（collector 本地 Docker 可跑），未做。
-- **PR 审查有写回，但合并是独立的经审批通道**（ADR-021）：`GitHubClient` 有
-  `create_review` / `list_reviews`（写回评论），审查链路的"需要人工复核"卡片是**通知形态**
-  （不带批准/拒绝按钮，`hitl_kind="notification"`）。**合并通道**（`CODE_REVIEW_MERGE_ENABLED=1`）
-  是独立的写操作：CI 绿 → 飞书弹审批卡片 → 人点批准 → 网关合并 → 审计。合并**必须过审批门**，
-  全程留痕（谁批的、批了什么、何时）。详见 ADR-021。
-- **HITL 回调的可信度（2026-09-23 补，ADR-013）**：① **验签真的生效了**——此前
-  `verify_verification_token` 只在**顶层**找 token，而 v2 事件把 token 放在 `header.token`，
-  于是"配了 `FEISHU_VERIFICATION_TOKEN` 却从未比对过"（旧行为是刻意 fail-open 且有测试钉住，
-  但后果是**知道 session/trace 就能批准**）；现在配了就必须对（v1 顶层 / v2 `header.token`），
-  没配则只在显式 `GATEWAY_ALLOW_INSECURE=1` 时放行。② **单次决策**：回调改为**原子认领**
-  （`pop_hitl`：GETDEL → Lua 兜底 → 内存），连点两次或并发回调只有一个生效，第二次回
-  "已失效或已被处理"——此前是"读→判断→删"三段，会**重复送达 + 写两条审计**。③ **谁批准的**
-  现在进审计（`hitl_operator`，取自 v1 顶层 `open_id` / v2 `event.operator.open_id`）；
-  审批单据的另外两个字段也补上了：**谁申请的**（`HitlRequest.applicant`）与**为什么**
-  （`HitlRequest.reason`，命中原因/失败原因），并渲染在卡片上。**刻意不加"资源/权限/期限"**——
-  那是操作审批的字段，本项目治理的是模型输出，加了就与减法清单的定位冲突。④ **审批人白名单**
-  （`HITL_APPROVER_IDS`，逗号分隔 open_id）：**非空即强制**，名单外的点击 → 403 且**不消耗**
-  挂起记录（校验在认领之前，免得无权限者把待审批点没了）；**留空 = 不校验，同一会话里任何人
-  点一下都能批准**——要防冒充就得配它。⑤ **加密模式明确不做**（2026-09-23 决定）：它需要
-  AES 解密 + `X-Lark-Signature` 校验，而这两件无法对着真实加密回调验证；原先那个
-  `FEISHU_ENCRYPT_KEY` 字段**已删除**（配了它原本也只是被静默 ignored，形同虚设），
-  现在收到加密体一律明确报 `400 encrypted_events_unsupported`。
-- **工具全失败会刹车**（ADR-014，2026-09-28 修正判据）：ReAct 把工具异常降级成 observation
-  让模型自愈是有意设计，但"**所有**工具都失败、任务却照样返回结果"的答案不该当正常交付。
-  判定是 **`tool_calls > 0 and tool_errors + tool_arg_rejections == tool_calls`**（一次都没
-  成功，不是"有失败"——部分成功仍属模型该自己收敛的情形），触发后走评估器那条已有的刹车
-  进人工；审计里 `tool_calls`/`tool_errors`/`tool_arg_rejections` 可核。
-  ⚠️ `tool_calls` 是**尝试数**（见 `TaskResult` 字段注释）：此前它被实现成**成功数**，
-  于是判据 `tool_errors == tool_calls` 反而在真·全失败时不成立——这条声称了三轮的刹车
-  在 2026-09-28 之前**从未按文档触发**过。
-- **task-LLM 降级也会刹车**（ADR-018 决策 7，2026-09-28）：`decide` / `plan` / `summarize`
-  在 LLM 调用失败或输出不是合法 JSON 时会兜底，此前这些兜底以 `status=ok` 交付——
-  "基础设施崩了"和"模型答完了"在用户看来一样。现在降级原因一路传到 pipeline，
-  走同一条评估器刹车进人工。⚠️ 这是 ADR-011 修过的**图路径**降级之外的**另一条**路径，
-  当时漏了；两条路径现在都可见。
-- **工具轮次 / ReAct 步数的上限由 `AGENT_MAX_STEPS` 单一提供**（默认 3，2026-09-24）：此前
-  这个概念有两个值——stub 工具循环写死 3，而 TaskAgent 的 ReAct 默认 8——架构图写的却是
-  "<=3 轮"。现在两处都读同一个设置，`AGENT_LLM`（拆解后端，默认 `mock`）也一并收编进
-  `app/config.py`，不再由 `task_agent.py` 直读 env；两者都进了配置单一来源守卫。
-  ⚠️ v2 的 `event.operator` 字段路径**未对着真实卡片点击验证过**（只在单测里构造过）；
-  取不到时留空、不影响审批。若真实回调被 401，看日志里的 `has_header_token`。
-- **以下几项本地无法验收**（不是没做，是缺外部条件）：① 成本量化——`avg_cost_usd` 恒 0，
-  Ollama 不计费，需要付费 provider；② `hitl_feedback` 的 join 率与指标——需要**真实流量**
-  （当前 4 条全是模拟种子，`介入率 0.0065` 无统计意义）；③ 微模型那一级——需要第二个模型端点；
-  ④ 路由冷启动不降级——需要模型常驻（`.env` 的 `ROUTER_LLM_TIMEOUT_MS` 上调到 8000 或先预热）。
-- **路由超时在 LLM 客户端内执行**（2026-09-27，ADR-017）：此前路由层用 `asyncio.wait_for`
-  从外部取消 litellm 调用——litellm（含最新 1.102.1）被外部取消时会留下未 await 的内部协程
-  （真跑 e2e 每次 100 条 `RuntimeWarning`），且取消让本地小模型热不起来。现在超时作为参数
-  传进 `LLMClient`（`litellm.Timeout` 走同一降级路径，**对外语义不变**），两处外部取消点已删。
-  验收：真跑 e2e 0 警告；一致性维度 degraded 100/100 → **0**（stable 0.95 / agreement 0.99，
-  从"全降级下的假稳定"变成真测量）；798 passed。
-- `app/vectordb` 在未配置 `VECTOR_DB_DSN` 时回退到中文 bigram 关键词检索；配置
-  pgvector + embedding 后切换到混合向量检索，并可通过 `/healthz` 观察后端状态。
-- Redis 不可用时回退内存存储，内存回退也支持幂等锁脚本（acquire/release/extend + TTL），但只保证单进程内语义。
-- 限流器为内存滑窗实现，适合单机开发；多实例需换 Redis 限流。
-- `app/memory.py` 的 `_SyncBridge` 同步桥是已知技术债：同步线程跑 asyncio loop，测试与运行时都不依赖它做时序保证。
-- 双引擎模式下的边界：LangGraph 是可选 extra，Docker 镜像默认不带（`ENGINE=langgraph` 会自动回退 FSM 并告警）；
-  图的 checkpoint 是进程内的 `InMemorySaver`，与 FSM 的 `_session_states` 同级，都不承诺跨重启恢复。
-- FSM 会话状态保存在进程内（`Engine._session_states`）→ **重启后审批失效**（见下）。多实例部署前需要把会话状态外部化：
-  `app/redis_state/store.py`（Redis 状态存储 + 内存回退）是活的（`/healthz` 用它），但**没有现成的"状态栈"可用**——
-  2026-09-23 删除了从未接入请求路径的 `stack.py`（状态栈）与 `lock.py`（幂等锁）：HITL 的幂等已改为挂起记录自身的
-  **原子认领**（`pop_hitl`，GETDEL/Lua），留着它们是"看起来有能力"的死代码；真要外部化时按当时的真实需求设计。
-  **重启后的语义是"审批失效"**
-  （ADR-012）：`HitlRequest` 在 Redis 而会话状态在进程内，重启后两者不同步，此时点旧卡片会被识别为
-  已失效——作废该记录、回复用户重新发起、审计写 `guard_action="hitl_expired"`。此前那条路径是 500 /
-  "处理审批时出错了"且重试无效（卡片变成砖）。**挂起中的审批不会跨重启存活，这是有意为之**：
-  要么接 redis_state，要么承认它只在进程生命周期内有效。
-- 预算拦截（`BUDGET_SESSION_LIMIT_USD`）的累计器在**进程内**：单实例语义正确，多实例部署需要把累计器外部化
-  （如 Redis INCR）。`limit<=0` 时只核算不拦截，请求路径零变化。
-- 上下文预算（`CONTEXT_HISTORY_BUDGET` / `CONTEXT_SUMMARY_BUDGET`，启发式估算 CJK 按字）**只裁剪随会话增长的两块
-  ——历史与摘要**：系统提示与工具描述是固定开销、不计入，因此它不承诺"总上下文绝不溢出"。默认 1024 对该窗口以下
-  的模型（如本机演示模型的 1024）仍应下调到 ~384。被裁掉的旧对话会压成一条省略摘要，不会整段失忆；
-  0 表示禁用（与引入前行为一致）。每次请求的裁剪决策写入审计的 `context_budget`
-  字段（实际键：`enabled` / `history_in` / `history_kept` / `history_dropped` /
-  `elided` / `summary_tokens` / `summary_truncated` / `budget`），可按 trace 查询。
-- 错误码语义（`app/models/errors.py`）在 webhook / chat / dashboard 三个路由统一为 `{"error": code, "message"}`；
-  **飞书事件回调例外**——平台契约要求一律 HTTP 200，错误只体现在回复文案与日志中。
-- `app/main.py` 使用 FastAPI lifespan 管理启动/关闭钩子（`on_event` 已迁移）。
-- 配置校验（`Settings.validate()`）只拦截"配置了但非法"的值（维度/端口/超时/池上下界/负预算），空值仍视为未配置；
-  `ENGINE` 的未知值保持告警回退 FSM，不做 fail-fast（降级语义见双引擎章节）。
-- 飞书/HITL 的集成用例**已全部进 CI（0 skipped）**（2026-09-23）：此前 8 条被
-  `@pytest.mark.skip` 标成"需要真实环境"，但实测它们**本来就不需要**——真正的原因是
-  `.env` 的 `FEISHU_VERIFICATION_TOKEN` 与 `VECTOR_DB_DSN` 漏进了测试进程（非 hermetic）。
-  `tests/conftest.py` 现在隔离这两个凭据（并显式开 `GATEWAY_ALLOW_INSECURE` 让路由可达），
-  8 条全部真实执行。**这条值得记一笔**：其中一条走 approve 路径，本可以抓到我上批
-  改名时漏改拒签分支造成的 `NameError`——只因为它当时是 skip 而没抓到。
-- **评测没有"本次 vs 上次"的基线对比**：`evals/reports/latest.json` 是覆盖写，且
-  `evals/reports/` 被 `.gitignore` 忽略 → 连历史快照都不入库。所以"指标有没有退化"
-  目前只能靠人肉比对，**评测结论也不回流到任何决策点**（没有机制消费它去改 prompt/策略/路由）。
-  这是"改进闭环"缺失的核心证据，不是遗漏。
-- **审计字段的单一来源**（2026-09-24）：字段集合由 `AuditEntry.to_audit_dict()` 唯一提供，
-  WAL 与 ES 两个 sink 都从它取。此前两处**各自手写白名单**，于是新加的字段在落盘时被静默
-  丢弃——`route_fallback` / `tool_calls` / `tool_errors` / `context_budget` / `retry_count` /
-  `retry_reason` / `hitl_kind` / `hitl_operator` 全部只进了内存对象，而本文档已声称它们可查
-  （`app/services/audit_stats.py` 甚至一直在读从未落盘的 `violation` / `hitl_duration_ms`）。
-  `tests/unit/test_audit_field_coverage.py` 现在守住"每个字段都落盘"，并自测该守卫会红。
-  两个 sink 的**唯一**表示差异：WAL 日志行不落 `agent_output` 全文（只留 `agent_output_len`）
- 以控制体积，ES 保留全文以便检索。
-- **多 Agent 协作链路的边界**（ADR-022）：① **不进意图路由**——它是显式入口
-  （`POST /api/v1/collab` + CLI），不是请求主路径的一站，接路由要改 `INTENT_AGENT_MAP`
-  与 `_AGENT_KEYS` 自检，属独立议题；② **不驱动会话 FSM**——协作挂起活在 LangGraph
-  checkpoint 里，由 `resume()` 放行，飞书卡片回调**不**服务协作（它驱动 FSM，对协作会话
-  只会得到"已失效"）；③ `depends_on` **只记录不调度**——当前图把所有 pending 子任务
-  一次性 fan-out，不按拓扑排序；④ checkpointer 是进程内 `InMemorySaver`，可注入但未接
-  Redis/Postgres；⑤ `COLLAB_LLM=litellm` 走已配置的 LLM，解析失败会降级到规则式 mock
-  （ADR-018 姿势：协作抽风不该让链路崩）。
-- **检索精排默认关闭**（`RERANK_ENABLED=false`）：固定语料只有 12 个 chunk、gold set 只有
-  23 条，度量能跑通但不足以支撑"更准"的宣称；实测 base vs `DeterministicLexicalReranker`
-  六项 delta 无一为正，详见 [docs/retrieval-evaluation.md](docs/retrieval-evaluation.md)。
-  CI 只门禁"检索维度真的跑过"，**不设质量阈值**（一行标注就是 4.3 个百分点），加入条件写在同一文档里。
-- 所有密钥通过环境变量注入，`.env`、`logs/`、`data/`、`evals/reports/` 不入库。
+<div align="center">
+<sub><b>Python 3.12 · FastAPI · LangGraph · Redis · pgvector · Elasticsearch · uv</b></sub>
+<br>
+<sub>本 README 的每个定量声明都可用上文命令在本地复现 · 架构决策归档于 docs/adr/（21 份）</sub>
+</div>

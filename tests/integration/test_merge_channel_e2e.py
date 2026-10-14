@@ -97,15 +97,16 @@ async def test_ci_red_then_green_produces_approval_card() -> None:
         )
     )
     poller_red = MergePoller(store, fake_gh_red)
-    results_red = await poller_red.poll_once()
-    assert len(results_red) == 0  # CI 红不发卡
+    result_red = await poller_red.poll_once()
+    assert len(result_red.approvals) == 0  # CI 红不发审批卡
+    assert len(result_red.ci_failures) == 1  # 但要发失败卡（验收 2）
 
     # 第二次轮询：CI 绿
     fake_gh_green = _FakeGitHub(ci_status=CiStatus(state=CI_SUCCESS))
     poller_green = MergePoller(store, fake_gh_green)
-    results_green = await poller_green.poll_once()
-    assert len(results_green) == 1  # CI 绿发卡
-    assert results_green[0].state == MergeState.AWAITING_APPROVAL.value
+    result_green = await poller_green.poll_once()
+    assert len(result_green.approvals) == 1  # CI 绿发卡
+    assert result_green.approvals[0].state == MergeState.AWAITING_APPROVAL.value
 
 
 @pytest.mark.asyncio
@@ -125,13 +126,16 @@ async def test_ci_red_pushes_failing_job_names() -> None:
         )
     )
     poller = MergePoller(store, fake_gh)
-    await poller.poll_once()
+    result = await poller.poll_once()
+
+    # 轮询器必须把"CI 红"这条记录交出来给 worker 发卡——否则 notifier 的能力
+    # 在真实运行中永远不会被调用（这正是修复前的缺陷）。
+    assert len(result.ci_failures) == 1
+    updated = result.ci_failures[0]
 
     # 发 CI 红卡片
     sender = _FakeCardSender()
     notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
-    updated = store.get(record.identity)
-    assert updated is not None
     await notifier.send_ci_failure_card(updated)
 
     assert len(sender.sent_cards) == 1

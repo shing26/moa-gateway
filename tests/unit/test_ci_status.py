@@ -84,6 +84,27 @@ class TestAggregate:
     def test_commit_status_pending(self) -> None:
         assert aggregate_ci_status([_run("a")], {"state": "pending"}).state == CI_PENDING
 
+    def test_empty_commit_status_is_not_a_check(self) -> None:
+        """GitHub 对**没有任何 status** 的 commit 也返回 ``state=pending``。
+
+        回归用例（2026-10-09）：真实 PR #1 的 ``test=success`` + ``docker=skipped``
+        被这条假 pending 拖成 ``CI_PENDING``，轮询器再把它当红，于是记录卡在
+        ``ci_failed``。``total_count=0`` 时这条 status 不存在，不该参与判定。
+        """
+        got = aggregate_ci_status(
+            [_run("test"), _run("docker", conclusion="skipped")],
+            {"state": "pending", "total_count": 0, "statuses": []},
+        )
+        assert got.state == CI_SUCCESS
+
+    def test_real_commit_status_still_counts(self) -> None:
+        """``total_count>0`` 的 pending 是真实的进行中，不能被当成空跳过。"""
+        got = aggregate_ci_status(
+            [_run("test")],
+            {"state": "pending", "total_count": 1, "statuses": []},
+        )
+        assert got.state == CI_PENDING
+
     def test_commit_status_error_is_failure(self) -> None:
         assert aggregate_ci_status([_run("a")], {"state": "error"}).state == CI_FAILURE
 

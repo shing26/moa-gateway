@@ -167,9 +167,37 @@ def _safe_json(text: str) -> dict[str, Any]:
         return {"raw": text}
 
 
-def _agent_result(agent: str, trace_id: str, raw: str) -> AgentFindingResult:
+def _agent_result(agent: str, trace_id: str, raw: Any) -> AgentFindingResult:
+    """把各agent 的产出归一成 AgentFindingResult。
+
+    两种输入形态：
+    - ``AgentFindingResult``：已经是结构化结果的（例如 ``ReportAgent.execute`` 内部
+      ``_parse_report`` 已按 severity 推断出 ``need_human_review``）。**必须原样透传**。
+    - ``str``：其余agent 返回的 JSON 文本，在此解析。
+
+    历史缺陷：此前本函数只接受 str，把已经算好的 ``AgentFindingResult`` 也丢进
+    ``json.loads()``，异常后走 ``{"raw": ...}`` 分支——findings 全丢、summary 空、
+    ``need_human_review`` 恒为 False。于是 ``ReportAgent._infer_hitl`` 依据
+    critical/high/medium 推断出的结果被静默丢弃，五个agent 无论报多严重的问题
+    都不会触发人工复核。
+    """
+    if isinstance(raw, AgentFindingResult):
+        return raw
+    data = _safe_json(raw)
+    # _safe_json 对无法解析的文本返回 {"raw": ...} 而不抛异常。若不显式识别，
+    # 一次"agent 返回垃圾"会被静默当成"零发现 + 不需复核"——最危险的一种失败：
+    # 上游模型出问题，下游审计却显示一切正常。解析失败必须升级为人工复核。
+    if "raw" in data and "findings" not in data:
+        logger.warning("%s returned unparsable payload; escalating to human review", agent)
+        return AgentFindingResult(
+            agent=agent,
+            trace_id=trace_id,
+            findings=(),
+            summary="parse failed",
+            recommendation="comment",
+            need_human_review=True,
+        )
     try:
-        data = _safe_json(raw)
         findings = []
         for item in data.get("findings", []):
             findings.append(Finding(
@@ -191,7 +219,7 @@ def _agent_result(agent: str, trace_id: str, raw: str) -> AgentFindingResult:
             findings=tuple(findings),
             summary=str(data.get("summary", "")),
             recommendation=str(data.get("recommendation", "comment")),
-            need_human_review=False,
+            need_human_review=bool(data.get("need_human_review", False)),
         )
     except Exception as exc:
         logger.warning("parse %s result failed: %s", agent, exc)

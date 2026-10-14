@@ -112,12 +112,16 @@ async def _process_hitl_card(
             return
         # ADR-021 合并审批分叉：merge_approval 不走聊天 FSM，直接执行合并
         if hitl.hitl_kind == "merge_approval":
+            # 提前把 outcome 落定，否则 finally 那条 "card_action closed" 会打印
+            # 初始值 hitl_not_found——成功合并的日志看起来像"没找到审批"（误导排查）。
+            outcome = f"merge_{action}"
             return await _handle_merge_approval(
                 hitl_id=hitl_id,
                 action=action,
                 operator_id=operator_id,
                 session_id=session_id,
                 trace_id=trace_id,
+                created_at=hitl.created_at,
             )
         ctx, expired = await engine.decide_hitl(
             session_id=session_id, trace_id=trace_id, approve=(action == "approve"),
@@ -307,11 +311,17 @@ async def _handle_merge_approval(
     operator_id: str,
     session_id: str,
     trace_id: str,
+    created_at: float = 0.0,
 ) -> JSONResponse:
-    """ADR-021 合并审批回调：执行合并并写审计。
+    """ADR-021 合并审批回调：执行合并、写审计、**把结果回给发起人**。
 
     **不走** ``engine.decide_hitl()``：合并审批是独立的写操作，与聊天 FSM 的
     会话状态无关。
+
+    ``session_id`` 是卡片回调里的 ``chat_id``（见 ``feishu_event`` 的
+    ``parsed["chat_id"]``），可以直接当 ``_safe_send`` 的收件人。此前本函数收下它
+    却从不发消息，成功路径只返回一个飞书不认识的 JSON——人点了"批准"，合并确实
+    执行了，但**界面上什么也不会发生**（2026-10-09 实测）。
     """
     from apps.code_review_pipeline.task_audit import record_human_decision
 
@@ -320,28 +330,50 @@ async def _handle_merge_approval(
         outcome = await executor.execute(hitl_id, action, operator_id)
     except Exception as exc:
         logger.exception("merge approval execution failed: %s", exc)
+        await _safe_send(session_id, f"⚠️ 合并执行失败：{exc}", trace_id)
         return JSONResponse(
             {"error": "merge_execution_failed", "message": str(exc)},
             status_code=500,
         )
 
-    # 写审计：谁批的、批了什么
+    # 写审计：谁批的、批了什么、从挂起到决定花了多久。duration 与
+    # /webhook/callback 同一语义——dashboard 的"人工审批耗时分布"读的就是它。
+    duration_ms = (
+        round((time.time() - created_at) * 1000, 1) if created_at > 0 else 0.0
+    )
     try:
         await record_human_decision(
             task_id=hitl_id,
             repo=hitl_id.split("#")[0],
             operator=operator_id,
             decision=action,
+            duration_ms=duration_ms,
         )
     except Exception:
         logger.exception("failed to record human decision for %s", hitl_id)
 
     if outcome.merged:
+        logger.info("merge approval done: %s merged as %s", hitl_id, outcome.sha)
+        await _safe_send(
+            session_id,
+            f"✅ 已批准，PR 已合并\n{hitl_id}\nmerge sha: {outcome.sha}",
+            trace_id,
+        )
         return JSONResponse({
             "trace_id": trace_id,
             "status": "merged",
             "sha": outcome.sha,
         })
+    if outcome.status == "rejected":
+        logger.info("merge approval done: %s rejected by %s", hitl_id, operator_id)
+        await _safe_send(session_id, f"❌ 已拒绝，未合并\n{hitl_id}", trace_id)
+    else:
+        logger.warning("merge approval failed: %s status=%s", hitl_id, outcome.status)
+        await _safe_send(
+            session_id,
+            f"⚠️ 合并失败：{outcome.message or outcome.status}\n{hitl_id}",
+            trace_id,
+        )
     return JSONResponse({
         "trace_id": trace_id,
         "status": outcome.status,

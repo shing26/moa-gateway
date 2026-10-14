@@ -10,7 +10,11 @@
 ## 0. 交接摘要（30 秒版）
 
 - 仓库：`D:\HermesData\moa-gateway`（Windows，bash shell）
-- 现状：FastAPI 多 Agent 网关 + GitHub PR 审查子应用，362 测试通过 / 1 失败 / 9 跳过
+- 现状：FastAPI 多执行体网关（意图路由**分发**，非 agent 间协同）+ GitHub PR 审查子应用。
+  > ⚠️ 本文件的测试基线（362 passed）停留在 2026-08，现已过期。
+  > 2026-10-12 实测：`pytest tests/unit -q` → **1085 passed / 4 skipped**；
+  > `pytest tests/ --collect-only` → 1125 collected。全量跑需本机 Postgres，
+  > 否则 integration 会因 `psycopg ConnectionTimeout` 失败（环境问题，非缺陷）。
 - 任务：5 个 Phase —— 换 LiteLLM 内核、加 Eval 评估体系、工程化 CI、PR 审查演示接入、README 包装
 - 硬约束：不推倒重来、不删依赖、先处理未提交改动、不提交密钥
 - 失败测试根因已定位：`app/agents/provider.py` 空 env 值崩溃（Phase 0 修）
