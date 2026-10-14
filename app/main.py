@@ -24,6 +24,7 @@ from app.routes.feishu import router as feishu_router
 from app.routes.health import router as health_router
 from app.routes.webhook import webhook_router
 from app.routes.knowledge import router as knowledge_router
+from apps.code_review_pipeline.merge_preflight import merge_channel_readiness
 from apps.code_review_pipeline.routing.github_review_route import github_review_router
 
 
@@ -50,6 +51,16 @@ async def lifespan(_: FastAPI):
         logger.warning("opentelemetry tracing init failed")
     init_feishu()
     init_prompts()
+    # 合并通道最坏的失败形状是"静默不生效"：进程都活着、日志没有 error，只是卡片
+    # 永远不来，或人点了"批准"得到一句"已失效"。启用时把前置条件在启动日志里逐条
+    # 说清楚；通道关闭时这里一行都不打，默认部署的启动日志保持干净。
+    for problem in merge_channel_readiness(
+        enabled=settings.code_review_merge_enabled,
+        channel=settings.code_review_merge_channel,
+        feishu_configured=bool(settings.feishu_app_id and settings.feishu_app_secret),
+        session_store=engine.session_store,
+    ):
+        logger.error("合并通道自检未通过：%s", problem)
     # 先开存储：obsidian_sync 会往知识库写入。DSN 未配置时这是空操作。
     await vector_client.start()
     await obsidian_sync.start()

@@ -101,6 +101,41 @@ services:
     # worker 崩了要能自己起来——"进程会挂"正是这套底座要处理的场景之一。
     restart: unless-stopped
 
+  # 合并通道的 worker（ADR-021）：轮询 PR 的 CI 状态，绿了推审批卡片。
+  #
+  # 单独一个进程而不是塞进网关：合并通道与请求路径的失败域不同，且它需要
+  # CODE_REVIEW_MERGE_ENABLED=1 才该存在。用 profile 隔离，默认 `up -d` 不会
+  # 起它；要用时 `docker compose -f docker-compose.dev.yml --profile merge up -d`。
+  #
+  # 与网关共用同一个 Postgres（merge_store）与 Redis（HITL 待批记录）——少了
+  # 任何一个，通道会静默不生效：worker 建的记录网关看不见，或卡片点了"已失效"。
+  # 网关启动时会自检这两条并在日志里报出来。
+  merge_worker:
+    build: .
+    profiles: ["merge"]
+    command: ["python", "-m", "app.merge_worker"]
+    environment:
+      - ENV=dev
+      - MOA_ENV=dev
+      - REDIS_URL=redis://redis:6379/0
+      - VECTOR_DB_DSN=postgresql://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
+      - CODE_REVIEW_DATABASE_URL=postgresql://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
+      - CODE_REVIEW_MERGE_ENABLED=1
+      - CODE_REVIEW_MERGE_CHANNEL=${CODE_REVIEW_MERGE_CHANNEL:-}
+      - CODE_REVIEW_MERGE_POLL_INTERVAL_S=${CODE_REVIEW_MERGE_POLL_INTERVAL_S:-60}
+      # 建表归网关；worker 只是消费者（与 app.worker 同一理由）。
+      - CODE_REVIEW_AUTO_MIGRATE=0
+      - FEISHU_APP_ID=${FEISHU_APP_ID:-}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GATEWAY_ALLOW_INSECURE=${GATEWAY_ALLOW_INSECURE:-0}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   omniroute:
     image: diegosouzapw/omniroute:latest
     profiles: ["base"]

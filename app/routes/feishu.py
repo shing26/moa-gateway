@@ -227,7 +227,6 @@ async def feishu_event(request: Request):
 
     parsed = parse_feishu_event(body)
     logger.info("feishu_event_parsed event_type=%s body=%s", parsed["event_type"], json.dumps(body, ensure_ascii=False))
-    print(f"[PARSE] event_type={parsed['event_type']!r} body={json.dumps(body, ensure_ascii=False)[:1000]}")
 
     if parsed["event_type"] == "url_verification":
         return JSONResponse({"challenge": parsed["challenge"]})
@@ -237,7 +236,6 @@ async def feishu_event(request: Request):
         trace_id = action_value.get("trace_id", "")
         session_id = parsed.get("chat_id", "")
         logger.info("card_action action=%s trace_id=%s chat_id=%s", action, trace_id, session_id)
-        print(f"[CARD_ACTION] action={action!r} trace_id={trace_id!r} chat={session_id!r}")
 
         if action in ("approve", "reject"):
             # 飞书卡片回调有 3 秒响应窗口：真正的 HITL 闭环（FSM 推进、输出

@@ -234,6 +234,17 @@ class TestSessionStoreRedis:
         store.remove_hitl("trace-1")
         assert store.get_hitl("trace-1") is None
 
+    def test_using_memory_reports_connect_failure(self):
+        """读一次之后才暴露降级状态——合并通道启动自检靠它判断是否真的跨进程。"""
+        storage = RedisHitlStorage(client=FakeRedisClient(fail_ping=True))
+        storage.get("moa:hitl:probe")
+        assert storage.using_memory is True
+
+    def test_using_memory_reports_healthy_connection(self):
+        storage = RedisHitlStorage(client=FakeRedisClient())
+        storage.get("moa:hitl:probe")
+        assert storage.using_memory is False
+
     def test_default_storage_is_memory(self):
         store = SessionStore()
         req = _hitl()

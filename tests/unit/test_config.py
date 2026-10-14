@@ -31,6 +31,8 @@ def _clean_env(monkeypatch):
         "GATEWAY_PORT",
         "APP_PORT",
         "GATEWAY_ALLOW_INSECURE",
+        "CODE_REVIEW_MERGE_ENABLED",
+        "CODE_REVIEW_MERGE_CHANNEL",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -239,3 +241,27 @@ def test_sentinel_garbage_entries_warn_but_boot(monkeypatch, caplog):
     assert s.redis_sentinel_hosts == [("a", 26379)]
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 2
+
+
+def test_merge_enabled_without_shared_db_raises(monkeypatch):
+    """合并通道由独立 worker 进程轮询，内存实现下两个进程各持一份状态。
+
+    配置成这个组合时通道**永远不会推进**，而且不报错——只是不动。所以要在
+    启动时就当作非法配置拒掉，而不是留给人去猜。
+    """
+    monkeypatch.setenv("CODE_REVIEW_MERGE_ENABLED", "1")
+    with pytest.raises(ValueError, match="共享"):
+        Settings()
+
+
+def test_merge_enabled_with_shared_db_boots(monkeypatch):
+    monkeypatch.setenv("CODE_REVIEW_MERGE_ENABLED", "1")
+    monkeypatch.setenv(
+        "CODE_REVIEW_DATABASE_URL", "postgresql://u:p@localhost:5432/gateway"
+    )
+    assert Settings().code_review_merge_enabled is True
+
+
+def test_merge_disabled_without_db_still_boots(monkeypatch):
+    """默认关闭时不该因为没配库就拒绝启动。"""
+    assert Settings().code_review_merge_enabled is False

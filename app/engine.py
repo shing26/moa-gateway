@@ -89,6 +89,16 @@ class RedisHitlStorage:
     def key(trace_id: str) -> str:
         return f"{RedisHitlStorage.KEY_PREFIX}:{trace_id}"
 
+    @property
+    def using_memory(self) -> bool:
+        """是否已降级为进程内存实现。
+
+        合并通道的启动自检用它回答"待批记录到底能不能被另一个进程认领"——降级之后
+        就认领不到，而这件事本来只体现在一条 ``logger.critical`` 里。判定发生在
+        **第一次操作时**，所以调用方要先真的读一次再问。
+        """
+        return self._using_memory
+
     def _resolve(self) -> Any:
         if not self._using_memory and self._connected:
             return self._client

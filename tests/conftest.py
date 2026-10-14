@@ -45,6 +45,13 @@ os.environ["CODE_REVIEW_AUTO_MIGRATE"] = "1"
 for name in ("GATEWAY_PORT", "APP_PORT"):
     os.environ[name] = ""
 
+# 合并通道开关同理：开发机 .env 若开着 CODE_REVIEW_MERGE_ENABLED 而本文件又把
+# 数据库 DSN 置空，config 的"启用合并通道必须有共享库"这条校验会在 import 期
+# raise，把整个测试进程炸掉（本机 .env 就是这么配的，实测踩到）。测试要验这条
+# 校验时各自 monkeypatch 显式设。
+for name in ("CODE_REVIEW_MERGE_ENABLED", "CODE_REVIEW_MERGE_CHANNEL"):
+    os.environ[name] = ""
+
 # 飞书回调的验签凭据同理：不置空的话，开发机 .env 里配好的
 # FEISHU_VERIFICATION_TOKEN 会让 /feishu/event 在测试里要求 body 携带 token，
 # 于是 5 条路由用例（构造的是不带 token 的 v2 事件）会 401 —— 这正是它们此前

@@ -360,6 +360,16 @@ class Settings:
                 f"CODE_REVIEW_MERGE_POLL_INTERVAL_S 必须为正整数，"
                 f"得到 {self.code_review_merge_poll_interval_s}"
             )
+        # 合并通道由**独立 worker 进程**轮询（app/merge_worker.py），网关与 worker
+        # 各建一份 merge_store。无共享 DSN 时两边都是进程内存，worker 看不到网关
+        # 建的记录，通道永远不动、也不报错。这是"配了却静默不生效"，所以在启动时
+        # 当作非法配置拒掉。
+        if self.code_review_merge_enabled and not self.vector_db_dsn:
+            raise ValueError(
+                "CODE_REVIEW_MERGE_ENABLED=1 需要共享数据库："
+                "请配置 VECTOR_DB_DSN 或 CODE_REVIEW_DATABASE_URL。"
+                "合并通道的 worker 与网关是两个进程，内存实现下状态不共享，通道不会推进"
+            )
         if self.rerank_enabled and not self.rerank_base_url:
             raise ValueError(
                 "RERANK_ENABLED=1 时必须配置 RERANK_BASE_URL；"

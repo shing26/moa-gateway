@@ -217,6 +217,59 @@ function Ensure-Gateway {
     return $false
 }
 
+function Test-MergeChannelEnabled {
+    # 合并通道（ADR-021）开着才需要 merge worker。这里只读 .env，不加载 settings：
+    # 本脚本是宿主侧运维脚本，不该 import 应用（那会把 .env 读成进程配置）。
+    #
+    # 接受集合必须与 app/config.py 的 _parse_bool 对齐（1 / true，大小写不敏感）。
+    # 只认 "=1" 的话，写 CODE_REVIEW_MERGE_ENABLED=true 的人会得到"应用开了通道、
+    # 脚本不起 worker"——正是 test_config_consistency.py 立起来防的那类分叉。
+    $envFile = Join-Path $RepoRoot ".env"
+    if (-not (Test-Path $envFile)) { return $false }
+    $line = Select-String -Path $envFile -Pattern "^\s*CODE_REVIEW_MERGE_ENABLED\s*=\s*(1|true)\s*$" |
+        Select-Object -First 1
+    return [bool]$line
+}
+
+function Get-MergeWorkerProcesses {
+    # 按命令行匹配，而不是按"python.exe 数量"——本机还跑着别的 Python 服务。
+    Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -match 'app\.merge_worker' }
+}
+
+function Ensure-MergeWorker {
+    if (-not (Test-MergeChannelEnabled)) {
+        Write-Host "  [ok] 合并通道未启用（CODE_REVIEW_MERGE_ENABLED=1 才需要 merge worker）"
+        return $true
+    }
+    $existing = @(Get-MergeWorkerProcesses)
+    if ($existing.Count -gt 0) {
+        Write-Host "  [ok] merge worker 已在运行 (pid $($existing[0].ProcessId))"
+        return $true
+    }
+    $python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+    if (-not (Test-Path $python)) { Write-Host "  [!!] 缺少 .venv\Scripts\python.exe（先 uv sync）"; return $false }
+    Write-Host "  [..] 启动 merge worker（轮询合并通道 CI）"
+    Start-Process -FilePath $python -ArgumentList "-m", "app.merge_worker" -WorkingDirectory $RepoRoot -WindowStyle Hidden `
+        -RedirectStandardOutput (Join-Path $LogDir "merge_worker.out.log") `
+        -RedirectStandardError (Join-Path $LogDir "merge_worker.err.log")
+    for ($i = 0; $i -lt 10; $i++) {
+        if (@(Get-MergeWorkerProcesses).Count -gt 0) {
+            Write-Host "  [ok] merge worker 就绪"; return $true
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    Write-Host "  [!!] merge worker 未起来，看 logs\merge_worker.err.log"
+    return $false
+}
+
+function Stop-MergeWorker {
+    $procs = @(Get-MergeWorkerProcesses)
+    if ($procs.Count -eq 0) { Write-Host "  [ok] merge worker 未在运行"; return }
+    foreach ($p in $procs) { taskkill /F /PID $p.ProcessId | Out-Null }
+    Write-Host "  [ok] merge worker 已停止"
+}
+
 switch ($Action) {
     "status" {
         Write-Host "moa-gateway 依赖栈状态："
@@ -224,9 +277,15 @@ switch ($Action) {
         Write-Host ("  postgres {0}: {1}" -f $PostgresPort, $(if (Test-Port $PostgresPort) { "UP" } else { "DOWN" }))
         Write-Host ("  ollama  {0}: {1}" -f $OllamaPort, $(if (Test-Http "http://127.0.0.1:$OllamaPort/api/tags") { "UP" } else { "DOWN" }))
         Write-Host ("  gateway {0}: {1}" -f $GatewayPort, $(if (Test-Http "http://127.0.0.1:$GatewayPort/health") { "UP" } else { "DOWN" }))
+        if (Test-MergeChannelEnabled) {
+            $mw = @(Get-MergeWorkerProcesses)
+            $mwState = if ($mw.Count -gt 0) { "UP (pid $($mw[0].ProcessId))" } else { "DOWN" }
+            Write-Host ("  merge    : {0}" -f $mwState)
+        }
     }
     "stop" {
         if (-not (Stop-GatewayProcess $GatewayPort)) { exit 1 }
+        Stop-MergeWorker
         Push-Location $RepoRoot
         docker compose -f docker-compose.dev.yml stop redis postgres | Out-Null
         Pop-Location
@@ -234,11 +293,14 @@ switch ($Action) {
     }
     "restart" {
         if (-not (Stop-GatewayProcess $GatewayPort)) { exit 1 }
+        Stop-MergeWorker
         Write-Host "  [..] 重新拉起依赖与网关"
         $ok = $true
         $ok = (Ensure-Containers) -and $ok
         $ok = (Ensure-Ollama) -and $ok
         $ok = (Ensure-Gateway) -and $ok
+        # 网关先起：合并通道的表由网关启动迁移建，worker 只是消费者。
+        $ok = (Ensure-MergeWorker) -and $ok
         if ($ok) { Write-Host "重启完成：http://127.0.0.1:$GatewayPort/healthz" }
         else { Write-Host "有组件未就绪，见上面标记 [!!] 的行"; exit 1 }
     }
@@ -248,6 +310,7 @@ switch ($Action) {
         $ok = (Ensure-Containers) -and $ok
         $ok = (Ensure-Ollama) -and $ok
         $ok = (Ensure-Gateway) -and $ok
+        $ok = (Ensure-MergeWorker) -and $ok
         if ($ok) { Write-Host "全部就绪：http://127.0.0.1:$GatewayPort/healthz" }
         else { Write-Host "有组件未就绪，见上面标记 [!!] 的行"; exit 1 }
     }
