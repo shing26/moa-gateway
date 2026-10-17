@@ -9,6 +9,7 @@ build
 /*
 !/*/
 !.gitignore
+!.gitattributes
 !.env.template
 !.dockerignore
 # 领域术语表：`/*` 会忽略所有根文件，必须逐个放行（与 .env.template 同理）

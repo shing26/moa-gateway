@@ -1,0 +1,17 @@
+{
+  "task_id": "bd4f186",
+  "base_commit": "48b7afaee14c300b06bd9b2675d1855ecb1c390c",
+  "difficulty": "难",
+  "source": "E1",
+  "note": "基线 commit 是修复 commit 的父提交。修复内容见 bd4f186.solution.patch（含 ADR-019 补记，按设计口径允许），判据见 bd4f186.test.patch。验证命令钉住交错写者用例——fail-first 实测 `AttributeError: app.audit.wal has no attribute '_WRITER_ID'`：修复引入的每写者标识在基线不存在，用例因此停在修复面上（该用例的行为断言要求交错写入不被判断裂）。",
+  "verify_command": [
+    "{python}",
+    "-m",
+    "pytest",
+    "tests/unit/test_audit_chain.py::test_two_writers_interleaved_do_not_report_a_break",
+    "-q"
+  ],
+  "test_paths": [
+    "tests/unit/test_audit_chain.py"
+  ]
+}

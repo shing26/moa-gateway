@@ -19,10 +19,12 @@ from bench.agent.types import AgentRun, Budget, RunResult
 from bench.arms import resolve_arm
 from bench.harness.runner import (
     InvalidTaskError,
+    TaskSpec,
     load_task,
     run_task,
     write_result,
 )
+from bench.harness.verify import run_command
 from bench.harness.workspace import (
     collect_patch,
     git,
@@ -248,6 +250,135 @@ async def test_end_to_end_only_editing_tests_fails(tmp_path: Path) -> None:
 
     result = await run_task(
         spec=spec(),
+        agent_factory=factory,
+        repo=ROOT,
+        workdir=tmp_path / "work",
+        budget=Budget(max_cost_usd=1.0, max_steps=10),
+    )
+    assert result.outcome == "fail"
+    assert result.patch_touched_tests is True
+
+
+# ── 其余 E1 任务（票 01：任务集扩容到易 / 中 / 难三档）────────────────────────
+
+#: task_id → 修复 commit。task.json 里的 base_commit 是它的父提交；两个 patch 由该
+#: commit 按 tests/ 路径拆开，运行期不再读原始 commit。
+EXTRA_FIX_COMMITS = {
+    "a746b81": "a746b816bca7fbce6911d7133bb051bc66e7ea9d",
+    "0896629": "0896629257aa5c282d9e54460c5b1b3ff88e0192",
+    "bd4f186": "bd4f186522a5b23a88cbf70304f8bac699b9311b",
+    "60c64ed": "60c64edb7987379cda18e9a4ff9862b939ef8333",
+}
+EXTRA_TASK_IDS = sorted(EXTRA_FIX_COMMITS)
+
+
+def extra_spec(task_id: str) -> TaskSpec:
+    return load_task(ROOT / "bench" / "tasks" / f"{task_id}.task.json")
+
+
+def _solution_files(task_id: str) -> list[str]:
+    """solution patch 改过的文件路径（四条候选都在改既有文件，没有新增/删除）。"""
+    patch = (ROOT / "bench" / "tasks" / f"{task_id}.solution.patch").read_text(
+        encoding="utf-8"
+    )
+    return [
+        line.split(" b/", 1)[1]
+        for line in patch.splitlines()
+        if line.startswith("diff --git ")
+    ]
+
+
+def _pinned_nodeid(task: TaskSpec) -> str:
+    return next(token for token in task.verify_command if "::" in token)
+
+
+@pytest.mark.parametrize("task_id", EXTRA_TASK_IDS)
+def test_extra_tasks_fail_first_fails_on_the_fix_surface(
+    tmp_path: Path, task_id: str
+) -> None:
+    """基线上任务必须失败，且失败的是钉住的那条判据——不是收集错误。
+
+    pytest 退出码 1 = 有测试失败；收集错误是 2、一条都没收集到是 5。再要求失败摘要里
+    出现钉住的 nodeid，才挡得住"import 挂了也算 fail-first"这条假阳性。
+    """
+    task = extra_spec(task_id)
+    workspace = materialize(
+        repo=ROOT,
+        base_commit=task.base_commit,
+        test_patch=task.test_patch,
+        dest=tmp_path / task_id,
+    )
+    # solution patch 必须能应用到 git archive 出来的基线（handoff 条款 5）。这里顺带
+    # 检，是因为工作区已经物化好了，git apply --check 几乎不花时间。
+    solution_patch = ROOT / "bench" / "tasks" / f"{task_id}.solution.patch"
+    applied = git(["apply", "--check", str(solution_patch)], cwd=workspace, check=False)
+    assert applied.returncode == 0, applied.stderr
+    result = run_command(task.argv, cwd=workspace)
+    assert result.exit_code == 1, result.output
+    assert f"FAILED {_pinned_nodeid(task)}" in result.output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_id", EXTRA_TASK_IDS)
+async def test_extra_tasks_end_to_end_real_fix_passes(
+    tmp_path: Path, task_id: str
+) -> None:
+    """scripted agent 按 solution patch 写回全部文件 → 判决 pass。"""
+    task = extra_spec(task_id)
+    commit = EXTRA_FIX_COMMITS[task_id]
+    files = _solution_files(task_id)
+    contents = {path: _show(f"{commit}:{path}") for path in files}
+
+    def factory(*, workspace: Path, tools) -> LLMBackedAgent:
+        turns = [
+            ScriptedTurn(
+                tool="write_file",
+                arguments={"path": path, "content": contents[path]},
+                cost_usd=0.001,
+            )
+            for path in files
+        ]
+        turns.append(ScriptedTurn(final="已修好", cost_usd=0.001))
+        return LLMBackedAgent(ScriptedLLM(turns), tools)
+
+    result = await run_task(
+        spec=task,
+        agent_factory=factory,
+        repo=ROOT,
+        workdir=tmp_path / "work",
+        budget=Budget(max_cost_usd=1.0, max_steps=10),
+    )
+    assert result.outcome == "pass", result.verdict_output
+    assert result.agent_run.status == "completed"
+    assert result.fail_first_exit_code != 0
+    assert result.patch_touched_tests is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_id", EXTRA_TASK_IDS)
+async def test_extra_tasks_end_to_end_only_editing_tests_fails(
+    tmp_path: Path, task_id: str
+) -> None:
+    """只改测试文件的"修复"必须被判 fail：还原之后判据还在。"""
+    task = extra_spec(task_id)
+    target = task.test_paths[0]
+
+    def factory(*, workspace: Path, tools) -> LLMBackedAgent:
+        turns = [
+            ScriptedTurn(
+                tool="write_file",
+                arguments={
+                    "path": target,
+                    "content": "def test_trivial():\n    pass\n",
+                },
+                cost_usd=0.001,
+            ),
+            ScriptedTurn(final="改好了", cost_usd=0.001),
+        ]
+        return LLMBackedAgent(ScriptedLLM(turns), tools)
+
+    result = await run_task(
+        spec=task,
         agent_factory=factory,
         repo=ROOT,
         workdir=tmp_path / "work",

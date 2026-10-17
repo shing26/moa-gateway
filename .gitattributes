@@ -1,0 +1,4 @@
+# 任务 patch 的上下文是 blob 原文（LF）。本机 core.autocrlf=true 时 checkout 会把它们
+# 转成 CRLF，而 `git apply` 对 CRLF 上下文直接 "patch does not apply"（实测）——
+# 于是 harness 的 materialize 会失败。这里显式钉成 LF，别让平台默认值决定任务能不能跑。
+bench/tasks/*.patch text eol=lf

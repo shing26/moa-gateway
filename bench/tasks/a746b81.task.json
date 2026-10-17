@@ -1,0 +1,17 @@
+{
+  "task_id": "a746b81",
+  "base_commit": "7d3f0cfe6994e1344c8ab923f784a2c46f028d6a",
+  "difficulty": "易",
+  "source": "E1",
+  "note": "基线 commit 是修复 commit 的父提交。修复内容见 a746b81.solution.patch，判据见 a746b81.test.patch（两者由该 commit 按 tests/ 路径拆开）。验证命令钉住新增文件里的默认值用例——fail-first 实测在 `GitHubClient()._client.trust_env is True` 处断言失败，落在修复面（默认直连）上。",
+  "verify_command": [
+    "{python}",
+    "-m",
+    "pytest",
+    "tests/unit/test_github_client_trust_env.py::test_defaults_to_direct_connection",
+    "-q"
+  ],
+  "test_paths": [
+    "tests/unit/test_github_client_trust_env.py"
+  ]
+}

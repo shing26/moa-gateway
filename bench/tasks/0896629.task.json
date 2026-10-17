@@ -1,0 +1,17 @@
+{
+  "task_id": "0896629",
+  "base_commit": "988fccbb242be0573f4e42f05118276884272bf3",
+  "difficulty": "易",
+  "source": "E1",
+  "note": "基线 commit 是修复 commit 的父提交（恰好是已有的 988fccb 任务那个 commit，两个任务各自独立物化）。修复内容见 0896629.solution.patch，判据见 0896629.test.patch。验证命令钉住新增的真实 post payload 用例——fail-first 实测 `parsed[\"text\"] is None`（解析器只认 text），落在修复面（富文本解析）上。",
+  "verify_command": [
+    "{python}",
+    "-m",
+    "pytest",
+    "tests/unit/test_feishu_event_parse.py::test_post_message_text_is_extracted",
+    "-q"
+  ],
+  "test_paths": [
+    "tests/unit/test_feishu_event_parse.py"
+  ]
+}

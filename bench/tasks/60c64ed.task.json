@@ -1,0 +1,17 @@
+{
+  "task_id": "60c64ed",
+  "base_commit": "cbf38f1ffa4b1918a570e7a9c92162557b56dbc2",
+  "difficulty": "难",
+  "source": "E1",
+  "note": "基线 commit 是修复 commit 的父提交。修复内容见 60c64ed.solution.patch，判据见 60c64ed.test.patch。该 commit 在同一个大测试文件里既改了既有断言又新增了用例；验证命令钉住那两条改动的断言之一（tool_calls 口径），fail-first 实测 `assert 0 == 1`——基线把 tool_calls 记成成功数，修复面是‘尝试数’。",
+  "verify_command": [
+    "{python}",
+    "-m",
+    "pytest",
+    "tests/unit/test_react_loop.py::test_react_loop_missing_tool_reports_error",
+    "-q"
+  ],
+  "test_paths": [
+    "tests/unit/test_react_loop.py"
+  ]
+}
