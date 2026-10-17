@@ -2,6 +2,7 @@
 
 - 日期：2026-10-15
 - 状态：设计已确认，待实现
+- 修订：2026-10-17（§5.0 落地时按实测修正三处口径，见 §13）
 - 相关：ADR-022（多 Agent 协作）、`app/orchestration/collaboration.py`、
   `scripts/compare_orchestrators.py`（诚实测量的先例）
 
@@ -94,9 +95,12 @@ import `orchestration` + `agents` + LLM 层。
 ```
 bench/
   tasks/           任务定义：每个任务 = 一个 git 基线 + 验证命令 + 难度档 + 来源(E1/E3)
+                   + 两个 patch（<id>.test.patch / <id>.solution.patch，由修复 commit
+                   按 tests/ 路径拆开；运行期不依赖原始 commit 内容）
   agent/           §5.0 的 agent 原语：工具 + 循环 + 目标 + 记忆 + 预算
   harness/         任务运行器：物化工作区 → 跑 arm → 恢复测试文件 → 验证 → 记录
-  arms/            L0-L3 四个档位，实现同一个接口 run(workspace, budget) -> RunResult
+  arms/            L0-L3 四个档位，实现同一个接口 run(workspace, goal, budget) -> AgentRun
+                   （判决 RunResult 一律由 harness 组装，不由各档产出）
   report/          聚合与出图：通过率曲线 + 成本曲线 + 边际收益
 ```
 
@@ -107,14 +111,15 @@ bench/
 
 ```
 任务定义
-  → 物化一个干净工作区（git worktree，每个任务一个）
+  → 物化一个干净工作区（git archive 基线 → 建 orphan 单提交快照，每个任务一个）
   → fail-first 检查：先跑一次验证，必须失败（否则剔除该任务）
-  → arm.run(workspace, budget)          ← 唯一变量在这里
+  → arm.run(workspace, goal, budget) -> AgentRun   ← 唯一变量在这里
        agent 循环：读文件 / 写文件 / 跑测试
-  → 产出 diff
-  → 恢复测试文件到基线版本               ← 防作弊闸门
+  → 采集 patch（含 agent 对测试文件的改动，那是证据）
+  → 整棵测试树还原到 test patch 版本      ← 防作弊闸门
   → 跑该任务固定的验证命令
-  → RunResult{ passed, tokens, cost, wall_clock, llm_calls, agent_count, diff }
+  → RunResult{ outcome, agent_run(自报: status/steps/usage/model),
+               patch, verdict_exit_code, wall_clock_s, patch_touched_tests }
 → 跨 任务 × 档位 聚合 → 曲线 + 报告
 ```
 
@@ -133,7 +138,9 @@ bench/
 
 ## 5. 四档编排
 
-四档实现同一个接口 `run(workspace, budget) -> RunResult`，**唯一变量是编排拓扑**。
+四档实现同一个接口 `run(workspace, budget, goal) -> AgentRun`，**唯一变量是编排拓扑**。
+返回值是**自报**（我为什么停），判决 `RunResult` 一律由 harness 在跑完验证后组装
+（ADR-023 与 §8）。
 下列全部共享、四档一致：同一个模型、同一套工具（`read_file` / `write_file` /
 `list_files` / `search` / `run_tests`）、同一段任务指令、同一个停止条件（agent 声明
 完成 / 预算耗尽 / 步数上限）、同一个账本。
@@ -222,7 +229,9 @@ agent 无节制地刷 token），但它不是主判据。
 1. **fail-first 检查**：物化工作区后先跑一次验证，**必须失败**。不失败说明任务本身是
    坏的（代码没坏 / 测试没覆盖），直接剔除。没有这一步，后面所有数字都可能是"任务本来
    就是绿的"。
-2. **测试文件只读**：验证前把所有测试文件强制还原到基线版本。agent 改了也没用。
+2. **测试文件只读**：验证前把测试文件强制还原到 **test patch 版本**（不是基线版本——
+   E1 的测试通常与修复同 commit 新增，基线里根本没有这条判据，还原到基线等于把判据
+   删掉），并删除 `tests/` 下新增的未跟踪文件。agent 改了也没用。
 3. **验证命令固定**：写在任务定义里，不由 agent 决定。
 4. **不给网络**：工具集里没有联网/装包，`run_tests` 在受限环境跑，避免 agent 下载一个
    会过的测试。
@@ -230,6 +239,10 @@ agent 无节制地刷 token），但它不是主判据。
 6. **剥掉 git 历史**：E1 任务的修复**就在仓库的 git 历史里**。若工作区带 `.git`，
    agent 可以直接 `git log` / `git show` 把答案抄出来。任务工作区必须是**无 `.git` 的
    干净副本**（或用 orphan 快照），否则整个实验在第一道题上就废了。
+7. **E1 任务拆成两个 patch**：修复 commit 按 `tests/` 拆成 test patch（判据）与
+   solution patch（答案）。工作区 = 基线 + test patch，fail-first 必须失败，agent
+   只需产出 solution 那部分。实测五个 E1 候选**全部是"修复 + 测试"同 commit**，
+   不拆 patch 就没有可用的判据。
 
 ## 8. 错误处理
 
@@ -239,6 +252,10 @@ agent 无节制地刷 token），但它不是主判据。
 - `budget_exhausted`：预算烧完——这是 B1 的**核心信号**，必须和 `fail` 分开，否则
   "协作太贵"会被误读成"协作不行"。
 - `error`：API 限流 / 超时 / 崩溃——这是**噪音**，单独统计、不混进通过率。
+
+三者的**归属不同**，这是"执行体不能给自己下判决"在类型上的落点：`fail` 是判决
+（`RunResult`，只能由 harness 在跑完验证后填），`budget_exhausted` / `error` 是自报
+（`AgentRun`）。混合的代价是审计时说不清 `passed: true` 是谁说的。
 
 其他：验证命令超时记为 `fail`（不是 crash）；agent 死循环由步数上限兜底。
 
@@ -266,7 +283,9 @@ agent 无节制地刷 token），但它不是主判据。
 ## 12. 待定项
 
 - **E1 候选任务**（2026-10-15 从 git 历史挑出，均满足"行为级测试 + 修复收敛 + 验证命令
-  明确"，尚需 fail-first 复验）：
+  明确"；2026-10-17 复验：五个候选**全部**是"修复 + 测试"同 commit，必须拆 patch；
+  `988fccb` 的 fail-first 已由 `tests/unit/test_bench_harness.py` 的端到端用例实测
+  通过，并已落成 `bench/tasks/988fccb.*`，作为首个任务）：
 
   | 难度 | commit | 内容 | 修复面 |
   |---|---|---|---|
@@ -281,3 +300,37 @@ agent 无节制地刷 token），但它不是主判据。
 - **E3 合成缺陷规格**尚未确定，实现前需构造并用 fail-first 检查筛过。
 - 每题预算上限的具体数值需按真实预算反推。
 - 中档模型的具体选型未定。
+
+## 13. 修订记录（2026-10-17，§5.0 落地）
+
+按实现时的实测修正了三处口径，其余不变：
+
+1. **§5 的返回值**：各档接口从 `run(workspace, budget) -> RunResult` 改为
+   `-> AgentRun`。原写法与 §4.3 的数据流自相矛盾——`RunResult.passed` 只能由 harness
+   在跑完验证后产出，而 §5 又说它是各档的返回值，等于让执行体自己下判决。
+2. **§7.2 的还原目标**：从"基线版本"改为"**test patch 版本**"。实测 `test_auth.py`
+   在基线是 140 行、只断言 `/webhook` 与 `/dashboard`，相关断言是修复 commit 新增的；
+   还原到基线等于把判据删掉。同时补上"删除 `tests/` 下新增的未跟踪文件"。
+3. **§8 的归属**：明确 `fail` 属于判决（`RunResult`），`budget_exhausted` / `error`
+   属于自报（`AgentRun`）。§8 原文把三者并列为"三种失败"，没有区分产出者。
+
+另有一处实现期才暴露、原设计未预见的坑，一并记下：**`git archive` 会按
+`core.autocrlf` 做导出转换**，在 `autocrlf=true` 的机器上导出的工作区是 CRLF，而
+test patch 的上下文是 LF，`git apply` 直接失败。物化时必须显式
+`-c core.autocrlf=false -c core.eol=lf`。
+
+### 13.1 评审回合补记（同日晚，code-review 双轴）
+
+§5.0 落盘后跑了一次 Standards + Spec 双轴评审，改掉三处：
+
+1. **还原粒度从 `test_paths` 扩到整棵测试树。** 原实现只 `git checkout` 那几个
+   测试文件、只 `git clean` 它们的父目录。实测 `tests/conftest.py` 在基线里就是
+   **已跟踪**文件——agent 改它是"修改"而非"新增"，`clean` 与 `checkout` 都碰不到，
+   但它能改写整轮收集。现在按测试树根整棵还原（checkout + clean），并在
+   `bench/harness/workspace.py` 记下它带来的约束：`test_paths` 必须落在同一个
+   专用测试树里。
+2. **模型名如实记录。** `AgentRun.model` 原先恒等于 `LLMConfig.model`，fallback
+   链接手时会把实际作答的模型写错。现在每轮取 `last_metrics["model_used"]`。
+3. **§4.2 / §4.3 的口径对齐。** 树与数据流里残留的 `run(workspace, budget) ->
+   RunResult`、"恢复测试文件到基线版本"改成本节 1、2 的写法——原文只有 §5 / §7.2
+   / §8 被修正，同一份文档里于是有两个互相矛盾的说法。

@@ -15,6 +15,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
+        with:
+          # bench 的实验台要用 `git archive <基线 commit>` 物化工作区；checkout 默认
+          # fetch-depth: 1 拿不到历史，那批端到端用例会**静默 skip** 而不是失败——
+          # 一个永远不跑的门禁比没有门禁更坏。
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v6
         with:

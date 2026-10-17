@@ -1,0 +1,17 @@
+{
+  "task_id": "988fccb",
+  "base_commit": "f0a60e531c479c80df53ff4b8fb1dbd19fba1ced",
+  "difficulty": "中",
+  "source": "E1",
+  "note": "基线 commit 是修复 commit 的父提交。修复内容见 988fccb.solution.patch，判据见 988fccb.test.patch（两者由该 commit 按 tests/ 路径拆开）。",
+  "verify_command": [
+    "{python}",
+    "-m",
+    "pytest",
+    "tests/unit/test_auth.py::test_knowledge_and_privacy_routes_fail_closed",
+    "-q"
+  ],
+  "test_paths": [
+    "tests/unit/test_auth.py"
+  ]
+}
