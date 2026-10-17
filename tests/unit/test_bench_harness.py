@@ -193,6 +193,40 @@ async def test_end_to_end_real_fix_passes(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @requires_history
+async def test_run_task_records_budget_tier_and_baseline(tmp_path: Path) -> None:
+    """B3 复跑的产物能分辨档位，并带得出相对 B1 基线的增量成本。"""
+    fixed_content = _show(f"{FIX_COMMIT}:{FIXED_FILE}")
+
+    def factory(*, workspace: Path, tools) -> LLMBackedAgent:
+        turns = [
+            ScriptedTurn(
+                tool="write_file",
+                arguments={"path": FIXED_FILE, "content": fixed_content},
+                cost_usd=0.002,
+            ),
+            ScriptedTurn(final="已修好", cost_usd=0.0),
+        ]
+        return LLMBackedAgent(ScriptedLLM(turns), tools)
+
+    result = await run_task(
+        spec=spec(),
+        agent_factory=factory,
+        repo=ROOT,
+        workdir=tmp_path / "work",
+        budget=Budget(max_cost_usd=4.5, max_steps=90),
+        budget_tier="B3",
+        baseline_cost_usd=0.001,
+    )
+
+    assert result.budget_tier == "B3"
+    assert result.baseline_cost_usd == pytest.approx(0.001)
+    assert result.incremental_cost_usd == pytest.approx(
+        result.agent_run.usage.cost_usd - 0.001
+    )
+
+
+@pytest.mark.asyncio
+@requires_history
 async def test_registry_l0_end_to_end_lands_a_full_run_result(tmp_path: Path) -> None:
     """档位按名字从注册表取到，一路跑到判决，并落一份字段齐全的 RunResult JSON。"""
     fixed_content = _show(f"{FIX_COMMIT}:{FIXED_FILE}")

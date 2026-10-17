@@ -20,13 +20,32 @@ def test_parse_args_defaults() -> None:
     args = cli.parse_args(["--task", "988fccb"])
     assert args.task == "988fccb"
     assert args.arm == "L0"
-    assert args.max_steps == 30
-    assert args.max_cost_usd == 1.5
+    # 预算由 --budget-tier 的策略给默认值，--max-* 是显式覆盖（默认不覆盖）。
+    assert args.budget_tier == "B1"
+    assert args.baseline_cost_usd == 0.0
+    assert args.max_steps is None
+    assert args.max_cost_usd is None
     assert args.out == ""
     assert args.model == ""
     assert args.temperature is None
     assert args.tasks_dir == str(ROOT / "bench" / "tasks")
     assert args.workdir == str(ROOT / ".bench-work")
+
+
+def test_resolve_budget_uses_the_tier_policy_and_honours_overrides() -> None:
+    b1 = cli._resolve_budget(cli.parse_args(["--task", "x"]))
+    assert (b1.max_cost_usd, b1.max_steps) == (1.5, 30)
+
+    b3 = cli._resolve_budget(cli.parse_args(["--task", "x", "--budget-tier", "B3"]))
+    assert b3.max_cost_usd > b1.max_cost_usd
+    assert b3.max_steps > b1.max_steps
+
+    overridden = cli._resolve_budget(
+        cli.parse_args(
+            ["--task", "x", "--budget-tier", "B3", "--max-steps", "7", "--max-cost-usd", "0.25"]
+        )
+    )
+    assert (overridden.max_cost_usd, overridden.max_steps) == (0.25, 7)
 
 
 def test_parse_args_honours_overrides() -> None:

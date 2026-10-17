@@ -227,6 +227,7 @@ class L2PlannerWorkerCritic:
                 budget=Budget(
                     max_cost_usd=phase.max_cost_usd,
                     max_steps=min(self._policy.critic_steps, phase.max_steps),
+                    max_tokens=phase.max_tokens,
                 ),
                 max_turns=min(self._policy.critic_steps, phase.max_steps),
             )
@@ -337,6 +338,7 @@ class L2PlannerWorkerCritic:
             budget=Budget(
                 max_cost_usd=budget.max_cost_usd,
                 max_steps=planner_steps,
+                max_tokens=budget.max_tokens,
             ),
         )
         session.add_user_message(

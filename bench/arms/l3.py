@@ -158,7 +158,13 @@ class L3ConcurrentWorkers(L2PlannerWorkerCritic):
                     if item.index < subtask.index
                 ),
                 critique=critique,
-                budget=Budget(max_cost_usd=lane_cost, max_steps=lane_steps),
+                budget=Budget(
+                    max_cost_usd=lane_cost,
+                    max_steps=lane_steps,
+                    # token 兜底不按 lane 均分——它是防止单条 lane 无节制刷 token 的
+                    # 全局闸门（§5.3），与主线按美元均分是两件事。
+                    max_tokens=remaining.max_tokens,
+                ),
             )
             for subtask in selected
         ]
