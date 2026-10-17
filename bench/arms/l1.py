@@ -67,26 +67,38 @@ class L1CriticAgent:
     async def run(self, *, workspace: Path, goal: str, budget: Budget) -> AgentRun:
         # worker 的会话跨回边累计（历史、轨迹、用量），Critic 每轮各开一条。
         worker = self._worker.session(workspace=workspace, goal=goal, budget=budget)
+        stopped = budget.stop_status(usage=worker.usage, steps_used=worker.turns)
+        if stopped is not None:
+            return worker.build_run(stopped, stop_reason=_budget_stop_reason(stopped, budget))
         worker_status = await worker.advance()
         if worker_status != "completed":
             return worker.build_run(worker_status)
 
         rounds = 0
-        combined = worker.usage
+        coordinator = Usage()
+        coordinator_turns = 0
+        combined = worker.usage + coordinator
         while True:
-            remaining = budget.max_steps - worker.turns
-            if remaining <= 0:
+            turns = worker.turns + coordinator_turns
+            stopped = budget.stop_status(usage=combined, steps_used=turns)
+            if stopped is not None:
                 return worker.build_run(
-                    "step_limit",
+                    stopped,
                     usage=combined,
                     review_rounds=rounds,
-                    stop_reason=f"步数上限 {budget.max_steps} 已用完，没有步数给 Critic",
+                    stop_reason=_budget_stop_reason(stopped, budget),
                 )
 
-            critique, review_status, review_usage = await self._review(
-                goal=goal, steps=tuple(worker.steps), budget=budget, max_turns=remaining
+            phase = budget.remaining(usage=combined, steps_used=turns)
+            critique, review_status, review_usage, review_turns = await self._review(
+                goal=goal,
+                steps=tuple(worker.steps),
+                budget=phase,
+                max_turns=phase.max_steps,
             )
-            combined = _merge_usage(combined, review_usage)
+            coordinator = coordinator + review_usage
+            coordinator_turns += review_turns
+            combined = worker.usage + coordinator
             if review_status != "completed":
                 return worker.build_run(
                     review_status,
@@ -100,6 +112,18 @@ class L1CriticAgent:
             if critique.approved:
                 return _finalize(worker, combined, review_rounds=rounds)
 
+            stopped = budget.stop_status(
+                usage=combined,
+                steps_used=worker.turns + coordinator_turns,
+            )
+            if stopped is not None:
+                return worker.build_run(
+                    stopped,
+                    usage=combined,
+                    review_rounds=rounds,
+                    stop_reason=_budget_stop_reason(stopped, budget),
+                )
+
             if rounds >= self._policy.max_rounds:
                 return worker.build_run(
                     "step_limit",
@@ -112,15 +136,21 @@ class L1CriticAgent:
 
             worker.add_user_message(format_revise_instruction(critique.instructions))
             rounds += 1
-            worker_status = await worker.advance(
-                max_turns=max(0, budget.max_steps - worker.turns)
+            remaining = budget.remaining(
+                usage=combined,
+                steps_used=worker.turns + coordinator_turns,
             )
+            worker_status = await worker.advance(
+                max_turns=remaining.max_steps,
+                cost_limit_usd=remaining.max_cost_usd,
+            )
+            combined = worker.usage + coordinator
             if worker_status != "completed":
                 return worker.build_run(worker_status, usage=combined, review_rounds=rounds)
 
     async def _review(
         self, *, goal: str, steps: tuple[Step, ...], budget: Budget, max_turns: int
-    ) -> "tuple[Critique | None, str, Usage]":
+    ) -> "tuple[Critique | None, str, Usage, int]":
         """跑 Critic 一轮：给它目标 + worker 的轨迹，收它的终局与用量。
 
         终局不是 ``completed``（超步数 / 超预算 / 报错）时 ``Critique`` 为 ``None``：
@@ -130,23 +160,18 @@ class L1CriticAgent:
         session.add_user_message(build_review_message(goal=goal, steps=steps))
         status = await session.advance(max_turns=max_turns)
         if status != "completed":
-            return None, status, session.usage
+            return None, status, session.usage, session.turns
         critique = parse_verdict(
             session.finish_content,
             instructions_limit=self._policy.max_instructions_chars,
         )
-        return critique, status, session.usage
+        return critique, status, session.usage, session.turns
 
 
-def _merge_usage(left: Usage, right: Usage) -> Usage:
-    """把 Critic 的账并进 worker 的账。协调开销是协作成本的一部分（§5.3）。"""
-    return Usage(
-        llm_calls=left.llm_calls + right.llm_calls,
-        prompt_tokens=left.prompt_tokens + right.prompt_tokens,
-        completion_tokens=left.completion_tokens + right.completion_tokens,
-        cost_usd=left.cost_usd + right.cost_usd,
-        llm_latency_ms=left.llm_latency_ms + right.llm_latency_ms,
-    )
+def _budget_stop_reason(status: str, budget: Budget) -> str:
+    if status == "budget_exhausted":
+        return f"累计成本已达全局上限 ${budget.max_cost_usd:.6f}"
+    return f"步数上限 {budget.max_steps} 已用完"
 
 
 def _finalize(worker: LoopSession, combined: Usage, *, review_rounds: int) -> AgentRun:

@@ -149,6 +149,45 @@ async def test_critic_and_worker_share_one_ledger(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_l1_does_not_give_the_critic_a_fresh_full_budget(tmp_path: Path) -> None:
+    """worker 已用掉全局预算时，Critic 不再得到一份新的满额额度。"""
+    tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
+    llm = _RouterLLM(
+        lambda messages: ScriptedTurn(final=_critic_reply(True))
+        if _is_critic(messages)
+        else ScriptedTurn(final="做完了"),
+        cost_usd=0.001,
+    )
+    agent = L1CriticAgent(pool=ExpertPool(llm=llm, tools=tools), workspace=tmp_path)
+
+    run = await agent.run(workspace=tmp_path, goal="目标", budget=Budget(0.001, 20))
+
+    assert run.status == "budget_exhausted"
+    assert run.usage.llm_calls == 1
+    assert len(llm.seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_l1_critic_completion_may_overrun_once(tmp_path: Path) -> None:
+    """Critic 的终局落在最后一次越额调用上时，完成优先于预算耗尽。"""
+    tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
+    llm = _RouterLLM(
+        lambda messages: ScriptedTurn(final=_critic_reply(True))
+        if _is_critic(messages)
+        else ScriptedTurn(final="做完了"),
+        cost_usd=0.0006,
+    )
+    agent = L1CriticAgent(pool=ExpertPool(llm=llm, tools=tools), workspace=tmp_path)
+
+    run = await agent.run(workspace=tmp_path, goal="目标", budget=Budget(0.001, 20))
+
+    assert run.status == "completed"
+    assert run.usage.llm_calls == 2
+    assert run.usage.cost_usd == pytest.approx(0.0012)
+    assert _is_critic(llm.seen[1])
+
+
+@pytest.mark.asyncio
 async def test_revise_instruction_enters_the_next_context(tmp_path: Path) -> None:
     """Critic 的反馈必须落到下一轮的上下文里，而不是只写进日志。"""
     tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
@@ -173,6 +212,8 @@ async def test_revise_instruction_enters_the_next_context(tmp_path: Path) -> Non
 
     assert run.status == "completed"
     assert run.review_rounds == 1
+    # worker 初次 + Critic 打回 + worker 修订 + Critic 认可，四笔都在同一账本上。
+    assert run.usage.llm_calls == 4
     revised = [call for call in llm.seen if "修正指令" in _user_text(call)]
     assert revised, "修正指令没有进 worker 的下一轮上下文"
     assert instruction in _user_text(revised[0])

@@ -74,6 +74,18 @@ class Usage:
             + float(values.get("llm_latency_ms", 0.0) or 0.0),
         )
 
+    def __add__(self, other: "Usage") -> "Usage":
+        """把多段执行体的账并进同一份。"""
+        if not isinstance(other, Usage):
+            return NotImplemented
+        return Usage(
+            llm_calls=self.llm_calls + other.llm_calls,
+            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
+            completion_tokens=self.completion_tokens + other.completion_tokens,
+            cost_usd=self.cost_usd + other.cost_usd,
+            llm_latency_ms=self.llm_latency_ms + other.llm_latency_ms,
+        )
+
 
 @dataclass(frozen=True)
 class Budget:
@@ -86,6 +98,21 @@ class Budget:
 
     max_cost_usd: float
     max_steps: int
+
+    def remaining(self, *, usage: Usage, steps_used: int) -> "Budget":
+        """从全局累计用量里切出下一阶段可用的预算。"""
+        return Budget(
+            max_cost_usd=max(0.0, self.max_cost_usd - usage.cost_usd),
+            max_steps=max(0, self.max_steps - steps_used),
+        )
+
+    def stop_status(self, *, usage: Usage, steps_used: int) -> AgentStatus | None:
+        """全局预算的判停顺序：成本先于步数；两项都未到则返回 ``None``。"""
+        if usage.cost_usd >= self.max_cost_usd:
+            return "budget_exhausted"
+        if steps_used >= self.max_steps:
+            return "step_limit"
+        return None
 
 
 @dataclass(frozen=True)

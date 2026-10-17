@@ -73,7 +73,7 @@ class SubtaskOutcome:
 
 
 @dataclass(frozen=True)
-class _Exec:
+class SubtaskExecution:
     """一次"跑一遍子任务"的结果集——把散在外的账本收在一处。"""
 
     outcomes: tuple[SubtaskOutcome, ...]
@@ -137,8 +137,21 @@ class L2PlannerWorkerCritic:
         turns = 0
         trace: list[Step] = []
 
-        plan_result = await self._plan(workspace=workspace, goal=goal, budget=budget)
-        combined = _merge_usage(combined, plan_result.usage)
+        stopped = budget.stop_status(usage=combined, steps_used=turns)
+        if stopped is not None:
+            return _finish(
+                status=stopped,
+                steps=(),
+                usage=combined,
+                model="",
+                temperature=self._temperature,
+                subtask_count=0,
+                stop_reason=_budget_stop_reason(stopped, budget),
+            )
+
+        phase = budget.remaining(usage=combined, steps_used=turns)
+        plan_result = await self._plan(workspace=workspace, goal=goal, budget=phase)
+        combined = combined + plan_result.usage
         turns += plan_result.turns
         trace.extend(plan_result.steps)
         model = plan_result.model
@@ -154,17 +167,29 @@ class L2PlannerWorkerCritic:
                 stop_reason=_plan_stop_reason(plan_result.status),
             )
 
+        stopped = budget.stop_status(usage=combined, steps_used=turns)
+        if stopped is not None:
+            return _finish(
+                status=stopped,
+                steps=tuple(_reindex(trace)),
+                usage=combined,
+                model=model,
+                temperature=self._temperature,
+                subtask_count=len(plan.subtasks),
+                stop_reason=_budget_stop_reason(stopped, budget),
+            )
+
         run = await self._run_subtasks(
             workspace=workspace,
             goal=goal,
             plan=plan,
             budget=budget,
+            used_usage=combined,
             used_turns=turns,
-            only=None,
             critique=None,
             existing=(),
         )
-        combined = _merge_usage(combined, run.usage)
+        combined = combined + run.usage
         turns += run.turns
         model = run.model or model
         trace = [*trace, *run.steps]
@@ -181,27 +206,31 @@ class L2PlannerWorkerCritic:
 
         rounds = 0
         while True:
-            remaining = budget.max_steps - turns
-            if remaining <= 0:
+            stopped = budget.stop_status(usage=combined, steps_used=turns)
+            if stopped is not None:
                 return _finish(
-                    status="step_limit",
+                    status=stopped,
                     steps=tuple(_reindex(trace)),
                     usage=combined,
                     model=model,
                     temperature=self._temperature,
                     subtask_count=len(plan.subtasks),
                     review_rounds=rounds,
-                    stop_reason=f"步数上限 {budget.max_steps} 已用完，没有步数给 Critic",
+                    stop_reason=_budget_stop_reason(stopped, budget),
                 )
+            phase = budget.remaining(usage=combined, steps_used=turns)
             review = await self._review(
                 workspace=workspace,
                 goal=goal,
                 plan=plan,
                 outcomes=run.outcomes,
-                budget=budget,
-                max_turns=min(self._policy.critic_steps, remaining),
+                budget=Budget(
+                    max_cost_usd=phase.max_cost_usd,
+                    max_steps=min(self._policy.critic_steps, phase.max_steps),
+                ),
+                max_turns=min(self._policy.critic_steps, phase.max_steps),
             )
-            combined = _merge_usage(combined, review.usage)
+            combined = combined + review.usage
             turns += review.turns
             if review.critique is None:
                 return _finish(
@@ -226,6 +255,18 @@ class L2PlannerWorkerCritic:
                     review_rounds=rounds,
                     stop_reason="全部子任务完成，Critic 认可",
                 )
+            stopped = budget.stop_status(usage=combined, steps_used=turns)
+            if stopped is not None:
+                return _finish(
+                    status=stopped,
+                    steps=tuple(_reindex(trace)),
+                    usage=combined,
+                    model=model,
+                    temperature=self._temperature,
+                    subtask_count=len(plan.subtasks),
+                    review_rounds=rounds,
+                    stop_reason=_budget_stop_reason(stopped, budget),
+                )
             if rounds >= self._review_policy.max_rounds:
                 return _finish(
                     status="step_limit",
@@ -249,9 +290,10 @@ class L2PlannerWorkerCritic:
                 outcomes=run.outcomes,
                 critique=critique,
                 budget=budget,
+                used_usage=combined,
                 used_turns=turns,
             )
-            combined = _merge_usage(combined, rerun.usage)
+            combined = combined + rerun.usage
             turns += rerun.turns
             if rerun.status != "completed":
                 return _finish(
@@ -273,17 +315,21 @@ class L2PlannerWorkerCritic:
     async def _plan(
         self, *, workspace: Path, goal: str, budget: Budget
     ) -> _PlanResult:
+        planner_steps = min(self._policy.planner_steps, budget.max_steps)
+        if planner_steps <= 0:
+            return _PlanResult(None, "step_limit", Usage(), 0, (), "")
         session = self._planner.session(
             workspace=workspace,
             goal=goal,
             budget=Budget(
-                max_cost_usd=budget.max_cost_usd, max_steps=self._policy.planner_steps
+                max_cost_usd=budget.max_cost_usd,
+                max_steps=planner_steps,
             ),
         )
         session.add_user_message(
             build_plan_message(goal=goal, max_subtasks=self._policy.max_subtasks)
         )
-        status = await session.advance(max_turns=self._policy.planner_steps)
+        status = await session.advance(max_turns=planner_steps)
         steps = tuple(session.steps)
         if status != "completed":
             return _PlanResult(None, status, session.usage, session.turns, steps, session.model)
@@ -304,22 +350,21 @@ class L2PlannerWorkerCritic:
         outcomes: tuple[SubtaskOutcome, ...],
         critique: Critique,
         budget: Budget,
+        used_usage: Usage,
         used_turns: int,
-    ) -> _Exec:
-        """按 Critic 的 ``targets`` 定向重跑；没给 targets 就整条计划重跑。
+    ) -> SubtaskExecution:
+        """按 Critic 的打回重跑整条计划。
 
-        没指定 targets 时保守地全跑：批了却没说改哪儿，只重跑一部分等于把剩下的问题
-        留在原地，而 Critic 下一轮读到的还是旧产出。
+        子任务级定向重跑归 L3；L2 只有一个 worker，重跑全量才能保证 Critic 下一轮
+        读到的是同一条计划里的新产出。
         """
-        known = {item.index for item in outcomes}
-        targets = tuple(item for item in critique.targets if item in known)
         return await self._run_subtasks(
             workspace=workspace,
             goal=goal,
             plan=plan,
             budget=budget,
+            used_usage=used_usage,
             used_turns=used_turns,
-            only=targets or None,
             critique=critique,
             existing=outcomes,
         )
@@ -331,36 +376,40 @@ class L2PlannerWorkerCritic:
         goal: str,
         plan: Plan,
         budget: Budget,
+        used_usage: Usage,
         used_turns: int,
-        only: "tuple[int, ...] | None",
         critique: "Critique | None",
         existing: tuple[SubtaskOutcome, ...],
-    ) -> _Exec:
+    ) -> SubtaskExecution:
         """串行执行（或重跑）子任务。每个子任务一条**新会话**，只带它自己的上下文。
 
         步数是同一个 ``Budget.max_steps`` 里剩下的额度：每一段开始前先看还剩多少，
         一段用完没有剩余就如实停在 ``step_limit``。
         """
         by_index = {item.index: item for item in existing}
-        wanted = set(only) if only is not None else None
-        order = [
-            item for item in plan.subtasks if wanted is None or item.index in wanted
-        ]
         usage = Usage()
         turns = 0
         steps: list[Step] = []
         model = ""
-        for subtask in order:
-            remaining = budget.max_steps - used_turns - turns
-            if remaining <= 0:
-                return _Exec(
+        for subtask in plan.subtasks:
+            combined_usage = used_usage + usage
+            stopped = budget.stop_status(
+                usage=combined_usage,
+                steps_used=used_turns + turns,
+            )
+            if stopped is not None:
+                return SubtaskExecution(
                     outcomes=_ordered(by_index),
                     usage=usage,
                     turns=turns,
                     steps=tuple(steps),
                     model=model,
-                    status="step_limit",
+                    status=stopped,
                 )
+            phase = budget.remaining(
+                usage=combined_usage,
+                steps_used=used_turns + turns,
+            )
             handoff = _handoff_prompt(
                 goal=goal,
                 subtask=subtask,
@@ -371,16 +420,16 @@ class L2PlannerWorkerCritic:
                 ),
                 critique=critique,
             )
-            session = self._worker.session(workspace=workspace, goal=goal, budget=budget)
+            session = self._worker.session(workspace=workspace, goal=goal, budget=phase)
             session.add_user_message(handoff)
-            status = await session.advance(max_turns=remaining)
-            usage = _merge_usage(usage, session.usage)
+            status = await session.advance(max_turns=phase.max_steps)
+            usage = usage + session.usage
             turns += session.turns
             steps.extend(session.steps)
             if session.model:
                 model = session.model
             if status != "completed":
-                return _Exec(
+                return SubtaskExecution(
                     outcomes=_ordered(by_index),
                     usage=usage,
                     turns=turns,
@@ -394,7 +443,7 @@ class L2PlannerWorkerCritic:
                 output=_summarize(session.steps),
                 trajectory=_render_steps(session.steps),
             )
-        return _Exec(
+        return SubtaskExecution(
             outcomes=_ordered(by_index),
             usage=usage,
             turns=turns,
@@ -503,16 +552,6 @@ def _reindex(steps: list[Step]) -> list[Step]:
     ]
 
 
-def _merge_usage(left: Usage, right: Usage) -> Usage:
-    return Usage(
-        llm_calls=left.llm_calls + right.llm_calls,
-        prompt_tokens=left.prompt_tokens + right.prompt_tokens,
-        completion_tokens=left.completion_tokens + right.completion_tokens,
-        cost_usd=left.cost_usd + right.cost_usd,
-        llm_latency_ms=left.llm_latency_ms + right.llm_latency_ms,
-    )
-
-
 def _finish(
     *,
     status: AgentStatus,
@@ -543,6 +582,12 @@ def _plan_stop_reason(status: AgentStatus) -> str:
     if status == "error":
         return "planner 未产出可读的计划"
     return "planner 未完成"
+
+
+def _budget_stop_reason(status: AgentStatus, budget: Budget) -> str:
+    if status == "budget_exhausted":
+        return f"累计成本已达全局上限 ${budget.max_cost_usd:.6f}"
+    return f"步数上限 {budget.max_steps} 已用完"
 
 
 def build_l2(*, llm: Any, workspace: Path, tools: ToolRegistry) -> CodingAgent:

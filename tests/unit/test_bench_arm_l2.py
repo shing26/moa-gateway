@@ -102,11 +102,10 @@ def _plan_json(*instructions: str) -> str:
     return "```json\n" + json.dumps({"subtasks": subtasks}, ensure_ascii=False) + "\n```"
 
 
-def _critic_json(approved: bool, instructions: str = "", targets: tuple[int, ...] = ()) -> str:
+def _critic_json(approved: bool, instructions: str = "") -> str:
     payload: dict[str, Any] = {"verdict": "approve" if approved else "revise"}
     if not approved:
         payload["instructions"] = instructions
-        payload["targets"] = list(targets)
     return "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
 
 
@@ -254,8 +253,46 @@ async def test_planner_and_critic_calls_share_the_worker_ledger(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_critic_rejection_reruns_the_targeted_subtask(tmp_path: Path) -> None:
-    """按 Critic 的 ``targets`` 定向重跑，并把打回理由带进重跑的交接内容。"""
+async def test_all_l2_stages_share_one_global_cost_limit(tmp_path: Path) -> None:
+    """planner 与 worker 用完预算后，不再给 Critic 开一份新的满额预算。"""
+    tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
+
+    def script(messages: list[dict[str, Any]]) -> ScriptedTurn:
+        route = _route(messages)
+        if route == "planner":
+            return ScriptedTurn(final=_plan_json("一步"))
+        if route == "critic":
+            return ScriptedTurn(final=_critic_json(True))
+        return ScriptedTurn(final="做完了")
+
+    llm = _ScriptLLM(script, cost_usd=0.001)
+    agent = build_l2(llm=llm, workspace=tmp_path, tools=tools)
+    run = await agent.run(workspace=tmp_path, goal="目标", budget=Budget(0.002, 30))
+
+    assert run.status == "budget_exhausted"
+    assert run.usage.llm_calls == 2
+    assert run.usage.cost_usd == pytest.approx(0.002)
+    assert len(llm.seen) == 2
+
+
+@pytest.mark.asyncio
+async def test_zero_step_budget_does_not_call_the_planner(tmp_path: Path) -> None:
+    tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
+    llm = _ScriptLLM(lambda messages: ScriptedTurn(final=_plan_json("一步")))
+    agent = build_l2(llm=llm, workspace=tmp_path, tools=tools)
+
+    run = await agent.run(workspace=tmp_path, goal="目标", budget=Budget(5.0, 0))
+
+    assert run.status == "step_limit"
+    assert run.usage.llm_calls == 0
+    assert llm.seen == []
+
+
+@pytest.mark.asyncio
+async def test_critic_rejection_reruns_the_plan_with_the_revision_instruction(
+    tmp_path: Path,
+) -> None:
+    """L2 的打回重跑整条计划，并把打回理由带进每条重跑交接。"""
     tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
     state = {"critiques": 0}
     worker = _Worker(["A", "B"], revised={1: "B-fixed"})
@@ -268,7 +305,7 @@ async def test_critic_rejection_reruns_the_targeted_subtask(tmp_path: Path) -> N
             state["critiques"] += 1
             if state["critiques"] == 1:
                 return ScriptedTurn(
-                    final=_critic_json(False, "子任务 B 漏了边界情况", targets=(1,))
+                    final=_critic_json(False, "子任务 B 漏了边界情况")
                 )
             return ScriptedTurn(final=_critic_json(True))
         return worker.turn(messages)
@@ -278,13 +315,16 @@ async def test_critic_rejection_reruns_the_targeted_subtask(tmp_path: Path) -> N
 
     assert run.status == "completed"
     assert run.review_rounds == 1
-    # 初次两条（各两轮）+ 重跑被点名的那一条（两轮）。
-    assert len(worker.prompts) == 6
-    # 只有重跑那一条带上了打回理由，且仍然挂在子任务 1 上。
+    # 初次两条（各两轮）+ 全量重跑两条（各两轮）。
+    assert len(worker.prompts) == 8
+    # 重跑两条都带打回理由，后一条仍拿到前一条的新产出。
     rerun = [prompt for prompt in worker.prompts if "打回" in prompt]
-    assert len(rerun) == 2
-    assert all("你负责的子任务 1：" in prompt for prompt in rerun)
+    assert len(rerun) == 4
+    assert any("你负责的子任务 0：" in prompt for prompt in rerun)
+    assert any("你负责的子任务 1：" in prompt for prompt in rerun)
     assert "漏了边界情况" in rerun[0]
+    revised = next(prompt for prompt in rerun if "你负责的子任务 1：" in prompt)
+    assert "前面子任务已经产出的结果" in revised
 
 
 @pytest.mark.asyncio

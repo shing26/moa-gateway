@@ -107,6 +107,19 @@ def test_pool_rejects_an_unknown_expert(tmp_path: Path) -> None:
         pool.get("planner")
 
 
+def test_pool_temperature_can_be_overridden(tmp_path: Path) -> None:
+    pool = make_pool(tmp_path, [], temperature=0.7)
+    assert pool.temperature == pytest.approx(0.7)
+
+
+def test_pool_temperature_falls_back_to_the_client_config(tmp_path: Path) -> None:
+    pool = ExpertPool(
+        llm=ScriptedLLM([], temperature=0.4),
+        tools=failing_tools(tmp_path),
+    )
+    assert pool.temperature == pytest.approx(0.4)
+
+
 @pytest.mark.asyncio
 async def test_expert_runs_on_the_toolset_the_harness_injects(tmp_path: Path) -> None:
     """专家取工具的唯一来源是构造期注入的 registry——它拿不到第二套工具。"""

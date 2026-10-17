@@ -146,11 +146,18 @@ class LoopSession:
         """把一条新指令追加进会话（L1 的 Critic 反馈走这条）。"""
         self._messages = [*self._messages, {"role": "user", "content": content}]
 
-    async def advance(self, *, max_turns: int | None = None) -> AgentStatus:
+    async def advance(
+        self,
+        *,
+        max_turns: int | None = None,
+        cost_limit_usd: float | None = None,
+    ) -> AgentStatus:
         """推进循环，直到某条停止条件成立；返回那条条件的自报状态。
 
         ``max_turns`` 是**本次**推进的轮数额度（L1 用它给 Critic 留够步数）；
         会话自身的 ``Budget.max_steps`` 是整条会话唯一的天花板，续跑接着算。
+        ``cost_limit_usd`` 是本次推进可新增的成本额度；L1 在 Critic 花掉一部分
+        全局预算后，用它把同一会话的下一段限制在剩余额度内。
 
         判定顺序与 §5.0 完全一致：先判完成，再判预算，再看步数。**不再执行工具**
         那条硬停语义保持原样——超出预算或额度的那一轮不落地。
@@ -159,6 +166,12 @@ class LoopSession:
         max_steps = self.max_steps
         allowance = max_steps if max_turns is None else max(0, max_turns)
         turns = 0
+        cost_at_start = self.usage.cost_usd
+        phase_cost_limit = (
+            max(0.0, self._budget.max_cost_usd - cost_at_start)
+            if cost_limit_usd is None
+            else max(0.0, cost_limit_usd)
+        )
 
         while turns < allowance and self.turns < max_steps:
             index = self.turns
@@ -189,11 +202,11 @@ class LoopSession:
                 return "completed"
 
             # ② 想让继续，但钱不够了。
-            if self.usage.cost_usd >= self._budget.max_cost_usd:
+            if self.usage.cost_usd - cost_at_start >= phase_cost_limit:
                 logger.info(
-                    "budget exhausted cost=%.6f limit=%.6f",
-                    self.usage.cost_usd,
-                    self._budget.max_cost_usd,
+                    "budget exhausted phase_cost=%.6f limit=%.6f",
+                    self.usage.cost_usd - cost_at_start,
+                    phase_cost_limit,
                 )
                 return "budget_exhausted"
 

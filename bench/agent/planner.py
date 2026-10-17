@@ -28,7 +28,6 @@ planner 的输出是 LLM 的自由文本。读不出结构化计划时，编一�
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 
 from bench.agent.critic import APPROVE, REVISE
@@ -40,7 +39,7 @@ class Subtask:
 
     index: int
     instruction: str
-    context: str = ""
+    context: str
     depends_on: tuple[int, ...] = ()
 
 
@@ -55,35 +54,23 @@ class PlanParseError(ValueError):
     """planner 的输出里读不出结构化计划。"""
 
 
-#: "1. xxx" / "- xxx" 这类有序/无序行的兜底形状。只在完全读不出 JSON 时用。
-_LINE_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)、])\s+(?P<body>\S.*)$")
-
-
 def parse_plan(text: str, *, max_subtasks: int = 4) -> Plan:
     """把 planner 的终局解析成 ``Plan``。读不出来抛 ``PlanParseError``。"""
     raw = (text or "").strip()
     if not raw:
         raise PlanParseError("planner 没有给出任何输出")
 
-    items = _json_items(raw) if _looks_like_json(raw) else []
-    if not items:
-        items = _line_items(raw)
+    items = _json_items(raw)
     if not items:
         raise PlanParseError(f"planner 的输出里读不出子任务: {raw[:200]!r}")
 
     subtasks: list[Subtask] = []
     upper = max_subtasks if max_subtasks > 0 else len(items)
     for item in items[:upper]:
-        subtask = _to_subtask(item, index=len(subtasks))
-        if subtask is not None and subtask.instruction:
-            subtasks.append(subtask)
+        subtasks.append(_to_subtask(item, index=len(subtasks)))
     if not subtasks:
         raise PlanParseError("计划里没有一个可执行的子任务")
     return Plan(subtasks=tuple(subtasks))
-
-
-def _looks_like_json(text: str) -> bool:
-    return "[" in text or "{" in text
 
 
 def _json_items(text: str) -> list[object]:
@@ -142,25 +129,18 @@ def _extract_json(text: str) -> str | None:
     return None
 
 
-def _line_items(text: str) -> list[object]:
-    items: list[object] = []
-    for line in text.splitlines():
-        match = _LINE_RE.match(line)
-        if match:
-            items.append(match.group("body").strip())
-    return items
-
-
-def _to_subtask(item: object, *, index: int) -> Subtask | None:
-    """一条原始计划项 → ``Subtask``。非字符串/对象一律当读不出来。"""
-    if isinstance(item, str):
-        return Subtask(index=index, instruction=item.strip())
+def _to_subtask(item: object, *, index: int) -> Subtask:
+    """一条原始计划项 → ``Subtask``。缺指令或缺上下文都判读不出来。"""
     if not isinstance(item, dict):
-        return None
+        raise PlanParseError(f"子任务 {index} 不是 JSON 对象")
     instruction = str(
         item.get("instruction") or item.get("task") or item.get("step") or ""
     ).strip()
     context = str(item.get("context") or item.get("background") or "").strip()
+    if not instruction:
+        raise PlanParseError(f"子任务 {index} 缺少 instruction")
+    if not context:
+        raise PlanParseError(f"子任务 {index} 缺少 context")
     return Subtask(
         index=index,
         instruction=instruction,
@@ -225,7 +205,8 @@ def build_plan_message(*, goal: str, max_subtasks: int) -> str:
         '{"instruction": "这一步具体做什么", '
         '"context": "执行这一步需要的前置事实（失败长什么样、根因、涉及哪个文件哪一行）", '
         '"depends_on": [前置子任务下标]}\n\n'
-        "`context` 要写到执行者**不必回头问**的程度：它会先读这里的背景，再动手。"
+        "`instruction` 与 `context` 都是必填；`context` 要写到执行者**不必回头问**"
+        "的程度：它会先读这里的背景，再动手。"
     )
 
 
