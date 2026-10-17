@@ -45,7 +45,7 @@ from typing import Any
 
 from app.agents.tools import ToolRegistry
 
-from bench.agent.loop import LLMBackedAgent
+from bench.agent.loop import LLMBackedAgent, LoopSession
 from bench.agent.memory import MemoryPolicy
 from bench.agent.types import AgentRun, Budget
 
@@ -132,6 +132,10 @@ class ToolExpert:
     def key(self) -> str:
         return self._spec.key
 
+    def session(self, *, workspace: Path, goal: str, budget: Budget) -> LoopSession:
+        """开一条可续跑的会话。L1 的 Critic 走这条（同一条循环 + 角色指令）。"""
+        return self._agent.session(workspace=workspace, goal=goal, budget=budget)
+
     async def run(self, *, workspace: Path, goal: str, budget: Budget) -> AgentRun:
         run = await self._agent.run(workspace=workspace, goal=goal, budget=budget)
         # 只加标签，不动别的：轨迹与用量原样来自同一条循环，账本因此是同一条。
@@ -169,6 +173,16 @@ class ExpertPool:
 
     def keys(self) -> tuple[str, ...]:
         return EXPERT_KEYS
+
+    @property
+    def llm(self) -> Any:
+        """池的循环机制的两个依赖。需要"与专家同一套工具"的中性 worker 时才用它们
+        （L1 的 worker 就是这样：没有角色，但工具与专家池一致）。"""
+        return self._llm
+
+    @property
+    def tools(self) -> ToolRegistry:
+        return self._tools
 
     def get(self, key: str) -> ToolExpert:
         try:

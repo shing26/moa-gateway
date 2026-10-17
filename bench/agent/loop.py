@@ -13,6 +13,13 @@
 
 美元预算只能事后累计（调用前无从得知这次花多少），所以实现上允许最后一次
 调用把预算越过一点；判据是"累计值已达到上限"。
+
+``LoopSession`` 是这条循环的续跑缝
+----------------------------------
+循环原本一次性：``run()`` 走到 ``completed`` 就返回。L1 的有界回边要"接着上一段
+继续"，所以历史与循环体被拆进 ``LoopSession``，``LLMBackedAgent.run()`` 只是它的
+一次 ``advance()``。L0 的轨迹与账本因此逐字不变（``test_bench_agent_loop.py`` 是
+那道门）。
 """
 
 from __future__ import annotations
@@ -21,7 +28,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from app.agents.tool_contract import OutcomeKind, ToolCallOutcome
 from app.agents.tools import ToolRegistry
@@ -31,6 +38,24 @@ from bench.agent.tools import call_bench_tool
 from bench.agent.types import AgentRun, AgentStatus, Budget, Step, Usage
 
 logger = logging.getLogger("bench.agent.loop")
+
+
+class _ToolRunner(Protocol):
+    """会话驱动的循环机制（§5.0 决策 3 的原生 tool-calling）。
+
+    ``LLMBackedAgent`` 满足它；把它抽出来只是让 ``LoopSession`` 依赖"循环机制"
+    这个概念，而不是某个具体类——专家（§5.1）将来要接别的 runner 时不用改会话。
+    """
+
+    _llm: Any
+    _tools: ToolRegistry
+    _policy: MemoryPolicy
+    _model: str
+    _temperature: float
+
+    async def execute_call(
+        self, call: dict[str, Any], *, index: int, workspace: Path
+    ) -> "tuple[Step, dict[str, Any]]": ...
 
 
 def _system_prompt(workspace: Path, goal: str, instructions: str = "") -> str:
@@ -47,6 +72,180 @@ def _system_prompt(workspace: Path, goal: str, instructions: str = "") -> str:
     if instructions:
         return f"{base}\n\n{instructions}"
     return base
+
+
+class LoopSession:
+    """一条可被多次推进的工具循环，持有自己的消息历史、轨迹与账本。
+
+    §5.0 的循环原本是一次性的：``run()`` 走到 ``completed`` 就返回，没有"接着上一段
+    继续"的入口。L1 的有界回边需要它——Critic 的修正指令要加进**同一条**会话，否则
+    要么另起一次 ``run()`` 丢掉前文（"别重复撞同一面墙"就没了），要么把 L1 的逻辑
+    塞进 L0 的循环里。所以"继续"这条缝开在这里：``LLMBackedAgent.run()`` 只是一次
+    ``LoopSession.advance()``，L1 则持有同一个会话反复推进。
+
+    会话**不**记录 ``finish`` 步：一次 run 的终局只有调用方知道（L1 的第一次
+    ``completed`` 其实是被打回前的半程）。调用方在收尾时补一条，轨迹上就只有一条
+    真实的终局。
+
+    ``turns`` 与 ``usage`` 跨多次 ``advance()`` 累计——L1 把 worker 与 Critic 的
+    用量合进同一份账本靠的就是这两个是"会话级"而不是"单次推进级"的。
+    """
+
+    def __init__(
+        self,
+        runner: _ToolRunner,
+        *,
+        workspace: Path,
+        goal: str,
+        budget: Budget,
+        instructions: str = "",
+    ) -> None:
+        self._runner = runner
+        self._workspace = workspace
+        self._policy = runner._policy
+        #: 整条会话的硬上限。``max_steps`` 是唯一的天花板，续跑接着算。
+        self._budget = budget
+        #: 实际作答的模型。fallback 链接手时 ``last_metrics["model_used"]`` 与配置的
+        #: 主模型不同——如实记录是 §12 的要求（"RunResult 如实记录 model"）。
+        self.model = runner._model
+        #: 产出这次 run 的专家（§5.1）。会话本身不贴标签，由专家层在收尾时补。
+        self.expert = ""
+        self.steps: list[Step] = []
+        self.usage = Usage()
+        #: 已走的工具轮次，跨 ``advance()`` 累计。
+        self.turns = 0
+        #: 已发出的 LLM 调用数（含终局那一轮，它不占工具轮次）。
+        self.served_calls = 0
+        #: 最后一次调用模型说的那句收工话——``finish`` 步的观察。
+        self.finish_content = ""
+        #: 最近一次 ``error`` 的原文。
+        self.error = ""
+        self._last_index = 0
+        self._messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": _system_prompt(workspace, goal, instructions),
+            },
+            {"role": "user", "content": goal},
+        ]
+
+    @property
+    def last_turn_index(self) -> int:
+        """最后服务过的那一轮的序号——调用方补 ``finish`` 步时用它对齐。"""
+        return self._last_index
+
+    @property
+    def max_steps(self) -> int:
+        return max(0, self._budget.max_steps)
+
+    @property
+    def max_cost_usd(self) -> float:
+        return self._budget.max_cost_usd
+
+    def add_user_message(self, content: str) -> None:
+        """把一条新指令追加进会话（L1 的 Critic 反馈走这条）。"""
+        self._messages = [*self._messages, {"role": "user", "content": content}]
+
+    async def advance(self, *, max_turns: int | None = None) -> AgentStatus:
+        """推进循环，直到某条停止条件成立；返回那条条件的自报状态。
+
+        ``max_turns`` 是**本次**推进的轮数额度（L1 用它给 Critic 留够步数）；
+        会话自身的 ``Budget.max_steps`` 是整条会话唯一的天花板，续跑接着算。
+
+        判定顺序与 §5.0 完全一致：先判完成，再判预算，再看步数。**不再执行工具**
+        那条硬停语义保持原样——超出预算或额度的那一轮不落地。
+        """
+        schemas = self._runner._tools.list_schemas()
+        max_steps = self.max_steps
+        allowance = max_steps if max_turns is None else max(0, max_turns)
+        turns = 0
+
+        while turns < allowance and self.turns < max_steps:
+            index = self.turns
+            self._last_index = index
+            self.served_calls += 1
+            try:
+                result = await self._runner._llm.chat_with_tools(self._messages, schemas)
+            except Exception as exc:  # noqa: BLE001 - 基础设施故障就是 error 这条腿
+                logger.warning("agent llm call failed: %s", exc)
+                self.error = f"{type(exc).__name__}: {exc}"
+                return "error"
+
+            metrics = getattr(self._runner._llm, "last_metrics", None)
+            self.usage = self.usage.add_call(metrics)
+            reported = str((metrics or {}).get("model_used") or "").strip()
+            if reported:
+                self.model = reported
+
+            # ① 终局：模型不再要求调工具。**先于预算判定**，理由见模块 docstring。
+            if not result.tool_calls:
+                self.finish_content = str(result.content or "")
+                # 把模型这句"我为什么停"也留进历史：续跑（L1 的回边）时后一段必须
+                # 看得见前一段说了什么，否则 Critic 的指令进来时上下文是断的。
+                self._messages = [
+                    *self._messages,
+                    {"role": "assistant", "content": self.finish_content},
+                ]
+                return "completed"
+
+            # ② 想让继续，但钱不够了。
+            if self.usage.cost_usd >= self._budget.max_cost_usd:
+                logger.info(
+                    "budget exhausted cost=%.6f limit=%.6f",
+                    self.usage.cost_usd,
+                    self._budget.max_cost_usd,
+                )
+                return "budget_exhausted"
+
+            # 自己拼 assistant 消息，不依赖 provider 的 messages 回传格式——
+            # 两条执行路径（真 LLM / 脚本）因此走的是同一段历史维护代码。
+            assistant: dict[str, Any] = {"role": "assistant", "content": result.content or ""}
+            assistant["tool_calls"] = list(result.tool_calls)
+            self._messages = [*self._messages, assistant]
+
+            for call in result.tool_calls:
+                step, tool_message = await self._runner.execute_call(
+                    call, index=index, workspace=self._workspace
+                )
+                self.steps.append(step)
+                self._messages = [*self._messages, tool_message]
+
+            self._messages = compact_messages(self._messages, self._policy)
+            turns += 1
+            self.turns += 1
+
+        return "step_limit"
+
+    def build_run(
+        self,
+        status: AgentStatus,
+        *,
+        expert: str = "",
+        review_rounds: int = 0,
+        usage: Usage | None = None,
+        stop_reason: str = "",
+        error: str = "",
+    ) -> AgentRun:
+        """把会话的累计状态收成一个 ``AgentRun``（四个结局共用这一个出口）。"""
+        if self.finish_content:
+            observation = self.finish_content[:200]
+        else:
+            observation = ""
+        if status == "completed":
+            self.steps.append(
+                Step(index=self._last_index, action="finish", observation=observation)
+            )
+        return AgentRun(
+            status=status,
+            steps=tuple(self.steps),
+            usage=usage if usage is not None else self.usage,
+            model=self.model,
+            temperature=self._runner._temperature,
+            expert=expert or self.expert,
+            stop_reason=stop_reason,
+            error=error or self.error,
+            review_rounds=review_rounds,
+        )
 
 
 class LLMBackedAgent:
@@ -73,110 +272,22 @@ class LLMBackedAgent:
             temperature = float(raw if raw is not None else 0.0)
         self._temperature = temperature
 
+    def session(self, *, workspace: Path, goal: str, budget: Budget) -> LoopSession:
+        """开一条可被续跑的会话。L1 需要拿着它跨回边继续推进。"""
+        return LoopSession(
+            self,
+            workspace=workspace,
+            goal=goal,
+            budget=budget,
+            instructions=self._instructions,
+        )
+
     async def run(self, *, workspace: Path, goal: str, budget: Budget) -> AgentRun:
-        schemas = self._tools.list_schemas()
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "system",
-                "content": _system_prompt(workspace, goal, self._instructions),
-            },
-            {"role": "user", "content": goal},
-        ]
-        steps: list[Step] = []
-        usage = Usage()
-        #: 实际作答的模型。fallback 链接手时 ``last_metrics["model_used"]`` 与配置的
-        #: 主模型不同——如实记录是 §12 的要求（"RunResult 如实记录 model"）。
-        model = self._model
+        session = self.session(workspace=workspace, goal=goal, budget=budget)
+        status = await session.advance()
+        return session.build_run(status, stop_reason=_stop_reason(status, session))
 
-        for index in range(max(0, budget.max_steps)):
-            try:
-                result = await self._llm.chat_with_tools(messages, schemas)
-            except Exception as exc:  # noqa: BLE001 - 基础设施故障就是 error 这条腿
-                logger.warning("agent llm call failed: %s", exc)
-                return self._stop(
-                    steps,
-                    usage,
-                    model,
-                    "error",
-                    stop_reason="LLM 调用失败",
-                    error=f"{type(exc).__name__}: {exc}",
-                )
-
-            metrics = getattr(self._llm, "last_metrics", None)
-            usage = usage.add_call(metrics)
-            reported = str((metrics or {}).get("model_used") or "").strip()
-            if reported:
-                model = reported
-
-            # ① 终局：模型不再要求调工具。**先于预算判定**，理由见模块 docstring。
-            if not result.tool_calls:
-                steps.append(
-                    Step(index=index, action="finish", observation=str(result.content or "")[:200])
-                )
-                return self._stop(
-                    steps, usage, model, "completed", stop_reason="模型声明完成"
-                )
-
-            # ② 想让继续，但钱不够了。
-            if usage.cost_usd >= budget.max_cost_usd:
-                logger.info(
-                    "budget exhausted cost=%.6f limit=%.6f", usage.cost_usd, budget.max_cost_usd
-                )
-                return self._stop(
-                    steps,
-                    usage,
-                    model,
-                    "budget_exhausted",
-                    stop_reason=(
-                        f"累计成本 ${usage.cost_usd:.6f} 已达上限 ${budget.max_cost_usd:.6f}"
-                    ),
-                )
-
-            # 自己拼 assistant 消息，不依赖 provider 的 messages 回传格式——
-            # 两条执行路径（真 LLM / 脚本）因此走的是同一段历史维护代码。
-            assistant: dict[str, Any] = {"role": "assistant", "content": result.content or ""}
-            assistant["tool_calls"] = list(result.tool_calls)
-            messages.append(assistant)
-
-            for call in result.tool_calls:
-                step, tool_message = await self._execute_call(
-                    call, index=index, workspace=workspace
-                )
-                steps.append(step)
-                messages.append(tool_message)
-
-            messages = compact_messages(messages, self._policy)
-
-        return self._stop(
-            steps,
-            usage,
-            model,
-            "step_limit",
-            stop_reason=f"已达步数上限 {budget.max_steps}",
-        )
-
-    def _stop(
-        self,
-        steps: list[Step],
-        usage: Usage,
-        model: str,
-        status: AgentStatus,
-        *,
-        stop_reason: str = "",
-        error: str = "",
-    ) -> AgentRun:
-        """四个结局共用这一个出口：字段少漂一处，账本就少一个对不上的地方。"""
-        return AgentRun(
-            status=status,
-            steps=tuple(steps),
-            usage=usage,
-            model=model,
-            temperature=self._temperature,
-            stop_reason=stop_reason,
-            error=error,
-        )
-
-    async def _execute_call(
+    async def execute_call(
         self, call: dict[str, Any], *, index: int, workspace: Path
     ) -> tuple[Step, dict[str, Any]]:
         function = call.get("function") or {}
@@ -271,4 +382,18 @@ class LLMBackedAgent:
         }
 
 
-__all__ = ["LLMBackedAgent"]
+def _stop_reason(status: AgentStatus, session: LoopSession) -> str:
+    """四个结局各说清"我为什么停下"——CLI 与审计都读这一处。"""
+    if status == "completed":
+        return "模型声明完成"
+    if status == "budget_exhausted":
+        return (
+            f"累计成本 ${session.usage.cost_usd:.6f} 已达上限 "
+            f"${session.max_cost_usd:.6f}"
+        )
+    if status == "step_limit":
+        return f"已达步数上限 {session.max_steps}"
+    return "LLM 调用失败"
+
+
+__all__ = ["LLMBackedAgent", "LoopSession"]

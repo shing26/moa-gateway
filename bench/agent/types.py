@@ -102,6 +102,9 @@ class AgentRun:
     expert: str = ""
     stop_reason: str = ""
     error: str = ""
+    #: Critic 实际执行的回边轮数（§6 的 ``revise_rounds``）。L0 恒为 0；L1 用它
+    #: 把"协调开销"记在结构上，而不是让报告层去数轨迹里的工具调用。
+    review_rounds: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
