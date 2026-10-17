@@ -26,6 +26,7 @@ from bench.harness.runner import (
 )
 from bench.harness.verify import run_command
 from bench.harness.workspace import (
+    changed_paths,
     collect_patch,
     git,
     has_original_history,
@@ -271,9 +272,38 @@ EXTRA_FIX_COMMITS = {
 }
 EXTRA_TASK_IDS = sorted(EXTRA_FIX_COMMITS)
 
+#: 每条任务 fail-first 必须出现的失败特征。只判"退出码非零"挡不住假阳性（导入错误、
+#: 收集错误也非零），也不足以说明失败落在修复面附近——这里把每条任务的预期失败原因
+#: 钉住，读的是验证输出本身（handoff 条款 2）。
+EXTRA_FAIL_FIRST_MARKERS = {
+    "a746b81": ("assert True is False",),
+    "0896629": ("assert None ==",),
+    "bd4f186": ("AttributeError", "_WRITER_ID"),
+    "60c64ed": ("assert 0 == 1",),
+}
+
 
 def extra_spec(task_id: str) -> TaskSpec:
     return load_task(ROOT / "bench" / "tasks" / f"{task_id}.task.json")
+
+
+def _extra_task_available(task_id: str) -> bool:
+    """完整克隆才有基线提交；浅克隆下这些用例应当 skip，而不是物化失败。"""
+    return _commit_available(EXTRA_FIX_COMMITS[task_id]) and _commit_available(
+        extra_spec(task_id).base_commit
+    )
+
+
+EXTRA_TASK_PARAMS = [
+    pytest.param(
+        task_id,
+        marks=pytest.mark.skipif(
+            not _extra_task_available(task_id),
+            reason=f"需要完整克隆：浅克隆里没有 {task_id} 的基线提交",
+        ),
+    )
+    for task_id in EXTRA_TASK_IDS
+]
 
 
 def _solution_files(task_id: str) -> list[str]:
@@ -281,18 +311,14 @@ def _solution_files(task_id: str) -> list[str]:
     patch = (ROOT / "bench" / "tasks" / f"{task_id}.solution.patch").read_text(
         encoding="utf-8"
     )
-    return [
-        line.split(" b/", 1)[1]
-        for line in patch.splitlines()
-        if line.startswith("diff --git ")
-    ]
+    return changed_paths(patch)
 
 
 def _pinned_nodeid(task: TaskSpec) -> str:
     return next(token for token in task.verify_command if "::" in token)
 
 
-@pytest.mark.parametrize("task_id", EXTRA_TASK_IDS)
+@pytest.mark.parametrize("task_id", EXTRA_TASK_PARAMS)
 def test_extra_tasks_fail_first_fails_on_the_fix_surface(
     tmp_path: Path, task_id: str
 ) -> None:
@@ -316,10 +342,12 @@ def test_extra_tasks_fail_first_fails_on_the_fix_surface(
     result = run_command(task.argv, cwd=workspace)
     assert result.exit_code == 1, result.output
     assert f"FAILED {_pinned_nodeid(task)}" in result.output
+    missing = [m for m in EXTRA_FAIL_FIRST_MARKERS[task_id] if m not in result.output]
+    assert not missing, f"fail-first 失败特征缺失 {missing}：\n{result.output}"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("task_id", EXTRA_TASK_IDS)
+@pytest.mark.parametrize("task_id", EXTRA_TASK_PARAMS)
 async def test_extra_tasks_end_to_end_real_fix_passes(
     tmp_path: Path, task_id: str
 ) -> None:
@@ -355,7 +383,7 @@ async def test_extra_tasks_end_to_end_real_fix_passes(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("task_id", EXTRA_TASK_IDS)
+@pytest.mark.parametrize("task_id", EXTRA_TASK_PARAMS)
 async def test_extra_tasks_end_to_end_only_editing_tests_fails(
     tmp_path: Path, task_id: str
 ) -> None:

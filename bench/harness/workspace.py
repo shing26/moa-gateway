@@ -141,16 +141,27 @@ def restore_test_files(workspace: Path, test_paths: tuple[str, ...]) -> None:
 def touched_test_paths(patch: str, test_paths: tuple[str, ...]) -> bool:
     """patch 是否碰过测试文件。§7.5 的第一信号，判据仍是还原后的复验。"""
     roots = {str(Path(item).parent.as_posix()) for item in test_paths}
+    for path in changed_paths(patch):
+        if path in test_paths or any(path.startswith(root + "/") for root in roots):
+            return True
+    return False
+
+
+def changed_paths(patch: str) -> list[str]:
+    """patch 改过的目标路径（``b/`` 侧），按出现顺序。
+
+    解析 ``diff --git`` 头这件事只有这一个所有者——``touched_test_paths`` 的防作弊
+    信号与测试里的 solution patch 文件清单都走它，免得两边各写一份 split。
+    """
+    paths: list[str] = []
     for line in patch.splitlines():
         if not line.startswith("diff --git "):
             continue
         parts = line.split(" b/", 1)
         if len(parts) != 2:
             continue
-        path = parts[1].strip()
-        if path in test_paths or any(path.startswith(root + "/") for root in roots):
-            return True
-    return False
+        paths.append(parts[1].strip())
+    return paths
 
 
 def has_original_history(workspace: Path, base_commit: str) -> bool:
@@ -164,6 +175,7 @@ def has_original_history(workspace: Path, base_commit: str) -> bool:
 
 __all__ = [
     "MissingCommitError",
+    "changed_paths",
     "collect_patch",
     "git",
     "has_original_history",

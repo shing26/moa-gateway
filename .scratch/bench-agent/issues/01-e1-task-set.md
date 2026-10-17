@@ -37,4 +37,19 @@
 端到端回归在 `tests/unit/test_bench_harness.py` 新增三条 parametrized 用例（每个任务
 各一参）：fail-first 退出码 1 且失败摘要含钉住的 nodeid；solution 全量写回 → `pass`；
 只改测试文件 → 整棵测试树还原后 `fail`。既有 `988fccb` 的 task / patch 零改动。
-README 测试基线 1241 → 1253（badge / 摘要 / 离线保障 / 目录树 / 门禁）。
+README 测试基线 1241 → 1253（badge / 摘要 / 离线保障 / 目录树 / 门禁；随后 03 的 L1
+落在同一 branch 上，又把 1253 → 1270）。
+
+**code-review 补记（同轮）**：双轴评审后补三处。1) 三条 parametrized 用例加了按任务
+的浅克隆 skip（`EXTRA_TASK_PARAMS`）——否则浅克隆里 `materialize()` 会抛
+`MissingCommitError`，而既有用例与 ADR-023 的约定是 skip。2) fail-first 守卫从"退出码
+1 + 失败摘要含 nodeid"加严到逐任务断言预期失败特征（`EXTRA_FAIL_FIRST_MARKERS`），读
+验证输出本身，挡住"导入 / 收集错误也算 fail-first"。3) patch 的 `diff --git` 头解析收
+进 `bench/harness/workspace.changed_paths()`，与 `touched_test_paths` 共用一份。
+
+已知取舍（如实记）：`bd4f186` 的 fail-first 停在
+`AttributeError: ... has no attribute '_WRITER_ID'`——修复引入的每写者标识在基线不存在，
+落在修复面上，但判据引用了私有常量 `_WRITER_ID`，不是纯行为断言（Spec 轴记为 partial）。
+该 commit 的测试 patch 里没有别的可用判据，删掉就少一条"难"任务；先保留并记下这个耦合。
+`.gitattributes` 的 LF 钉定也顺带修掉既有 `988fccb` patch 在 `core.autocrlf=true` 克隆上
+的同类隐患（内容零改动）。
