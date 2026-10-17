@@ -83,6 +83,8 @@ async def run_task(
     goal: str = NEUTRAL_GOAL,
     budget: Budget,
     timeout_s: float = 300.0,
+    budget_tier: str = "B1",
+    baseline_cost_usd: float = 0.0,
 ) -> RunResult:
     workspace = materialize(
         repo=repo,
@@ -128,6 +130,8 @@ async def run_task(
         verdict_output=verdict.output,
         wall_clock_s=wall_clock_s,
         patch_touched_tests=patch_touched_tests,
+        budget_tier=budget_tier,
+        baseline_cost_usd=baseline_cost_usd,
     )
 
 
@@ -154,7 +158,8 @@ def summarize(result: RunResult) -> str:
     """一行摘要，给人看。"""
     usage: Any = result.agent_run.usage
     return (
-        f"{result.task_id} arm={result.arm} outcome={result.outcome} "
+        f"{result.task_id} arm={result.arm} tier={result.budget_tier} "
+        f"outcome={result.outcome} "
         f"status={result.agent_run.status} steps={len(result.agent_run.steps)} "
         f"cost=${usage.cost_usd:.6f} calls={usage.llm_calls} "
         f"wall={result.wall_clock_s:.1f}s tests_touched={result.patch_touched_tests}"

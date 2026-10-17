@@ -30,6 +30,7 @@ from bench.arms import (  # noqa: E402
     available_arms,
     resolve_arm,
 )
+from bench.harness.budget import B1_TIER, B3_TIER, BudgetPolicy  # noqa: E402
 from bench.harness.runner import (  # noqa: E402
     InvalidTaskError,
     load_task,
@@ -55,8 +56,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--workdir", default=str(ROOT / ".bench-work"))
     parser.add_argument("--out", default="", help="RunResult JSON 的落盘路径")
     parser.add_argument("--arm", default=DEFAULT_ARM, help=_arm_help())
-    parser.add_argument("--max-steps", type=int, default=30)
-    parser.add_argument("--max-cost-usd", type=float, default=1.5)
+    parser.add_argument(
+        "--budget-tier",
+        choices=[B1_TIER, B3_TIER],
+        default=B1_TIER,
+        help="B1 = 等预算主实验（四档共用上限）；B3 = 放宽复跑（只给 B1 失败的档位）",
+    )
+    parser.add_argument(
+        "--baseline-cost-usd",
+        type=float,
+        default=0.0,
+        help="B3 复跑时同 (task, arm) 的 B1 花费，用于算增量成本",
+    )
+    parser.add_argument("--max-steps", type=int, default=None, help="覆盖该档默认步数上限")
+    parser.add_argument(
+        "--max-cost-usd", type=float, default=None, help="覆盖该档默认美元上限"
+    )
     parser.add_argument("--model", default="", help="覆盖 LLM_MODEL（用 LiteLLM 的限定名）")
     parser.add_argument("--temperature", type=float, default=None)
     return parser.parse_args(argv)
@@ -69,6 +84,16 @@ def build_llm(args: argparse.Namespace) -> LLMClient:
     if args.temperature is not None:
         config = dataclasses.replace(config, temperature=args.temperature)
     return LLMClient(config)
+
+
+def _resolve_budget(args: argparse.Namespace) -> Budget:
+    """预算来自档位策略（B1/B3 的单一来源），``--max-*`` 只做显式覆盖。"""
+    budget = BudgetPolicy().for_tier(args.budget_tier)
+    if args.max_cost_usd is not None:
+        budget = dataclasses.replace(budget, max_cost_usd=args.max_cost_usd)
+    if args.max_steps is not None:
+        budget = dataclasses.replace(budget, max_steps=args.max_steps)
+    return budget
 
 
 async def main(argv: list[str] | None = None) -> int:
@@ -85,7 +110,7 @@ async def main(argv: list[str] | None = None) -> int:
         return 4
     spec = load_task(Path(args.tasks_dir) / f"{args.task}.task.json")
 
-    budget = Budget(max_cost_usd=args.max_cost_usd, max_steps=args.max_steps)
+    budget = _resolve_budget(args)
     try:
         result = await run_task(
             spec=spec,
@@ -94,6 +119,8 @@ async def main(argv: list[str] | None = None) -> int:
             workdir=Path(args.workdir),
             arm=args.arm,
             budget=budget,
+            budget_tier=args.budget_tier,
+            baseline_cost_usd=args.baseline_cost_usd,
         )
     except MissingCommitError as exc:
         logger.error("基线提交不可用：%s（需要完整克隆，浅克隆拿不到历史）", exc)

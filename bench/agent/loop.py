@@ -142,6 +142,11 @@ class LoopSession:
     def max_cost_usd(self) -> float:
         return self._budget.max_cost_usd
 
+    @property
+    def max_tokens(self) -> int:
+        """token 兜底上限；``0`` 表示不设（§5.3：它不是主线判据）。"""
+        return self._budget.max_tokens
+
     def add_user_message(self, content: str) -> None:
         """把一条新指令追加进会话（L1 的 Critic 反馈走这条）。"""
         self._messages = [*self._messages, {"role": "user", "content": content}]
@@ -201,12 +206,16 @@ class LoopSession:
                 ]
                 return "completed"
 
-            # ② 想让继续，但钱不够了。
-            if self.usage.cost_usd - cost_at_start >= phase_cost_limit:
+            # ② 想让继续，但钱或 token 不够了。token 是兜底：主线判美元，它只防
+            # 单个 agent 无节制地刷 token。
+            if self.usage.cost_usd - cost_at_start >= phase_cost_limit or (
+                self.max_tokens > 0 and self.usage.total_tokens >= self.max_tokens
+            ):
                 logger.info(
-                    "budget exhausted phase_cost=%.6f limit=%.6f",
+                    "budget exhausted phase_cost=%.6f limit=%.6f tokens=%d",
                     self.usage.cost_usd - cost_at_start,
                     phase_cost_limit,
+                    self.usage.total_tokens,
                 )
                 return "budget_exhausted"
 

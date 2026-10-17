@@ -12,12 +12,12 @@
 [![pgvector](https://img.shields.io/badge/pgvector-4169E1?logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector)
 [![Elasticsearch](https://img.shields.io/badge/Elasticsearch-005571?logo=elasticsearch&logoColor=white)](https://www.elastic.co/elasticsearch)
 <br>
-[![Tests](https://img.shields.io/badge/tests-1312%20passed-brightgreen.svg)](https://github.com/shing26/moa-gateway/actions)
+[![Tests](https://img.shields.io/badge/tests-1322%20passed-brightgreen.svg)](https://github.com/shing26/moa-gateway/actions)
 [![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Security: Bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
 
 <p align="center">
-  <b>1312</b> 自动化测试 · <b>22</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
+  <b>1322</b> 自动化测试 · <b>22</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
 </p>
 
 <p align="center">
@@ -81,7 +81,7 @@ MoA Gateway 将多智能体系统收敛至**确定性工程治理**之下，提�
 ### 5. 全链路审计与零成本 CI 确定性测试
 
 * **全生命周期记账**：共享 `trace_id` 经 ContextVar 贯穿路由、执行、质检全流程，协作层自身的 Token 与延迟也纳管记账；`budget_guard` 会话级成本熔断（`BUDGET_SESSION_LIMIT_USD`）；审计 WAL 写成链（`prev_hash` / `entry_hash`，能指出第一个被改过的行号——tamper-evident，不是 tamper-proof）。
-* **离线确定性保障**：Mock 协作 / 任务 LLM 与真机调合同构，CI 在 100% 零网络、零 Token 消耗下完成拓扑与流式验证，沉淀 **1312 passed / 4 skipped**。
+* **离线确定性保障**：Mock 协作 / 任务 LLM 与真机调合同构，CI 在 100% 零网络、零 Token 消耗下完成拓扑与流式验证，沉淀 **1322 passed / 4 skipped**。
 
 ---
 
@@ -224,7 +224,7 @@ moa-gateway/
 │   └── retrieval-evaluation.md      # 检索 gold set、度量基线与精排止损归档
 ├── evals/       # 数据集与 run_evals.py（intent / guard / e2e / retrieval / hitl_feedback）
 ├── scripts/     # 演示与验收：run_collaboration / rag_case / compare_rerank / doctor / redteam …
-└── tests/       # 1312 单元测试 + 双引擎 Parity 对照集成测试
+└── tests/       # 1322 单元测试 + 双引擎 Parity 对照集成测试
 ```
 
 ---
@@ -264,7 +264,7 @@ moa-gateway/
 ## 🧪 质量保障与门禁
 
 ```bash
-pytest tests/unit -q                          # 1312 passed / 4 skipped（零网络零 token）
+pytest tests/unit -q                          # 1322 passed / 4 skipped（零网络零 token）
 ruff check .                                  # 代码风格
 bandit -r app -q -s B105,B107,B110,B112,B324  # 安全扫描
 python evals/run_evals.py --offline           # e2e 真跑业务链路（真 pipeline + 正则路由 + mock agent）

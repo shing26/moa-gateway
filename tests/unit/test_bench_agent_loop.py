@@ -115,3 +115,24 @@ async def test_reported_model_is_the_one_that_answered(tmp_path: Path) -> None:
     )
     run = await agent.run(workspace=tmp_path, goal="目标", budget=Budget(1.0, 5))
     assert run.model == "openrouter/fallback-model"
+
+
+@pytest.mark.asyncio
+async def test_token_cap_is_a_budget_fallback(tmp_path: Path) -> None:
+    """token 兜底命中同样归 budget_exhausted，且越额那一轮不执行工具。"""
+    turns = [
+        ScriptedTurn(
+            tool="list_files",
+            arguments={},
+            prompt_tokens=80,
+            completion_tokens=40,
+        ),
+        ScriptedTurn(final="本可以做完"),
+    ]
+    agent = make_agent(tmp_path, turns)
+    run = await agent.run(
+        workspace=tmp_path, goal="目标", budget=Budget(100.0, 10, max_tokens=100)
+    )
+    assert run.status == "budget_exhausted"
+    assert run.usage.total_tokens == 120
+    assert run.steps == ()

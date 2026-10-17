@@ -61,6 +61,11 @@ class Usage:
     cost_usd: float = 0.0
     llm_latency_ms: float = 0.0
 
+    @property
+    def total_tokens(self) -> int:
+        """进出的 token 总量——token 兜底上限与报告都按这个数看。"""
+        return self.prompt_tokens + self.completion_tokens
+
     def add_call(self, metrics: Mapping[str, Any] | None) -> "Usage":
         """并入一次 LLM 调用的用量。``llm_calls`` 每次 +1，与 metrics 是否为空无关。"""
         values = metrics or {}
@@ -94,21 +99,29 @@ class Budget:
     ``max_cost_usd`` 是主判据（§5.3：等预算对比按美元算）。它只能**事后**累计——
     调用前无从得知这次花多少——所以实现上允许最后一次调用把预算越过一点，判据是
     "累计值已达到上限"。``max_steps`` 是兜底，防止不花钱的原地打转。
+
+    ``max_tokens`` 是 §5.3 的第二条兜底：防止单个 agent 无节制地刷 token。它**不做
+    主线判据**（主线判美元），``0`` 表示不设。命中它同样归 ``budget_exhausted``——
+    与"想继续但没额度了"是同一件事。
     """
 
     max_cost_usd: float
     max_steps: int
+    max_tokens: int = 0
 
     def remaining(self, *, usage: Usage, steps_used: int) -> "Budget":
         """从全局累计用量里切出下一阶段可用的预算。"""
         return Budget(
             max_cost_usd=max(0.0, self.max_cost_usd - usage.cost_usd),
             max_steps=max(0, self.max_steps - steps_used),
+            max_tokens=self.max_tokens,
         )
 
     def stop_status(self, *, usage: Usage, steps_used: int) -> AgentStatus | None:
-        """全局预算的判停顺序：成本先于步数；两项都未到则返回 ``None``。"""
+        """全局预算的判停顺序：成本先于 token 兜底、token 先于步数；都未到返回 ``None``。"""
         if usage.cost_usd >= self.max_cost_usd:
+            return "budget_exhausted"
+        if self.max_tokens > 0 and usage.total_tokens >= self.max_tokens:
             return "budget_exhausted"
         if steps_used >= self.max_steps:
             return "step_limit"
@@ -171,9 +184,19 @@ class RunResult:
     #: 采集到的 patch 是否碰过测试文件。§7.5 要求"diff 全留"以便事后核查它是真修了
     #: 还是绕过了；这个布尔是那个核查的第一个信号（判据仍然是 harness 还原后的复验）。
     patch_touched_tests: bool = False
+    #: 这次 run 属于哪一档预算（§5.3）。``B1`` = 等预算主实验（四档同一美元上限）；
+    #: ``B3`` = 只对 B1 里失败的档位放宽上限的复跑。报告靠它把两档分开。
+    budget_tier: str = "B1"
+    #: 同 (task, arm) 在 B1 的花费；只在 B3 复跑时有意义。增量成本 = 本次 - 它。
+    baseline_cost_usd: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @property
+    def incremental_cost_usd(self) -> float:
+        """相对 B1 基线的增量成本（§5.3 要求诚实标注"多花了多少"）。"""
+        return max(0.0, self.agent_run.usage.cost_usd - self.baseline_cost_usd)
 
 
 class CodingAgent(Protocol):
