@@ -2,11 +2,13 @@
 
 from bench.report.aggregate import (
     ARM_ORDER,
+    MIN_RUNS_PER_CELL,
     OUTCOMES,
     ArmColumn,
     CellResult,
     DoseReport,
     MarginalStep,
+    OutcomeCounts,
     RunRow,
     build_report,
     load_rows,
@@ -16,11 +18,13 @@ from bench.report.aggregate import (
 
 __all__ = [
     "ARM_ORDER",
+    "MIN_RUNS_PER_CELL",
     "OUTCOMES",
     "ArmColumn",
     "CellResult",
     "DoseReport",
     "MarginalStep",
+    "OutcomeCounts",
     "RunRow",
     "build_report",
     "load_rows",

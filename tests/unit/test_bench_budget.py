@@ -13,6 +13,7 @@ from bench.harness.budget import (
     B3_TIER,
     BudgetPolicy,
     b3_candidates,
+    plan_b3_reruns,
 )
 from bench.harness.runner import write_result
 
@@ -85,6 +86,24 @@ def test_b3_candidates_ignore_runs_that_are_already_b3() -> None:
     results = [_result("t1", "L3", "fail", tier=B3_TIER)]
 
     assert b3_candidates(results) == ()
+
+
+def test_plan_b3_reruns_derives_the_baseline_from_b1_results() -> None:
+    results = [
+        _result("t1", "L3", "fail", tier=B1_TIER, cost=0.4),
+        _result("t1", "L3", "fail", tier=B1_TIER, cost=0.2),  # 两次尝试 → 基线 0.6
+        _result("t2", "L0", "pass", tier=B1_TIER, cost=0.1),
+        _result("t2", "L1", "error", tier=B1_TIER, cost=0.9),  # 噪音，不复跑
+    ]
+    policy = BudgetPolicy()
+
+    plan = plan_b3_reruns(results, policy=policy)
+
+    assert [(item.task_id, item.arm) for item in plan] == [("t1", "L3")]
+    assert plan[0].baseline_cost_usd == pytest.approx(0.6)
+    # 复跑用的是放宽档，不是 B1 上限。
+    assert plan[0].budget == policy.b3()
+    assert plan[0].budget.max_cost_usd > policy.b1().max_cost_usd
 
 
 def test_two_budget_tiers_are_distinguishable_in_the_artifact(

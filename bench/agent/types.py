@@ -32,6 +32,15 @@ AgentStatus = Literal["completed", "step_limit", "budget_exhausted", "error"]
 #: **没有判决可下**——由执行体自报、harness 原样转记，不是"判决为不达标"。
 Outcome = Literal["pass", "fail", "budget_exhausted", "error"]
 
+#: 预算档位（§5.3）。``B1`` = 等预算主实验（四档共用同一个美元上限）；``B3`` =
+#: 只对 B1 里失败的档位放宽上限的复跑。定义在 types 而不是 harness/budget.py，是因为
+#: ``RunResult`` 要把档位写进落盘物——放另一边会绕回一个 import 环。字面量类型也意味着
+#: 落盘校验、CLI choices 与报告三处读的是同一个来源，不再各自写裸字符串。
+BudgetTier = Literal["B1", "B3"]
+
+B1_TIER: BudgetTier = "B1"
+B3_TIER: BudgetTier = "B3"
+
 
 @dataclass(frozen=True)
 class Step:
@@ -186,7 +195,7 @@ class RunResult:
     patch_touched_tests: bool = False
     #: 这次 run 属于哪一档预算（§5.3）。``B1`` = 等预算主实验（四档同一美元上限）；
     #: ``B3`` = 只对 B1 里失败的档位放宽上限的复跑。报告靠它把两档分开。
-    budget_tier: str = "B1"
+    budget_tier: BudgetTier = B1_TIER
     #: 同 (task, arm) 在 B1 的花费；只在 B3 复跑时有意义。增量成本 = 本次 - 它。
     baseline_cost_usd: float = 0.0
 
@@ -219,7 +228,10 @@ __all__ = [
     "AgentRun",
     "AgentStatus",
     "AgentFactory",
+    "B1_TIER",
+    "B3_TIER",
     "Budget",
+    "BudgetTier",
     "CodingAgent",
     "Outcome",
     "RunResult",

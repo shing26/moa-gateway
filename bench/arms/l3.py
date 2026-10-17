@@ -36,7 +36,6 @@ from bench.agent.planner import Plan, Subtask
 from bench.agent.types import (
     Budget,
     CodingAgent,
-    Step,
     SubtaskUsage,
     Usage,
 )
@@ -251,19 +250,17 @@ def _selected(
 
 
 def _failed_worker(*, subtask: Subtask, error: str) -> SubtaskExecution:
-    """把并发任务里漏出来的异常收成一条可审计的 error，而不是炸掉整个 run。"""
-    step = Step(
-        index=0,
-        action="call_tool",
-        tool="l3_worker",
-        observation=error[:2_000],
-        outcome="failed",
-    )
+    """把并发任务里漏出来的异常收成一条可审计的 error，而不是炸掉整个 run。
+
+    刻意**不**造一条假的 ``Step``：`l3_worker` 不是注册表里的工具，写进轨迹等于宣称
+    发生过一次并不存在的工具调用。与 L2 的 worker 出错一致——错误经
+    ``SubtaskExecution.error`` 上浮到 ``AgentRun.error``，轨迹里不留伪证据。
+    """
     return SubtaskExecution(
         outcomes=(),
         usage=Usage(),
         turns=0,
-        steps=(step,),
+        steps=(),
         model="",
         status="error",
         subtask_usage=(

@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from bench.report import (
+    MIN_RUNS_PER_CELL,
     RunRow,
     build_report,
     load_rows_dir,
@@ -101,9 +104,20 @@ def test_outcomes_are_counted_separately_not_folded_into_fail() -> None:
         "budget_exhausted": 1,
         "error": 1,
     }
-    # 通过率只看 pass；budget_exhausted / error 不混进 fail。
-    assert cell.pass_rate == 0.25
+    # 通过率的分母去掉 error（§8：error 是噪音，单独统计、不进通过率）；
+    # budget_exhausted 留在分母里，但它仍单独成列，不并进 fail。
+    assert cell.valid_runs == 3
+    assert cell.pass_rate == 1 / 3
     assert cell.avg_cost_usd == 0.25
+
+
+def test_all_error_cell_has_no_pass_rate() -> None:
+    report = build_report([_row("t1", "L0", "error", 0.10)])
+
+    cell = report.cell("t1", "L0")
+    # 没有有效样本：通过率是 None（不是 0）——0 会被读成"跑了但没过"。
+    assert cell.valid_runs == 0
+    assert cell.pass_rate is None
 
 
 def test_marginal_benefit_is_each_column_minus_the_previous() -> None:
@@ -185,3 +199,76 @@ def test_run_row_from_dict_tolerates_missing_usage() -> None:
 
     assert row.cost_usd == 0.0
     assert row.budget_tier == "B1"
+
+
+def test_from_dict_rejects_an_unknown_budget_tier() -> None:
+    # 静默收下一个不认识的档位会让它从曲线里"消失"又不报错——宁可炸。
+    with pytest.raises(ValueError):
+        RunRow.from_dict(
+            {"task_id": "t1", "arm": "L0", "outcome": "pass", "budget_tier": "B9"}
+        )
+
+
+def test_report_records_the_source_run_files_for_traceability() -> None:
+    # "报告里每个数字都能追到具体的 run"：来源文件名随 report 一起落盘。
+    rows = [
+        RunRow(task_id="t1", arm="L0", outcome="pass", source="t1-L0-1.json"),
+        RunRow(task_id="t1", arm="L1", outcome="fail", source="t1-L1-1.json"),
+    ]
+
+    report = build_report(rows)
+
+    assert report.sources == ("t1-L0-1.json", "t1-L1-1.json")
+    assert report.to_dict()["sources"] == ["t1-L0-1.json", "t1-L1-1.json"]
+
+
+def test_loader_attaches_the_file_name_as_the_source(tmp_path: Path) -> None:
+    _write_run(tmp_path, "t1-L0-1.json", task="t1", arm="L0", outcome="pass")
+
+    rows = load_rows_dir(tmp_path)
+
+    assert rows[0].source == "t1-L0-1.json"
+
+
+def test_declared_tasks_that_have_no_runs_show_up_as_gaps() -> None:
+    # 只给出现过 task 的缺口会漏掉"整个任务一条都没跑"——显式声明任务集就能标出来。
+    report = build_report(
+        [_row("t1", "L0", "pass", 0.1)],
+        tasks=["t1", "t2"],
+    )
+
+    assert report.tasks == ("t1", "t2")
+    assert ("t2", "L0") in report.gaps
+    assert ("t2", "L3") in report.gaps
+
+
+def test_under_sampled_cells_are_flagged_below_the_three_run_bar() -> None:
+    # §9 要求每个格子 3 次；1 次甚至混在别的满样本格子里也要被点出来。
+    report = build_report(
+        [_row("t1", "L0", "pass", 0.1), _row("t2", "L0", "pass", 0.1)]
+        + [_row("t2", "L0", "pass", 0.1) for _ in range(MIN_RUNS_PER_CELL - 1)]
+    )
+
+    assert ("t1", "L0") in report.under_sampled
+    assert ("t2", "L0") not in report.under_sampled
+    assert "样本不足" in render_markdown(report)
+
+
+def test_b3_report_reports_incremental_cost_over_b1_baseline() -> None:
+    rows = [
+        RunRow(
+            task_id="t1",
+            arm="L3",
+            outcome="pass",
+            cost_usd=1.1,
+            budget_tier="B3",
+            baseline_cost_usd=0.4,
+        )
+    ]
+
+    report = build_report(rows, tier="B3")
+    column = next(item for item in report.columns if item.arm == "L3")
+
+    assert column.total_cost_usd == pytest.approx(1.1)
+    assert column.total_incremental_cost_usd == pytest.approx(0.7)
+    assert "增量成本" in render_markdown(report)

@@ -25,6 +25,7 @@ def test_parse_args_defaults() -> None:
     assert args.baseline_cost_usd == 0.0
     assert args.max_steps is None
     assert args.max_cost_usd is None
+    assert args.max_tokens is None
     assert args.out == ""
     assert args.model == ""
     assert args.temperature is None
@@ -42,10 +43,22 @@ def test_resolve_budget_uses_the_tier_policy_and_honours_overrides() -> None:
 
     overridden = cli._resolve_budget(
         cli.parse_args(
-            ["--task", "x", "--budget-tier", "B3", "--max-steps", "7", "--max-cost-usd", "0.25"]
+            [
+                "--task",
+                "x",
+                "--budget-tier",
+                "B3",
+                "--max-steps",
+                "7",
+                "--max-cost-usd",
+                "0.25",
+                "--max-tokens",
+                "1234",
+            ]
         )
     )
     assert (overridden.max_cost_usd, overridden.max_steps) == (0.25, 7)
+    assert overridden.max_tokens == 1234
 
 
 def test_parse_args_honours_overrides() -> None:
