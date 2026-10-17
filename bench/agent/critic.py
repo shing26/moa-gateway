@@ -54,10 +54,15 @@ class ReviewPolicy:
 
 @dataclass(frozen=True)
 class Critique:
-    """Critic 对一个 worker run 的裁定。``approved`` 为假时 ``instructions`` 必有内容。"""
+    """Critic 对一轮产出的裁定。``approved`` 为假时 ``instructions`` 必有内容。
+
+    ``targets`` 是"重跑哪几个子任务"的下标（L2/L3 的打回用它定向重跑）；
+    单 agent 的 L1 不用它，留空。
+    """
 
     approved: bool
     instructions: str = ""
+    targets: tuple[int, ...] = ()
 
 
 _JSON_BLOCK = re.compile(r"\{.*?\}", re.DOTALL)
@@ -86,6 +91,7 @@ def parse_verdict(text: str, *, instructions_limit: int = 4_000) -> Critique:
                     str(payload.get("instructions") or payload.get("reason") or raw),
                     instructions_limit,
                 ),
+                targets=_targets(payload.get("targets")),
             )
 
     if raw.upper().startswith(APPROVE):
@@ -98,6 +104,20 @@ def parse_verdict(text: str, *, instructions_limit: int = 4_000) -> Critique:
         )
     # 既不 approve 也没有结构化 verdict：保守判打回，原文留下当指令。
     return Critique(approved=False, instructions=_clip(raw, instructions_limit))
+
+
+def _targets(raw: object) -> tuple[int, ...]:
+    """把 Critic 给的 ``targets`` 收成去重保序的非负下标。非法项直接丢掉。"""
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    seen: list[int] = []
+    for item in raw:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            continue
+        value = int(item)
+        if value >= 0 and value not in seen:
+            seen.append(value)
+    return tuple(seen)
 
 
 def render_trajectory(steps: tuple[Step, ...], *, limit: int = TRAJECTORY_LIMIT) -> str:

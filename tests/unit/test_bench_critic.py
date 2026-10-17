@@ -33,6 +33,19 @@ def test_json_verdict_is_understood() -> None:
     assert "保护前缀" in verdict.instructions
 
 
+def test_revise_can_name_the_subtasks_to_rerun() -> None:
+    """L2 的打回要指出重跑哪几个子任务——``targets`` 是那条缝。"""
+    verdict = parse_verdict(
+        '{"verdict": "revise", "instructions": "第一个子任务改错了", "targets": [0, 2]}'
+    )
+    assert verdict.approved is False
+    assert verdict.targets == (0, 2)
+
+
+def test_approve_has_no_targets() -> None:
+    assert parse_verdict('{"verdict": "approve", "instructions": ""}').targets == ()
+
+
 def test_json_object_wrapped_in_prose_is_still_a_verdict() -> None:
     verdict = parse_verdict(
         '我先看了一下。\n```json\n{"verdict": "approve", "instructions": ""}\n```\n以上。'

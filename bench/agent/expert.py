@@ -184,6 +184,15 @@ class ExpertPool:
     def tools(self) -> ToolRegistry:
         return self._tools
 
+    @property
+    def temperature(self) -> float:
+        """池共用的采样温度。未显式给时从 client 的 config 读，与 ``LLMBackedAgent``
+        的默认规则一致——报告里的 temperature 要来自真正跑循环的那个 client。"""
+        if self._temperature is not None:
+            return float(self._temperature)
+        raw = getattr(getattr(self._llm, "config", None), "temperature", 0.0)
+        return float(raw if raw is not None else 0.0)
+
     def get(self, key: str) -> ToolExpert:
         try:
             spec = EXPERTS[key]
