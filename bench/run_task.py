@@ -21,10 +21,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.agents.provider import LLMClient, LLMConfig  # noqa: E402
-from app.agents.tools import ToolRegistry  # noqa: E402
 
-from bench.agent.loop import LLMBackedAgent  # noqa: E402
 from bench.agent.types import Budget  # noqa: E402
+from bench.arms import (  # noqa: E402
+    DEFAULT_ARM,
+    UnknownArmError,
+    arm_names,
+    available_arms,
+    resolve_arm,
+)
 from bench.harness.runner import (  # noqa: E402
     InvalidTaskError,
     load_task,
@@ -37,13 +42,19 @@ from bench.harness.workspace import MissingCommitError  # noqa: E402
 logger = logging.getLogger("bench.run_task")
 
 
+def _arm_help() -> str:
+    """档位说明直接来自注册表——CLI 与测试读的是同一份"哪些可用"。"""
+    listing = "；".join(f"{arm.name} = {arm.description}" for arm in available_arms())
+    return f"档位，默认 {DEFAULT_ARM}：{listing}"
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="跑一个 bench 任务（真 LLM，花钱）")
     parser.add_argument("--task", required=True, help="任务 id，例如 988fccb")
     parser.add_argument("--tasks-dir", default=str(ROOT / "bench" / "tasks"))
     parser.add_argument("--workdir", default=str(ROOT / ".bench-work"))
     parser.add_argument("--out", default="", help="RunResult JSON 的落盘路径")
-    parser.add_argument("--arm", default="L0")
+    parser.add_argument("--arm", default=DEFAULT_ARM, help=_arm_help())
     parser.add_argument("--max-steps", type=int, default=30)
     parser.add_argument("--max-cost-usd", type=float, default=1.5)
     parser.add_argument("--model", default="", help="覆盖 LLM_MODEL（用 LiteLLM 的限定名）")
@@ -65,17 +76,20 @@ async def main(argv: list[str] | None = None) -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
     args = parse_args(argv)
-    spec = load_task(Path(args.tasks_dir) / f"{args.task}.task.json")
     llm = build_llm(args)
-
-    def factory(*, workspace: Path, tools: ToolRegistry) -> LLMBackedAgent:
-        return LLMBackedAgent(llm, tools)
+    try:
+        agent_factory = resolve_arm(args.arm, llm=llm)
+    except UnknownArmError as exc:
+        # 静默退回 L0 会让"曲线上的 L3 其实是 L0"无声通过——宁可这里就炸。
+        logger.error("未知 arm：%s（可用：%s）", exc.name, "/".join(arm_names()) or "无")
+        return 4
+    spec = load_task(Path(args.tasks_dir) / f"{args.task}.task.json")
 
     budget = Budget(max_cost_usd=args.max_cost_usd, max_steps=args.max_steps)
     try:
         result = await run_task(
             spec=spec,
-            agent_factory=factory,
+            agent_factory=agent_factory,
             repo=ROOT,
             workdir=Path(args.workdir),
             arm=args.arm,

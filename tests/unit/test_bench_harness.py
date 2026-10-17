@@ -6,15 +6,17 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 
 import pytest
 
 from bench.agent.loop import LLMBackedAgent
 from bench.agent.scripted import ScriptedLLM, ScriptedTurn
-from bench.agent.types import Budget
+from bench.agent.types import AgentRun, Budget, RunResult
+from bench.arms import resolve_arm
 from bench.harness.runner import (
     InvalidTaskError,
     load_task,
@@ -184,6 +186,45 @@ async def test_end_to_end_real_fix_passes(tmp_path: Path) -> None:
     assert result.patch_touched_tests is False
     assert "_DASH_PROTECTED_PREFIXES" in result.patch
     assert write_result(result, tmp_path / "result.json").exists()
+
+
+@pytest.mark.asyncio
+@requires_history
+async def test_registry_l0_end_to_end_lands_a_full_run_result(tmp_path: Path) -> None:
+    """档位按名字从注册表取到，一路跑到判决，并落一份字段齐全的 RunResult JSON。"""
+    fixed_content = _show(f"{FIX_COMMIT}:{FIXED_FILE}")
+    factory = resolve_arm(
+        "L0",
+        llm=ScriptedLLM(
+            [
+                ScriptedTurn(
+                    tool="write_file",
+                    arguments={"path": FIXED_FILE, "content": fixed_content},
+                    cost_usd=0.001,
+                ),
+                ScriptedTurn(final="已修好", cost_usd=0.001),
+            ]
+        ),
+    )
+
+    result = await run_task(
+        spec=spec(),
+        agent_factory=factory,
+        repo=ROOT,
+        workdir=tmp_path / "work",
+        arm="L0",
+        budget=Budget(max_cost_usd=1.0, max_steps=10),
+    )
+
+    assert result.outcome == "pass", result.verdict_output
+    out = write_result(result, tmp_path / "result.json")
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    # "完整"是可核的：判决与自报两个类型声明的字段一个不缺。
+    assert set(payload) == {field.name for field in fields(RunResult)}
+    assert set(payload["agent_run"]) == {field.name for field in fields(AgentRun)}
+    assert payload["outcome"] == "pass"
+    assert payload["arm"] == "L0"
+    assert payload["agent_run"]["status"] == "completed"
 
 
 @pytest.mark.asyncio

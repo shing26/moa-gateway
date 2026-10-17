@@ -6,12 +6,18 @@ import json
 import logging
 import sys
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from bench.agent.types import AgentRun, Budget, CodingAgent, Outcome, RunResult
+from bench.agent.types import (
+    AgentFactory,
+    AgentRun,
+    Budget,
+    CodingAgent,
+    Outcome,
+    RunResult,
+)
 from bench.agent.tools import build_toolset
 from bench.harness.verify import run_command
 from bench.harness.workspace import (
@@ -67,9 +73,6 @@ def load_task(path: Path) -> TaskSpec:
     )
 
 
-AgentFactory = Callable[..., CodingAgent]
-
-
 async def run_task(
     *,
     spec: TaskSpec,
@@ -96,7 +99,7 @@ async def run_task(
         )
 
     tools = build_toolset(workspace=workspace, verify_command=spec.argv)
-    agent = agent_factory(workspace=workspace, tools=tools)
+    agent: CodingAgent = agent_factory(workspace=workspace, tools=tools)
 
     started = time.monotonic()
     agent_run: AgentRun = await agent.run(

@@ -18,7 +18,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -136,9 +136,16 @@ class CodingAgent(Protocol):
     async def run(self, *, workspace: Path, goal: str, budget: Budget) -> AgentRun: ...
 
 
+#: runner 取 agent 的方式：``agent_factory(workspace=..., tools=...)``。四档共用这一个
+#: 形状，差别只在返回的编排拓扑。定义在这里是因为生产方（``bench/arms``）与消费方
+#: （``bench/harness/runner``）都得引用同一份，而不是各自维持一条同形的别名。
+AgentFactory = Callable[..., CodingAgent]
+
+
 __all__ = [
     "AgentRun",
     "AgentStatus",
+    "AgentFactory",
     "Budget",
     "CodingAgent",
     "Outcome",

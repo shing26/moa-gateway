@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from bench import run_task as cli
+from bench.arms import DEFAULT_ARM, arm_names
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -38,6 +39,28 @@ def test_parse_args_honours_overrides() -> None:
 def test_parse_args_requires_a_task() -> None:
     with pytest.raises(SystemExit):
         cli.parse_args([])
+
+
+def test_default_arm_is_a_registered_arm() -> None:
+    """默认档位必须真能取到——默认值与"哪些可用"只能有一个来源。"""
+    assert cli.parse_args(["--task", "x"]).arm == DEFAULT_ARM
+    assert DEFAULT_ARM in arm_names()
+
+
+def test_cli_help_lists_every_registered_arm(capsys: pytest.CaptureFixture[str]) -> None:
+    """注册表一改，--arm 的说明跟着改：CLI 不自己维护一份可用清单。"""
+    with pytest.raises(SystemExit):
+        cli.parse_args(["--help"])
+    printed = capsys.readouterr().out
+    assert all(name in printed for name in arm_names())
+
+
+@pytest.mark.asyncio
+async def test_main_rejects_an_unknown_arm(caplog: pytest.LogCaptureFixture) -> None:
+    """未知 arm 要报错，而不是静默按 L0 跑——否则曲线上的 L3 可能是 L0。"""
+    code = await cli.main(["--task", "988fccb", "--arm", "L9"])
+    assert code != 0
+    assert "L9" in caplog.text
 
 
 def test_build_llm_honours_model_and_temperature_overrides() -> None:

@@ -4,10 +4,10 @@
 
 **Blocked by:** None — can start immediately
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] L0 经注册表按 arm 名取到，实现 `CodingAgent` 协议
-- [ ] CLI 的 `--arm` 走注册表；未知 arm 名报错，而不是静默退回 L0
-- [ ] 端到端用例：scripted L0 → `outcome=pass`，落一份完整 `RunResult` JSON
-- [ ] 四档共用同一段任务指令、同一套工具、同一个预算与判停条件（L0 先满足）
-- [ ] 注册表对"哪些 arm 可用"有单一来源，CLI 与测试读同一处
+- [x] L0 经注册表按 arm 名取到，实现 `CodingAgent` 协议
+- [x] CLI 的 `--arm` 走注册表；未知 arm 名报错，而不是静默退回 L0
+- [x] 端到端用例：scripted L0 → `outcome=pass`，落一份完整 `RunResult` JSON
+- [x] 四档共用同一段任务指令、同一套工具、同一个预算与判停条件（L0 先满足）
+- [x] 注册表对"哪些 arm 可用"有单一来源，CLI 与测试读同一处
