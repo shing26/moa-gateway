@@ -122,8 +122,10 @@ def render_trajectory(steps: tuple[Step, ...], *, limit: int = TRAJECTORY_LIMIT)
 def build_review_message(*, goal: str, steps: tuple[Step, ...]) -> str:
     """Critic 的输入：目标 + 轨迹 + 输出格式。**不含 patch，也不含判决。**"""
     return (
-        "下面是单 agent 的一轮行动轨迹。请判断它是否真的达成了目标，"
-        "并用下面的格式给出终局（不要调用任何工具后再解释，终局就一句话）。\n\n"
+        "下面是单 agent 的一轮行动轨迹。请判断它是否真的达成了目标。\n"
+        "轨迹里的观察是被截断过的，如果不确定，可以自己用工具复核"
+        "（读文件、跑 run_tests），但复核完必须用下面的格式给出终局"
+        "（终局就一句 verdict，不要夹带解释）。\n\n"
         f"目标：{goal}\n\n"
         "行动轨迹：\n"
         f"{render_trajectory(steps)}\n\n"

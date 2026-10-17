@@ -42,7 +42,7 @@ from bench.agent.critic import (
 )
 from bench.agent.expert import ExpertPool, ToolExpert
 from bench.agent.loop import LLMBackedAgent, LoopSession
-from bench.agent.types import AgentRun, Budget, CodingAgent, Usage
+from bench.agent.types import AgentRun, Budget, CodingAgent, Step, Usage
 from bench.arms.registry import Arm
 
 
@@ -84,7 +84,7 @@ class L1CriticAgent:
                 )
 
             critique, review_status, review_usage = await self._review(
-                goal=goal, steps=worker.steps, budget=budget, max_turns=remaining
+                goal=goal, steps=tuple(worker.steps), budget=budget, max_turns=remaining
             )
             combined = _merge_usage(combined, review_usage)
             if review_status != "completed":
@@ -119,7 +119,7 @@ class L1CriticAgent:
                 return worker.build_run(worker_status, usage=combined, review_rounds=rounds)
 
     async def _review(
-        self, *, goal: str, steps: Any, budget: Budget, max_turns: int
+        self, *, goal: str, steps: tuple[Step, ...], budget: Budget, max_turns: int
     ) -> "tuple[Critique | None, str, Usage]":
         """跑 Critic 一轮：给它目标 + worker 的轨迹，收它的终局与用量。
 
@@ -127,7 +127,7 @@ class L1CriticAgent:
         没有可信的裁定可以往下传，调用方按对应的自报状态收尾。
         """
         session = self._critic.session(workspace=self._workspace, goal=goal, budget=budget)
-        session.add_user_message(build_review_message(goal=goal, steps=tuple(steps)))
+        session.add_user_message(build_review_message(goal=goal, steps=steps))
         status = await session.advance(max_turns=max_turns)
         if status != "completed":
             return None, status, session.usage
