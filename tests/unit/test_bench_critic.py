@@ -33,6 +33,14 @@ def test_json_verdict_is_understood() -> None:
     assert "保护前缀" in verdict.instructions
 
 
+def test_json_revise_can_name_the_subtasks_to_rerun() -> None:
+    verdict = parse_verdict(
+        '{"verdict": "revise", "instructions": "子任务 1 还没修好", "targets": [1, 1, 3]}'
+    )
+    assert verdict.approved is False
+    assert verdict.targets == (1, 3)
+
+
 def test_json_object_wrapped_in_prose_is_still_a_verdict() -> None:
     verdict = parse_verdict(
         '我先看了一下。\n```json\n{"verdict": "approve", "instructions": ""}\n```\n以上。'

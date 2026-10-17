@@ -108,6 +108,7 @@ def test_plan_review_message_carries_goal_plan_and_results() -> None:
     assert "第一步" in message
     assert "第二次的结果" in message
     assert "APPROVED" in message
+    assert '"targets"' in message
 
 
 def test_render_plan_marks_unrun_subtasks() -> None:
