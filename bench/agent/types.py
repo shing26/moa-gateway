@@ -97,6 +97,9 @@ class AgentRun:
     usage: Usage
     model: str
     temperature: float
+    #: 产出这次 run 的专家（§5.1）。单 agent 档（L0）留空——那里没有角色分工。
+    #: 有它，多专家档的用量才**结构上**可归因，而不是靠调用点的约定去记谁是谁。
+    expert: str = ""
     stop_reason: str = ""
     error: str = ""
 

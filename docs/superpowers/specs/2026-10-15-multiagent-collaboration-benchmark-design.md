@@ -180,6 +180,10 @@ agent 不会失败，剂量曲线测不出任何东西，因为所有档位都"�
 **最大的一块真实工作量**，也是多智能体编排最核心的一课：**agent 不只是提示词，还得有
 行动能力**。实现前先查 `app/agent_core/task_agent.py` 是否已有可复用的工具循环。
 
+**落点（2026-10-17 实现决定，见 §13.2）**：专家做在 `bench/agent/expert.py`，不在
+`collaboration.py`——`app/` 零改动（ADR-023 决策 1）。复用的是循环机制
+（`bench/agent/loop.py` 的原生 tool-calling），不是 `ReActLoop` 的 JSON-in-text。
+
 ### 5.2 L3 的并发写收敛
 
 多个 worker 在同一 superstep 并发写同一个通道会直接 `InvalidUpdateError`（README 记录
@@ -334,3 +338,17 @@ test patch 的上下文是 LF，`git apply` 直接失败。物化时必须显式
 3. **§4.2 / §4.3 的口径对齐。** 树与数据流里残留的 `run(workspace, budget) ->
    RunResult`、"恢复测试文件到基线版本"改成本节 1、2 的写法——原文只有 §5 / §7.2
    / §8 被修正，同一份文档里于是有两个互相矛盾的说法。
+
+### 13.2 §5.1 落地（2026-10-17，专家接工具循环）
+
+§5.1 点名 `collaboration.py` 的专家，但那条链路与实验台的两个前提相冲：专家是
+`SubAgent`（没有失败结局），整条图还带 guard / evaluator / HITL / 审计，而 §4.1
+要实验台绕开这些。加上 ADR-023 决策 1（原语落 `bench/`、`app/` 零改动），落点定为
+**`bench/agent/expert.py`**：角色身份（coder / general / review）接到 §5.0 的
+`LLMBackedAgent` 上，工具集、工具契约、停止条件、账本形状全部沿用，产出多一个
+`AgentRun.expert` 供多专家档归因。取舍与代价记在 ADR-023 的 §5.1 补记里。
+
+排查结论（§5.1 要求的"先查现有工具循环"）：仓库里三处循环中，
+`app/agent_core/react.py` 的 `ReActLoop` 用 JSON-in-text（ADR-023 决策 3 已排除），
+`app/agents/stubs.py` 的 `_execute_with_tools` 出口是字符串（没有失败），
+`bench/agent/loop.py` 的 `LLMBackedAgent` 才是要复用的那一条。

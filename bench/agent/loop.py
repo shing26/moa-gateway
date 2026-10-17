@@ -33,8 +33,8 @@ from bench.agent.types import AgentRun, AgentStatus, Budget, Step, Usage
 logger = logging.getLogger("bench.agent.loop")
 
 
-def _system_prompt(workspace: Path, goal: str) -> str:
-    return (
+def _system_prompt(workspace: Path, goal: str, instructions: str = "") -> str:
+    base = (
         "你是一个自主编码 agent，在一个代码工作区里工作。\n"
         f"工作区根目录：{workspace}\n"
         f"目标：{goal}\n\n"
@@ -42,6 +42,11 @@ def _system_prompt(workspace: Path, goal: str) -> str:
         "认为目标已达成时，直接结束本轮（不再调用任何工具）。\n"
         "不要臆测文件内容，先读再看；不要重复已经失败过的做法。"
     )
+    # 角色指令由调用方给（§5.1 的专家），追加而不是替换：循环的规矩对每个角色
+    # 都成立，角色只多说一层"你是谁、你擅长什么"。
+    if instructions:
+        return f"{base}\n\n{instructions}"
+    return base
 
 
 class LLMBackedAgent:
@@ -55,10 +60,12 @@ class LLMBackedAgent:
         policy: MemoryPolicy | None = None,
         model: str = "",
         temperature: float | None = None,
+        instructions: str = "",
     ) -> None:
         self._llm = llm
         self._tools = tools
         self._policy = policy or MemoryPolicy()
+        self._instructions = instructions
         config = getattr(llm, "config", None)
         self._model = model or str(getattr(config, "model", "") or "")
         if temperature is None:
@@ -69,7 +76,10 @@ class LLMBackedAgent:
     async def run(self, *, workspace: Path, goal: str, budget: Budget) -> AgentRun:
         schemas = self._tools.list_schemas()
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": _system_prompt(workspace, goal)},
+            {
+                "role": "system",
+                "content": _system_prompt(workspace, goal, self._instructions),
+            },
             {"role": "user", "content": goal},
         ]
         steps: list[Step] = []

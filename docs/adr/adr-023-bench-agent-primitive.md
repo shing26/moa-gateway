@@ -65,3 +65,22 @@
   无法物化，对应用例会 skip，而不是伪装通过。
 - **网络只是软约束**：harness 剥掉代理与凭据类环境变量，工具集里没有联网能力，
   但不进容器。真隔离是另一个量级的工程。
+
+## 补记：§5.1 的专家落在哪（2026-10-17）
+
+§5.1 要求给专家池接工具循环，并点名了 `app/orchestration/collaboration.py` 的
+`coder` / `general` / `review`。那与决策 1 直接冲突，落点只有两条，本票选的是第一条：
+
+1. **在 `bench/` 内做一套带工具的专家**（选定）。`app/` 继续零改动，决策 1 成立。
+   代价：短期内专家有两份实现（`app/` 的聊天型 + `bench/agent/expert.py` 的行动型），
+   与"两套工具循环"记在同一处债里。
+2. 直接改 `collaboration.py` 给现有专家接工具。这会打破决策 1，必须同步回改本 ADR。
+
+选第一条的理由不止是"少改一处"：协作链路的专家是 `SubAgent`（`execute() -> str`，
+没有失败结局），整条图还带着 guard / evaluator / HITL / 审计，而 §4.1 明确要求实验台
+绕开这些——变量要干净。把工具接进那条链路，等于把实验要排除的噪音请回来。
+
+复用的是循环**机制**（决策 3 的原生 tool-calling，即 `bench/agent/loop.py` 的
+`LLMBackedAgent`），不是 `ReActLoop` 的 JSON-in-text，也不是
+`stubs._execute_with_tools` 的字符串出口。三者的排查结论写在
+`bench/agent/expert.py` 的模块 docstring 里。
