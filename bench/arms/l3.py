@@ -52,6 +52,16 @@ from bench.arms.registry import Arm
 WorkerLLMFactory = Callable[[int], Any]
 
 
+def clone_llm_factory(llm: Any) -> WorkerLLMFactory:
+    """默认的 worker 客户端工厂：每条 lane 深拷贝一份独立 client。
+
+    ``last_metrics`` 是 client 上的单值通道，多个 worker 共用一条会被后写覆盖，并发
+    下就串账。拷贝一份让每条 lane 自己记自己的账。工厂在这里**只定义一次**，``__init__``
+    与 ``build_l3`` 都复用它，改拷贝策略只有一处。
+    """
+    return lambda index: copy.deepcopy(llm)
+
+
 class L3ConcurrentWorkers(L2PlannerWorkerCritic):
     """实现 ``CodingAgent`` 协议的 L3 档。"""
 
@@ -70,9 +80,7 @@ class L3ConcurrentWorkers(L2PlannerWorkerCritic):
             policy=policy,
             review_policy=review_policy,
         )
-        self._worker_llm_factory = worker_llm_factory or (
-            lambda index: copy.deepcopy(pool.llm)
-        )
+        self._worker_llm_factory = worker_llm_factory or clone_llm_factory(pool.llm)
 
     def _rerun_targets(
         self,
@@ -94,12 +102,12 @@ class L3ConcurrentWorkers(L2PlannerWorkerCritic):
         budget: Budget,
         used_usage: Usage,
         used_turns: int,
-        only: tuple[int, ...] | None,
+        rerun_indices: tuple[int, ...] | None,
         critique: Critique | None,
         existing: tuple[SubtaskOutcome, ...],
         existing_usage: tuple[SubtaskUsage, ...],
     ) -> SubtaskExecution:
-        selected = _selected(plan=plan, only=only)
+        selected = _selected(plan=plan, rerun_indices=rerun_indices)
         baseline = SubtaskExecution(
             outcomes=existing,
             usage=Usage(),
@@ -158,8 +166,13 @@ class L3ConcurrentWorkers(L2PlannerWorkerCritic):
 
         merged = baseline
         for subtask, result in zip(selected, results, strict=True):
-            if isinstance(result, BaseException):
+            if isinstance(result, Exception):
                 result = _failed_worker(subtask=subtask, error=str(result))
+            elif isinstance(result, BaseException):
+                # 取消/`KeyboardInterrupt`/`SystemExit` 不是"某个 worker 出错"，而是
+                # 这次 run 整体被叫停——ADR-010 决策 4 要求原样上抛，绝不当成
+                # ``status="error"`` 收成一条可审计的失败。
+                raise result
             merged = merge_execution(merged, result)
         return merged
 
@@ -222,10 +235,12 @@ class L3ConcurrentWorkers(L2PlannerWorkerCritic):
         )
 
 
-def _selected(*, plan: Plan, only: tuple[int, ...] | None) -> list[Subtask]:
-    if only is None:
+def _selected(
+    *, plan: Plan, rerun_indices: tuple[int, ...] | None
+) -> list[Subtask]:
+    if rerun_indices is None:
         return list(plan.subtasks)
-    wanted = set(only)
+    wanted = set(rerun_indices)
     return [subtask for subtask in plan.subtasks if subtask.index in wanted]
 
 
@@ -259,11 +274,9 @@ def _failed_worker(*, subtask: Subtask, error: str) -> SubtaskExecution:
 
 def build_l3(*, llm: Any, workspace: Path, tools: ToolRegistry) -> CodingAgent:
     pool = ExpertPool(llm=llm, tools=tools)
-    return L3ConcurrentWorkers(
-        pool=pool,
-        workspace=workspace,
-        worker_llm_factory=lambda index: copy.deepcopy(llm),
-    )
+    # 不显式传 worker_llm_factory：默认就是 clone_llm_factory(pool.llm)，工厂策略
+    # 只在 __init__ 里定一处。
+    return L3ConcurrentWorkers(pool=pool, workspace=workspace)
 
 
 L3 = Arm(
@@ -278,4 +291,5 @@ __all__ = [
     "L3ConcurrentWorkers",
     "WorkerLLMFactory",
     "build_l3",
+    "clone_llm_factory",
 ]

@@ -40,6 +40,7 @@ from bench.agent.critic import Critique, ReviewPolicy, parse_verdict
 from bench.agent.execution import (
     SubtaskExecution,
     SubtaskOutcome,
+    accumulate_subtask_usage,
     ordered_outcomes,
 )
 from bench.agent.expert import ExpertPool, ToolExpert
@@ -178,7 +179,7 @@ class L2PlannerWorkerCritic:
             budget=budget,
             used_usage=combined,
             used_turns=turns,
-            only=None,
+            rerun_indices=None,
             critique=None,
             existing=(),
             existing_usage=(),
@@ -378,7 +379,7 @@ class L2PlannerWorkerCritic:
             budget=budget,
             used_usage=used_usage,
             used_turns=used_turns,
-            only=self._rerun_targets(plan=plan, critique=critique),
+            rerun_indices=self._rerun_targets(plan=plan, critique=critique),
             critique=critique,
             existing=outcomes,
             existing_usage=existing_usage,
@@ -402,7 +403,7 @@ class L2PlannerWorkerCritic:
         budget: Budget,
         used_usage: Usage,
         used_turns: int,
-        only: "tuple[int, ...] | None",
+        rerun_indices: "tuple[int, ...] | None",
         critique: "Critique | None",
         existing: tuple[SubtaskOutcome, ...],
         existing_usage: tuple[SubtaskUsage, ...],
@@ -418,7 +419,7 @@ class L2PlannerWorkerCritic:
         steps: list[Step] = []
         model = ""
         usage_by_index = {item.index: item for item in existing_usage}
-        wanted = set(only) if only is not None else None
+        wanted = set(rerun_indices) if rerun_indices is not None else None
         order = [
             item for item in plan.subtasks if wanted is None or item.index in wanted
         ]
@@ -457,12 +458,18 @@ class L2PlannerWorkerCritic:
             usage = usage + session.usage
             turns += session.turns
             steps.extend(session.steps)
-            usage_by_index[subtask.index] = SubtaskUsage(
+            fresh_usage = SubtaskUsage(
                 index=subtask.index,
                 usage=session.usage,
                 turns=session.turns,
                 status=status,
                 model=session.model,
+            )
+            prior_usage = usage_by_index.get(subtask.index)
+            usage_by_index[subtask.index] = (
+                fresh_usage
+                if prior_usage is None
+                else accumulate_subtask_usage(prior_usage, fresh_usage)
             )
             if session.model:
                 model = session.model

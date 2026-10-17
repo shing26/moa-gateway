@@ -283,6 +283,13 @@ async def test_targeted_revision_reruns_only_the_named_subtask(tmp_path: Path) -
     assert lanes == {0: 1, 1: 2, 2: 1}
     assert (tmp_path / "worker-1.txt").read_text(encoding="utf-8").strip() == "FIXED"
     assert {item.index for item in run.subtask_usage} == {0, 1, 2}
+    # 账本可归因：只重跑的 1 号两轮用量累加，没重跑的下标保持单轮。
+    worker_usage = {item.index: item for item in run.subtask_usage}
+    assert worker_usage[0].usage.cost_usd == pytest.approx(0.02)
+    assert worker_usage[2].usage.cost_usd == pytest.approx(0.06)
+    assert worker_usage[1].usage.cost_usd == pytest.approx(0.08)
+    # 每轮一次工具调用（写文件）后交终局：单轮 turns=1，两轮累加成 2。
+    assert worker_usage[1].turns == 2
 
 
 @pytest.mark.asyncio
@@ -350,3 +357,39 @@ async def test_one_worker_factory_failure_is_an_error_not_a_crash(tmp_path: Path
     assert failed.status == "error"
     assert "client 创建失败" in run.error
     assert "client 创建失败" in run.steps[-1].observation
+
+
+class _CancellingLLM:
+    """一个 worker lane 的 LLM 抛 ``CancelledError``——这条不是"某个 worker 出错"。"""
+
+    def __init__(self) -> None:
+        self.config = type("_Cfg", (), {"model": "cancel", "temperature": 0.0})()
+        self.last_metrics: dict[str, Any] = {}
+
+    async def chat_with_tools(self, messages, tools, **kwargs: Any) -> ChatResult:
+        raise asyncio.CancelledError("lane cancelled")
+
+
+@pytest.mark.asyncio
+async def test_worker_cancellation_propagates_instead_of_becoming_error(
+    tmp_path: Path,
+) -> None:
+    tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
+
+    def router(messages: list[dict[str, Any]]) -> ScriptedTurn:
+        route = _route(messages)
+        if route == "planner":
+            return ScriptedTurn(final=_plan_json("worker 0", "worker 1"))
+        if route == "critic":
+            return ScriptedTurn(final="APPROVED")
+        raise AssertionError("worker 不该走共享 router client")
+
+    agent = L3ConcurrentWorkers(
+        pool=ExpertPool(llm=_RouterLLM(router), tools=tools),
+        workspace=tmp_path,
+        worker_llm_factory=lambda index: _CancellingLLM(),
+    )
+
+    # ADR-010 决策 4：取消原样上抛，绝不被收成 status="error" 的一条可审计失败。
+    with pytest.raises(asyncio.CancelledError):
+        await agent.run(workspace=tmp_path, goal="目标", budget=Budget(5.0, 30))

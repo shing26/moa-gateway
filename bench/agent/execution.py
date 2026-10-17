@@ -1,4 +1,12 @@
-"""子任务执行结果的共享类型与 reducer。"""
+"""子任务执行结果的共享类型与 reducer。
+
+reducer 的两条规则不同，别把二者混为一谈：
+
+* **产出**（``outcomes``）同下标**覆盖**——重跑一个子任务后，Critic 该看的是最新那条。
+* **账本**（``subtask_usage``）同下标**累加**——一个子任务跑了几轮，它花掉的钱是几轮
+  之和。若这里也覆盖，前一版的 ``Usage`` 就只剩总量、再也归因不到是哪个 worker 烧的
+  （§6 的"每个 worker 的用量可归因"）。
+"""
 
 from __future__ import annotations
 
@@ -42,13 +50,10 @@ def merge_execution(
     left: SubtaskExecution,
     right: SubtaskExecution,
 ) -> SubtaskExecution:
-    """并发结果 reducer：同下标覆盖，其他下标保留，账本累加。"""
+    """并发结果 reducer：产出同下标覆盖，账本同下标累加，其他下标保留。"""
     outcomes = {item.index: item for item in left.outcomes}
     for item in right.outcomes:
         outcomes[item.index] = item
-    usage_by_index = {item.index: item for item in left.subtask_usage}
-    for item in right.subtask_usage:
-        usage_by_index[item.index] = item
     return SubtaskExecution(
         outcomes=ordered_outcomes(outcomes),
         usage=left.usage + right.usage,
@@ -56,13 +61,35 @@ def merge_execution(
         steps=(*left.steps, *right.steps),
         model=right.model or left.model,
         status=_merge_status(left.status, right.status),
-        subtask_usage=tuple(usage_by_index[index] for index in sorted(usage_by_index)),
+        subtask_usage=merge_subtask_usage(left.subtask_usage, right.subtask_usage),
         error=right.error or left.error,
     )
 
 
-def with_status(execution: SubtaskExecution, status: AgentStatus) -> SubtaskExecution:
-    return replace(execution, status=status)
+def merge_subtask_usage(
+    left: tuple[SubtaskUsage, ...],
+    right: tuple[SubtaskUsage, ...],
+) -> tuple[SubtaskUsage, ...]:
+    """按子任务下标合并账本切片：新到的下标追加，同下标的两段用量相加。
+
+    一个子任务在回边里被重跑时携带的是**新一轮**的用量，而不是它到此为止的总量；
+    所以同下标要相加，否则重跑会把前一轮的花费从切片里挤掉。
+    """
+    merged = {item.index: item for item in left}
+    for item in right:
+        merged[item.index] = accumulate_subtask_usage(merged[item.index], item) if (
+            item.index in merged
+        ) else item
+    return tuple(merged[index] for index in sorted(merged))
+
+
+def accumulate_subtask_usage(prior: SubtaskUsage, fresh: SubtaskUsage) -> SubtaskUsage:
+    """把同一子任务的新一轮账本压进旧切片：用量与轮数相加，状态/模型取最新。"""
+    return replace(
+        fresh,
+        usage=prior.usage + fresh.usage,
+        turns=prior.turns + fresh.turns,
+    )
 
 
 def _merge_status(left: AgentStatus, right: AgentStatus) -> AgentStatus:
@@ -77,9 +104,10 @@ def _merge_status(left: AgentStatus, right: AgentStatus) -> AgentStatus:
 
 
 __all__ = [
+    "accumulate_subtask_usage",
     "SubtaskExecution",
     "SubtaskOutcome",
     "merge_execution",
+    "merge_subtask_usage",
     "ordered_outcomes",
-    "with_status",
 ]
