@@ -20,6 +20,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# 导入 app.config 是为了它的副作用 load_dotenv()：不先加载 .env，LLMConfig.from_env
+# 会退回默认值（provider=direct / gpt-4o-mini / api.openai.com），于是 CLI 拿默认模型
+# 去连 OpenAI——本项目其它脚本（scripts/compare_rerank.py 等）走的就是这一条。
+import app.config  # noqa: F401  (side effect: load_dotenv())
+
 from app.agents.provider import LLMClient, LLMConfig  # noqa: E402
 
 from bench.agent.types import Budget  # noqa: E402

@@ -96,3 +96,14 @@ def test_build_llm_falls_back_to_env_defaults() -> None:
     llm = cli.build_llm(cli.parse_args(["--task", "x"]))
     assert llm.config.model  # from_env 恒有默认值（缺省 gpt-4o-mini）
     assert 0.0 <= llm.config.temperature <= 2.0
+
+
+def test_cli_loads_the_project_env_before_building_the_llm() -> None:
+    """CLI 必须走项目统一的 LLM 配置来源（app.config 的 load_dotenv 副作用）。
+
+    不加载 .env 的话 ``LLMConfig.from_env`` 退回默认值，拿 gpt-4o-mini 去连
+    api.openai.com——这正是 09 人工验收第一次跑挂的原因。
+    """
+    import sys
+
+    assert "app.config" in sys.modules
