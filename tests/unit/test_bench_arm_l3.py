@@ -356,7 +356,8 @@ async def test_one_worker_factory_failure_is_an_error_not_a_crash(tmp_path: Path
     failed = next(item for item in run.subtask_usage if item.index == 1)
     assert failed.status == "error"
     assert "client 创建失败" in run.error
-    assert "client 创建失败" in run.steps[-1].observation
+    # 不造假的工具步：错误经 AgentRun.error 上浮，轨迹里不留伪证据。
+    assert run.steps == ()
 
 
 class _CancellingLLM:

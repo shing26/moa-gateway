@@ -77,6 +77,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-cost-usd", type=float, default=None, help="覆盖该档默认美元上限"
     )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="覆盖 token 兜底上限（0 = 不设；主线判据仍是美元）",
+    )
     parser.add_argument("--model", default="", help="覆盖 LLM_MODEL（用 LiteLLM 的限定名）")
     parser.add_argument("--temperature", type=float, default=None)
     return parser.parse_args(argv)
@@ -98,6 +104,8 @@ def _resolve_budget(args: argparse.Namespace) -> Budget:
         budget = dataclasses.replace(budget, max_cost_usd=args.max_cost_usd)
     if args.max_steps is not None:
         budget = dataclasses.replace(budget, max_steps=args.max_steps)
+    if args.max_tokens is not None:
+        budget = dataclasses.replace(budget, max_tokens=args.max_tokens)
     return budget
 
 

@@ -38,3 +38,19 @@ token 上限是第二条兜底（§5.3），落成 `Budget.max_tokens`（`0` = �
 未知档位报错、B3 候选筛选与去重、两档产物可分辨、token 兜底判停）；`test_bench_agent_loop.py`
 补一条 token 兜底命中即 `budget_exhausted` 且不执行工具；`test_bench_harness.py` 的
 端到端补一条 B3 档位与增量的透传断言。
+
+## code-review 补记（全 branch 复评）
+
+* **B3 从"有筛选函数"补成"有执行口径"。** 复评指出：`b3_candidates` 只回答"该复跑
+  谁"，没有任何路径**保证**只对 B1 失败档位复跑，基线花费还得调用方手填（默认 0）——
+  增量成本因此不可靠。新增 `plan_b3_reruns(results, policy=...)`：由 B1 结果直接推出
+  `(task, arm, baseline_cost_usd, budget)`，基线是该档 B1 全部尝试的花费之和，复跑用
+  `policy.b3()`。增量成本现在是推出来的，不是填出来的。补用例
+  `test_plan_b3_reruns_derives_the_baseline_from_b1_results`。
+* **token 兜底从"机制"补到"可及"。** 复评指出 `max_tokens` 默认 0 且 CLI 没有开关，
+  等于死代码。CLI 新增 `--max-tokens`，可覆盖档位默认值。至于"该不该是全局上限"——
+  §5.3 的原话是"防止**单个 agent** 无节制地刷 token"，所以按 (会话/lane) 各自计是对的
+  粒度，维持不改；记录在此备查。
+* `BudgetTier` 字面量类型上移到 `bench/agent/types.py`（`RunResult` 要带它落盘，放
+  `harness/budget.py` 会绕成 import 环），`budget.py` 转成 re-export——档位字面量因此
+  只有一处定义。

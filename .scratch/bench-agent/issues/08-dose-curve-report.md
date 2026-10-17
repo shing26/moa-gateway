@@ -33,3 +33,28 @@
 
 离线用例：`tests/unit/test_bench_report.py`（表与缺口、结局分列、边际收益、B1/B3 过滤、
 重算确定性、落盘 JSON 读回、单样本提示、`from_dict` 容错）。
+
+## code-review 补记（全 branch 复评）
+
+复评在两轴各挑出几处，逐条改：
+
+* **通过率不再把 `error` 算进分母。** §8 要求 `error`"单独统计、不混进通过率"；原来
+  `pass/runs` 让一条 API 噪音压低通过率。现在 `valid_runs = runs - error`，通过率是
+  `pass/valid_runs`（无有效样本记 `None`，不是 0）；`budget_exhausted` 留在分母里
+  （在预算内没通过就是没通过），但它仍单独成列。用例把 1 pass + 1 error 的期望钉成
+  100%（原来错写成 25%）。
+* **每个数字能追回具体 run。** `RunRow.source` 带来源文件名，`DoseReport.sources`
+  随 `to_dict()` 落盘并在报告顶部列出——原报告的"可追回"是空话。
+* **缺整个任务也要看得见。** `build_report(..., tasks=[...])` 可显式声明应跑的任务集：
+  声明了却一条都没跑的任务作为缺口出现，不再从表里悄悄消失。
+* **样本不足逐格标。** 原来只在"每格都 ≤1"时警告；现在 `under_sampled` 列出所有
+  `< MIN_RUNS_PER_CELL`(=3, §9) 的非空格子并写进报告。
+* **B3 增量成本不再被丢掉。** `RunRow` 读 `baseline_cost_usd`，`ArmColumn` 给
+  `total_incremental_cost_usd`，B3 报告多一节"相对 B1 的增量成本"。
+* **去重与单一来源。** 三处重复的四计数器收进 `OutcomeCounts`（唯一的计数口径）；
+  `ARM_ORDER` 改从 arm 注册表 `arm_names()` 取（§4.2 的单一来源），报告层不再自持
+  一份可用清单；`budget_tier` 用 `BudgetTier` 字面量类型，`RunRow.from_dict` 对未知
+  档位直接抛错而不是静默收下。
+* **CLI 补测试。** 复评指出 `bench/report_curve.py` 无 `tests/unit` 覆盖（违反
+  NO_SUBSTITUTES 的"新增代码都要有测试"）：新增 `tests/unit/test_bench_report_curve.py`
+  覆盖参数契约、目录/文件读取顺序与 `main` 的打印+落盘。

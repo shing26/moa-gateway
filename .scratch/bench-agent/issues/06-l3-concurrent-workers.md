@@ -83,3 +83,19 @@ CancelledError 原样上抛）、`tests/unit/test_bench_execution.py`（reducer�
 * **L2 的 review 提示词也广告了 `targets`。** prompt 由 L2/L3 共用，L2 的
   `_rerun_targets` 依旧返回 `None`（全量重跑），只是提示里多了一段 L3 才用得到的
   格式说明——记录在案。
+
+## code-review 补记（第二轮，`910c865..HEAD` 全 branch）
+
+两轴复评，改一处、其余维持原判：
+
+* **假工具名从轨迹里删掉。** `_failed_worker` 原先造一条 `tool="l3_worker"` 的
+  `Step`——注册表里没有这个工具，那条轨迹等于宣称发生过一次不存在的工具调用。
+  现在不造步：并发 lane 的基础设施异常经 `SubtaskExecution.error` 上浮到
+  `AgentRun.error`，与 L2 的 worker 出错同一条路，轨迹里不留伪证据
+  （`test_one_worker_factory_failure_is_an_error_not_a_crash` 断言 `run.steps == ()`）。
+* 第一轮的两条 Spec 判断维持不变（worker 基础设施故障不触发重跑；L2 提示词共用）。
+* **分支名 `codex/l3-concurrent-workers` vs `feat/*`（判断保留）。** 复评引
+  `NO_SUBSTITUTES.md` 第 40-42 行"所有功能开发分支走 `feat/*`"。那是 Stage 1 的分支
+  维护段（`master` 冻结、`feat/*` 开发），已被本仓库现行的 `codex/*` 约定取代（也是
+  本工作区的默认前缀），且分支已 push。**不改名**，理由记录在此；若将来要合流到某个
+  约定，按仓库当时的 CONTRIBUTING/AGENTS 为准。
