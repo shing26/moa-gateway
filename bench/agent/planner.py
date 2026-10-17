@@ -31,6 +31,7 @@ import json
 from dataclasses import dataclass
 
 from bench.agent.critic import APPROVE, REVISE
+from bench.agent.parsing import nonnegative_indices
 
 
 @dataclass(frozen=True)
@@ -155,16 +156,7 @@ def _dependencies(raw: object) -> tuple[int, ...]:
     L2 只有一个 worker、串行执行，依赖暂时没有可执行的含义；这里解析是为了不在读计划
     时把它悄悄丢掉——L3 要靠它做定向重跑。
     """
-    if not isinstance(raw, (list, tuple)):
-        return ()
-    seen: list[int] = []
-    for item in raw:
-        if isinstance(item, bool) or not isinstance(item, (int, float)):
-            continue
-        value = int(item)
-        if value >= 0 and value not in seen:
-            seen.append(value)
-    return tuple(seen)
+    return nonnegative_indices(raw)
 
 
 def render_plan(
@@ -225,7 +217,11 @@ def build_plan_review_message(
         f"{render_plan(plan, results=results)}\n\n"
         "输出格式（二选一，必须严格以此开头）：\n"
         f"* 认可：`{APPROVE}`\n"
-        f"* 打回：`{REVISE}: <下一步具体改什么，落到文件/行/命令上>`\n\n"
+        "* 打回：只回一个 JSON 对象，形如 "
+        '{"verdict": "revise", "instructions": "下一步具体改什么，落到文件/行/命令上", '
+        '"targets": [需要重跑的子任务下标]}\n\n'
+        f"`targets` 为空表示整条计划重跑；不用 JSON 的旧式 `{REVISE}: ...` 仍可读，"
+        "但无法定向重跑。\n"
         "打回时给出可执行的下一步；不要猜判决。"
     )
 

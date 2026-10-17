@@ -10,9 +10,10 @@ from __future__ import annotations
 from bench.arms.l0 import L0
 from bench.arms.l1 import L1
 from bench.arms.l2 import L2
+from bench.arms.l3 import L3
 from bench.arms.registry import AgentFactory, Arm, ArmRegistry, UnknownArmError
 
-ARMS = ArmRegistry([L0, L1, L2])
+ARMS = ArmRegistry([L0, L1, L2, L3])
 
 #: 手跑 CLI 的缺省档位。零点：单体循环。
 DEFAULT_ARM = L0.name
@@ -31,6 +32,7 @@ __all__ = [
     "L0",
     "L1",
     "L2",
+    "L3",
     "UnknownArmError",
     "arm_names",
     "available_arms",

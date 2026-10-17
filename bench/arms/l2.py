@@ -37,6 +37,11 @@ from typing import Any
 from app.agents.tools import ToolRegistry
 
 from bench.agent.critic import Critique, ReviewPolicy, parse_verdict
+from bench.agent.execution import (
+    SubtaskExecution,
+    SubtaskOutcome,
+    ordered_outcomes,
+)
 from bench.agent.expert import ExpertPool, ToolExpert
 from bench.agent.loop import LLMBackedAgent
 from bench.agent.planner import (
@@ -47,7 +52,15 @@ from bench.agent.planner import (
     build_plan_review_message,
     parse_plan,
 )
-from bench.agent.types import AgentRun, AgentStatus, Budget, CodingAgent, Step, Usage
+from bench.agent.types import (
+    AgentRun,
+    AgentStatus,
+    Budget,
+    CodingAgent,
+    Step,
+    SubtaskUsage,
+    Usage,
+)
 from bench.arms.registry import Arm
 
 
@@ -60,28 +73,6 @@ class PlanPolicy:
     planner_steps: int = 1
     #: Critic 复核的步数上限（它可能想自己重读、重跑）。
     critic_steps: int = 4
-
-
-@dataclass(frozen=True)
-class SubtaskOutcome:
-    """一个子任务的产出：给 Critic 看的结论加压缩轨迹。"""
-
-    index: int
-    instruction: str
-    output: str
-    trajectory: str
-
-
-@dataclass(frozen=True)
-class SubtaskExecution:
-    """一次"跑一遍子任务"的结果集——把散在外的账本收在一处。"""
-
-    outcomes: tuple[SubtaskOutcome, ...]
-    usage: Usage
-    turns: int
-    steps: tuple[Step, ...]
-    model: str
-    status: AgentStatus
 
 
 @dataclass(frozen=True)
@@ -136,6 +127,7 @@ class L2PlannerWorkerCritic:
         combined = Usage()
         turns = 0
         trace: list[Step] = []
+        subtask_usage: tuple[SubtaskUsage, ...] = ()
 
         stopped = budget.stop_status(usage=combined, steps_used=turns)
         if stopped is not None:
@@ -186,13 +178,17 @@ class L2PlannerWorkerCritic:
             budget=budget,
             used_usage=combined,
             used_turns=turns,
+            only=None,
             critique=None,
             existing=(),
+            existing_usage=(),
         )
         combined = combined + run.usage
         turns += run.turns
         model = run.model or model
         trace = [*trace, *run.steps]
+        subtask_usage = run.subtask_usage
+        run_error = run.error
         if run.status != "completed":
             return _finish(
                 status=run.status,
@@ -201,7 +197,9 @@ class L2PlannerWorkerCritic:
                 model=model,
                 temperature=self._temperature,
                 subtask_count=len(plan.subtasks),
+                subtask_usage=subtask_usage,
                 stop_reason="计划未执行完",
+                error=run_error,
             )
 
         rounds = 0
@@ -215,6 +213,7 @@ class L2PlannerWorkerCritic:
                     model=model,
                     temperature=self._temperature,
                     subtask_count=len(plan.subtasks),
+                    subtask_usage=subtask_usage,
                     review_rounds=rounds,
                     stop_reason=_budget_stop_reason(stopped, budget),
                 )
@@ -240,8 +239,10 @@ class L2PlannerWorkerCritic:
                     model=model,
                     temperature=self._temperature,
                     subtask_count=len(plan.subtasks),
+                    subtask_usage=subtask_usage,
                     review_rounds=rounds,
                     stop_reason="Critic 未产出终局",
+                    error=run_error,
                 )
             if review.critique.approved:
                 trace.append(Step(index=0, action="finish", observation="Critic 认可"))
@@ -252,7 +253,9 @@ class L2PlannerWorkerCritic:
                     model=model,
                     temperature=self._temperature,
                     subtask_count=len(plan.subtasks),
+                    subtask_usage=subtask_usage,
                     review_rounds=rounds,
+                    error=run_error,
                     stop_reason="全部子任务完成，Critic 认可",
                 )
             stopped = budget.stop_status(usage=combined, steps_used=turns)
@@ -264,7 +267,9 @@ class L2PlannerWorkerCritic:
                     model=model,
                     temperature=self._temperature,
                     subtask_count=len(plan.subtasks),
+                    subtask_usage=subtask_usage,
                     review_rounds=rounds,
+                    error=run_error,
                     stop_reason=_budget_stop_reason(stopped, budget),
                 )
             if rounds >= self._review_policy.max_rounds:
@@ -275,7 +280,9 @@ class L2PlannerWorkerCritic:
                     model=model,
                     temperature=self._temperature,
                     subtask_count=len(plan.subtasks),
+                    subtask_usage=subtask_usage,
                     review_rounds=rounds,
+                    error=run_error,
                     stop_reason=(
                         f"Critic 连续打回，已达回边上限 {self._review_policy.max_rounds} 轮"
                     ),
@@ -292,6 +299,7 @@ class L2PlannerWorkerCritic:
                 budget=budget,
                 used_usage=combined,
                 used_turns=turns,
+                existing_usage=run.subtask_usage,
             )
             combined = combined + rerun.usage
             turns += rerun.turns
@@ -303,10 +311,14 @@ class L2PlannerWorkerCritic:
                     model=rerun.model or model,
                     temperature=self._temperature,
                     subtask_count=len(plan.subtasks),
+                    subtask_usage=rerun.subtask_usage,
                     review_rounds=rounds,
+                    error=rerun.error,
                     stop_reason="重跑未完成",
                 )
             run = rerun
+            subtask_usage = rerun.subtask_usage
+            run_error = rerun.error
             model = rerun.model or model
             trace = [*trace, *rerun.steps]
 
@@ -352,6 +364,7 @@ class L2PlannerWorkerCritic:
         budget: Budget,
         used_usage: Usage,
         used_turns: int,
+        existing_usage: tuple[SubtaskUsage, ...],
     ) -> SubtaskExecution:
         """按 Critic 的打回重跑整条计划。
 
@@ -365,9 +378,20 @@ class L2PlannerWorkerCritic:
             budget=budget,
             used_usage=used_usage,
             used_turns=used_turns,
+            only=self._rerun_targets(plan=plan, critique=critique),
             critique=critique,
             existing=outcomes,
+            existing_usage=existing_usage,
         )
+
+    def _rerun_targets(
+        self,
+        *,
+        plan: Plan,
+        critique: Critique,
+    ) -> tuple[int, ...] | None:
+        """L2 全量重跑；L3 覆盖这条，只返回 Critic 点名的子任务。"""
+        return None
 
     async def _run_subtasks(
         self,
@@ -378,8 +402,10 @@ class L2PlannerWorkerCritic:
         budget: Budget,
         used_usage: Usage,
         used_turns: int,
+        only: "tuple[int, ...] | None",
         critique: "Critique | None",
         existing: tuple[SubtaskOutcome, ...],
+        existing_usage: tuple[SubtaskUsage, ...],
     ) -> SubtaskExecution:
         """串行执行（或重跑）子任务。每个子任务一条**新会话**，只带它自己的上下文。
 
@@ -391,7 +417,12 @@ class L2PlannerWorkerCritic:
         turns = 0
         steps: list[Step] = []
         model = ""
-        for subtask in plan.subtasks:
+        usage_by_index = {item.index: item for item in existing_usage}
+        wanted = set(only) if only is not None else None
+        order = [
+            item for item in plan.subtasks if wanted is None or item.index in wanted
+        ]
+        for subtask in order:
             combined_usage = used_usage + usage
             stopped = budget.stop_status(
                 usage=combined_usage,
@@ -399,7 +430,7 @@ class L2PlannerWorkerCritic:
             )
             if stopped is not None:
                 return SubtaskExecution(
-                    outcomes=_ordered(by_index),
+                    outcomes=ordered_outcomes(by_index),
                     usage=usage,
                     turns=turns,
                     steps=tuple(steps),
@@ -410,7 +441,7 @@ class L2PlannerWorkerCritic:
                 usage=combined_usage,
                 steps_used=used_turns + turns,
             )
-            handoff = _handoff_prompt(
+            handoff = handoff_prompt(
                 goal=goal,
                 subtask=subtask,
                 prior=tuple(
@@ -426,30 +457,44 @@ class L2PlannerWorkerCritic:
             usage = usage + session.usage
             turns += session.turns
             steps.extend(session.steps)
+            usage_by_index[subtask.index] = SubtaskUsage(
+                index=subtask.index,
+                usage=session.usage,
+                turns=session.turns,
+                status=status,
+                model=session.model,
+            )
             if session.model:
                 model = session.model
             if status != "completed":
                 return SubtaskExecution(
-                    outcomes=_ordered(by_index),
+                    outcomes=ordered_outcomes(by_index),
                     usage=usage,
                     turns=turns,
                     steps=tuple(steps),
                     model=model,
                     status=status,
+                    subtask_usage=tuple(
+                        usage_by_index[index] for index in sorted(usage_by_index)
+                    ),
+                    error=session.error,
                 )
             by_index[subtask.index] = SubtaskOutcome(
                 index=subtask.index,
                 instruction=subtask.instruction,
-                output=_summarize(session.steps),
-                trajectory=_render_steps(session.steps),
+                output=summarize_steps(session.steps),
+                trajectory=render_steps(session.steps),
             )
         return SubtaskExecution(
-            outcomes=_ordered(by_index),
+            outcomes=ordered_outcomes(by_index),
             usage=usage,
             turns=turns,
             steps=tuple(steps),
             model=model,
             status="completed",
+            subtask_usage=tuple(
+                usage_by_index[index] for index in sorted(usage_by_index)
+            ),
         )
 
     # ── 评审 ──────────────────────────────────────────────────────────────
@@ -482,11 +527,7 @@ class L2PlannerWorkerCritic:
         return _ReviewResult(critique, status, session.usage, session.turns)
 
 
-def _ordered(by_index: dict[int, SubtaskOutcome]) -> tuple[SubtaskOutcome, ...]:
-    return tuple(by_index[index] for index in sorted(by_index))
-
-
-def _handoff_prompt(
+def handoff_prompt(
     *,
     goal: str,
     subtask: Subtask,
@@ -516,7 +557,7 @@ def _handoff_prompt(
     return "\n".join(lines)
 
 
-def _summarize(steps: tuple[Step, ...] | list[Step]) -> str:
+def summarize_steps(steps: tuple[Step, ...] | list[Step]) -> str:
     """一条子任务的产出一句话：最后一个有观察的工具看到什么。"""
     for step in reversed(list(steps)):
         if step.observation:
@@ -524,7 +565,7 @@ def _summarize(steps: tuple[Step, ...] | list[Step]) -> str:
     return "（没有可记录的产出）"
 
 
-def _render_steps(steps: tuple[Step, ...] | list[Step]) -> str:
+def render_steps(steps: tuple[Step, ...] | list[Step]) -> str:
     """压缩轨迹：哪一步调了什么、看到了什么。与 L1 的渲染同形，只是更短。"""
     lines: list[str] = []
     for position, step in enumerate(steps, start=1):
@@ -560,6 +601,7 @@ def _finish(
     model: str,
     temperature: float,
     subtask_count: int,
+    subtask_usage: tuple[SubtaskUsage, ...] = (),
     review_rounds: int = 0,
     stop_reason: str = "",
     error: str = "",
@@ -575,6 +617,7 @@ def _finish(
         error=error,
         review_rounds=review_rounds,
         subtask_count=subtask_count,
+        subtask_usage=subtask_usage,
     )
 
 
@@ -608,4 +651,7 @@ __all__ = [
     "PlanPolicy",
     "SubtaskOutcome",
     "build_l2",
+    "handoff_prompt",
+    "render_steps",
+    "summarize_steps",
 ]

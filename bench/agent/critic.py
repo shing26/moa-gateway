@@ -29,6 +29,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from bench.agent.parsing import nonnegative_indices
 from bench.agent.types import Step
 
 #: 通过的字面量。大小写不敏感。
@@ -58,6 +59,8 @@ class Critique:
 
     approved: bool
     instructions: str = ""
+    #: L2/L3 的计划级评审可以点名需要重跑的子任务；单 agent 的 L1 留空。
+    targets: tuple[int, ...] = ()
 
 
 _JSON_BLOCK = re.compile(r"\{.*?\}", re.DOTALL)
@@ -86,6 +89,7 @@ def parse_verdict(text: str, *, instructions_limit: int = 4_000) -> Critique:
                     str(payload.get("instructions") or payload.get("reason") or raw),
                     instructions_limit,
                 ),
+                targets=nonnegative_indices(payload.get("targets")),
             )
 
     if raw.upper().startswith(APPROVE):

@@ -116,6 +116,17 @@ class Budget:
 
 
 @dataclass(frozen=True)
+class SubtaskUsage:
+    """并发档里单个 worker 的账本切片，用来证明用量可以归因。"""
+
+    index: int
+    usage: Usage
+    turns: int
+    status: AgentStatus
+    model: str = ""
+
+
+@dataclass(frozen=True)
 class AgentRun:
     """agent 的自我报告。**不含判决。**"""
 
@@ -135,6 +146,9 @@ class AgentRun:
     #: 这一档实际分解出的子任务数（§6 的 ``subtask_count``）。没有分解的档位为 0，
     #: 报告层因此不必去猜轨迹里的子任务边界。
     subtask_count: int = 0
+    #: 每个子任务的账本切片。串行档可以留空；并发档必须填，否则共享的
+    #: ``Usage`` 只能说明总成本，不能说明是谁花的。
+    subtask_usage: tuple[SubtaskUsage, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -187,5 +201,6 @@ __all__ = [
     "Outcome",
     "RunResult",
     "Step",
+    "SubtaskUsage",
     "Usage",
 ]
