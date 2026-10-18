@@ -22,9 +22,9 @@
 **任务形态**：E3 与 E1 共用 `bench/tasks/<id>.{task.json,test.patch,solution.patch}`
 格式，因为 harness / fail-first / 还原 / 报告都已围着它建好。差别只在语义——
 E1 的 `solution` 来自历史修复 commit，E3 的基线是**干净的历史提交**
-（`base_commit = 2647e43…` 本 branch 的 HEAD），缺陷由 `test.patch` **注入**到真实
-源文件，`solution.patch` 是那条注入的反向。两条 patch 都 LF、都能 `git apply --check`
-到 `materialize()` 出来的基线。
+（`base_commit = 910c865`，本 branch 的父提交、也是 main 上的提交），缺陷由
+`test.patch` **注入**到真实源文件，`solution.patch` 是那条注入的反向。两条 patch 都
+LF、都能 `git apply --check` 到 `materialize()` 出来的基线。
 
 **首批三条**（各带 `source: "E3"` 与 `fix_surface`）：
 
@@ -81,15 +81,18 @@ E1 的 `solution` 来自历史修复 commit，E3 的基线是**干净的历史�
 **不阻塞 09**：E3 只做到"任务落盘 + fail-first 筛过 + 报告可区分"，没有跑真实
 API；09 的第一轮曲线可以只用 E1，E3 是加料不是前置。
 
-**已知取舍（合流时必须看一眼）**：三条 E3 任务的 `base_commit` 钉在本 branch 的
-`2647e43`——E3 的基线是"干净的历史提交 + `test.patch` 注入缺陷"，所以基线只能取一个
-真实提交，而它目前**只存在于本功能分支**。混到 main 的两种命运：merge commit（保留
-`2647e43` 可达）可以照跑；squash/rebase-merge 会把该提交丢掉，三条 E3 任务随之
-`MissingCommitError`（E1 那五条钉的是 main 上的历史提交，不受影响）。真要长期用，
-把三条 E3 重钉到合流后的 main 提交即可（改 `base_commit` 后重跑 fail-first 复验）。
+**基线取哪个提交（已定）**：三条 E3 的 `base_commit` 起初钉在本 branch 的 HEAD
+`2647e43`，那在合流时是个坑——merge commit 合流还好，**squash/rebase-merge 会把该
+提交丢掉**，三条 E3 随之 `MissingCommitError`。现在改钉 `910c865`（本 branch 的父提交、
+已在 main 上），合流方式随便选都不会碎。安全性有据：`app/` 在本 branch 上零改动
+（`git diff 910c865...HEAD -- app` 为空），注入面逐字相同；重钉后 E3 的 13 条守卫
+用例（fail-first 特征、`git apply --check`、端到端 `pass`/`fail`）全部复跑通过。
+E1 那五条钉的本来就是 main 上的历史提交，不受此讨论影响。
 
-**README 同步**：测试基线实测 1359 passed / 4 skipped（badge / 摘要 / 离线保障 /
-目录树 / 门禁五处全部写 1359）。改前的 1358 是未实测的旧值，已按本轮全量结果纠正。
+**README 同步**：测试基线先实测 1359 passed / 4 skipped（badge / 摘要 / 离线保障 /
+目录树 / 门禁五处），随票 09 的 `bench/run_curve.py` 驱动 + 9 条离线用例再加到
+**1368 passed / 4 skipped**，五处全部按最新实测值写 1368。更早的 1358 是未实测的
+旧值。
 
 ## code-review 补记（2026-10-18，fixed point `2647e43`）
 

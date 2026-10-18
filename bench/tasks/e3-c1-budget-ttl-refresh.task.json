@@ -1,6 +1,6 @@
 {
   "task_id": "e3-c1-budget-ttl-refresh",
-  "base_commit": "2647e434feadbdda1bcfb95565eca41607e14290",
+  "base_commit": "910c865b0a75af1b745e3054555de5509c46a236",
   "difficulty": "易",
   "source": "E3",
   "fix_surface": "small",
