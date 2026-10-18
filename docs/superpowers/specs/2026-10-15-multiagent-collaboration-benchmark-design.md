@@ -301,7 +301,11 @@ agent 无节制地刷 token），但它不是主判据。
 
   首推 `988fccb`：安全洞、影响具体（匿名写向量库 / 按 user_id 删数据）、修复收敛、
   测试行为级（断言 HTTP 状态码，不泄漏实现）。
-- **E3 合成缺陷规格**尚未确定，实现前需构造并用 fail-first 检查筛过。
+- **E3 合成缺陷规格**（2026-10-18 落定）：见
+  `docs/superpowers/specs/2026-10-18-e3-synthetic-defects.md`。首批三条任务
+  （`e3-c1-*` / `e3-c2-*` / `e3-c3-*`）已用 fail-first 筛过，任务定义里带
+  `source: "E3"` 与 `fix_surface`，报告按来源区分 E1/E3。构造细节与剔除候选见
+  `.scratch/bench-agent/issues/10-e3-synthetic-defects.md`。
 - 每题预算上限的具体数值需按真实预算反推。
 - 中档模型的具体选型未定。
 

@@ -1,0 +1,18 @@
+{
+  "task_id": "e3-c1-budget-ttl-refresh",
+  "base_commit": "2647e434feadbdda1bcfb95565eca41607e14290",
+  "difficulty": "易",
+  "source": "E3",
+  "fix_surface": "small",
+  "note": "合成缺陷：`BudgetGuard.record` 不再刷新会话的闲置起点 `last_seen`。持续有小额花费的长任务会话因此会在 TTL 到点时被当成新会话，已经累计的开销被丢掉——限额静默失效。修复见 `solution.patch`（加回一行时间戳）。既有 `test_ttl_eviction_expires_idle_sessions` 只走「记账一次 → 睡过 TTL → 过期」，覆盖不到刷新路径，所以注入后 `tests/unit` 全绿、只有本判据变红（spec §2.5）。fail-first 实测：`test_accumulated_cost_survives_ongoing_activity` 失败于 `assert 0.0 == 0.6`（第二次记账后 `check` 把还在花钱的会话误回收，累计归零）。",
+  "verify_command": [
+    "{python}",
+    "-m",
+    "pytest",
+    "tests/unit/test_e3_session_budget.py",
+    "-q"
+  ],
+  "test_paths": [
+    "tests/unit/test_e3_session_budget.py"
+  ]
+}

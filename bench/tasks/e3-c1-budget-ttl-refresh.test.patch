@@ -1,0 +1,41 @@
+diff --git a/app/budget/guard.py b/app/budget/guard.py
+index 14c6a6a..36c743f 100644
+--- a/app/budget/guard.py
++++ b/app/budget/guard.py
+@@ -50,7 +50,6 @@ class BudgetGuard:
+             return self.spent(session_id)
+         entry = self._spend.setdefault(session_id, _SessionSpend())
+         entry.total_usd += float(cost_usd)
+-        entry.last_seen = time.monotonic()
+         return entry.total_usd
+ 
+     def spent(self, session_id: str) -> float:
+diff --git a/tests/unit/test_e3_session_budget.py b/tests/unit/test_e3_session_budget.py
+new file mode 100644
+index 0000000..db5bcca
+--- /dev/null
++++ b/tests/unit/test_e3_session_budget.py
+@@ -0,0 +1,23 @@
++"""E3 合成缺陷 · 连续小额花费会一直累计。
++
++预算按会话累计。会话在持续产生成本，就不该在中途被回收——开销要一直加下去，
++限额才拦得住。
++"""
++
++from __future__ import annotations
++
++import time
++
++from app.budget.guard import BudgetGuard
++
++
++def test_accumulated_cost_survives_ongoing_activity() -> None:
++    guard = BudgetGuard(limit_usd=10.0, ttl_seconds=0.05)
++    guard.record("s1", 0.3)
++    time.sleep(0.03)
++    guard.record("s1", 0.3)
++    time.sleep(0.03)  # 距最近一次记账 0.03s（< ttl），但距首次已 0.06s（> ttl）
++
++    # check 会先回收闲置会话（缺陷下这里把 s1 误判为闲置）；随后累计值应保留。
++    assert guard.check("s1") is True
++    assert guard.spent("s1") == 0.6

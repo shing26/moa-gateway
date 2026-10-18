@@ -1,0 +1,15 @@
+diff --git a/app/vectordb/keywords.py b/app/vectordb/keywords.py
+index e8eca46..282f2ca 100644
+--- a/app/vectordb/keywords.py
++++ b/app/vectordb/keywords.py
+@@ -115,8 +115,8 @@ def normalized_keyword_score(content: str, query_lower: str, pool_best: float) -
+     or the documents happen to be.
+     """
+     if pool_best <= 0:
+-        pool_best = 1.0
+-    return keyword_score(content, query_lower)
++        return 0.0
++    return min(keyword_score(content, query_lower) / pool_best, 1.0)
+ 
+ 
+ def match_metadata(doc_meta: dict, filter_meta: dict) -> bool:

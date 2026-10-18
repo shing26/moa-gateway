@@ -1,0 +1,18 @@
+{
+  "task_id": "e3-c2-keyword-normalization",
+  "base_commit": "2647e434feadbdda1bcfb95565eca41607e14290",
+  "difficulty": "中",
+  "source": "E3",
+  "fix_surface": "medium",
+  "note": "合成缺陷：`normalized_keyword_score` 丢掉「除以池内最高分 + 截断到 1」这两条，直接返回绝对词频。混合检索把关键词腿与余弦相似度加权融合，关键词的量纲因此不再与相似度可比——候选池里的分数没有共同上限，比较结果被绝对的词频带偏。这个词元函数的既有覆盖为零（`tests/unit` 里没有直接判据），所以注入后 `tests/unit` 全绿、只有本判据变红（spec §2.5）。fail-first 实测：`test_keyword_scores_are_comparable_across_the_pool` 失败于 `assert 3.0 == 1.0`（强命中文档的分数越过了上限）。",
+  "verify_command": [
+    "{python}",
+    "-m",
+    "pytest",
+    "tests/unit/test_e3_keyword_fusion.py",
+    "-q"
+  ],
+  "test_paths": [
+    "tests/unit/test_e3_keyword_fusion.py"
+  ]
+}

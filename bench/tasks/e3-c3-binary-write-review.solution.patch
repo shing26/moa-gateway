@@ -1,0 +1,13 @@
+diff --git a/app/evaluator/evaluator.py b/app/evaluator/evaluator.py
+index 4df86bf..8dac27d 100644
+--- a/app/evaluator/evaluator.py
++++ b/app/evaluator/evaluator.py
+@@ -34,7 +34,7 @@ _DANGEROUS_METHODS: set[str] = {
+     "rmtree", "remove", "unlink", "chmod", "chown",
+ }
+ 
+-_WRITE_MODES: set[str] = {"w", "a", "x"}
++_WRITE_MODES: set[str] = {"w", "wb", "a", "ab", "x", "xb"}
+ 
+ 
+ def _extract_call_names(node: ast.Call) -> list[str]:

@@ -26,6 +26,7 @@ def _write_run(
     cost: float = 0.0,
     tier: str = "B1",
     model: str = "m",
+    source: str = "E1",
 ) -> Path:
     """落一份 ``RunResult`` 形状的 JSON——聚合器只读它的落盘字段。"""
     payload = {
@@ -33,6 +34,7 @@ def _write_run(
         "arm": arm,
         "base_commit": "abc",
         "outcome": outcome,
+        "source": source,
         "budget_tier": tier,
         "patch": "",
         "fail_first_exit_code": 1,
@@ -272,3 +274,52 @@ def test_b3_report_reports_incremental_cost_over_b1_baseline() -> None:
     assert column.total_cost_usd == pytest.approx(1.1)
     assert column.total_incremental_cost_usd == pytest.approx(0.7)
     assert "增量成本" in render_markdown(report)
+
+
+def test_run_row_from_dict_reads_the_task_source_with_e1_default() -> None:
+    # 缺字段的旧落盘物按 E1 读（既有任务本来全是 E1）；新任务显式写来源。
+    assert (
+        RunRow.from_dict(
+            {"task_id": "t", "arm": "L0", "outcome": "pass"}
+        ).task_origin
+        == "E1"
+    )
+    assert (
+        RunRow.from_dict(
+            {"task_id": "t", "arm": "L0", "outcome": "pass", "source": "E3"}
+        ).task_origin
+        == "E3"
+    )
+
+
+def test_from_dict_rejects_an_unknown_task_source() -> None:
+    # 未知来源不能悄悄归到 E1——报告的口径会因此失真。
+    with pytest.raises(ValueError):
+        RunRow.from_dict(
+            {"task_id": "t", "arm": "L0", "outcome": "pass", "source": "E9"}
+        )
+
+
+def test_report_groups_task_sources_so_e1_and_e3_are_distinguishable() -> None:
+    # E3 合成缺陷与 E1 历史 bug 混进同一条曲线后，报告必须能按来源说出各自表现。
+    rows = [
+        RunRow(task_id="e1-a", arm="L0", outcome="pass", task_origin="E1"),
+        RunRow(task_id="e1-b", arm="L0", outcome="fail", task_origin="E1"),
+        RunRow(task_id="e3-c", arm="L0", outcome="pass", task_origin="E3"),
+    ]
+
+    report = build_report(rows)
+
+    assert report.task_sources == {"e1-a": "E1", "e1-b": "E1", "e3-c": "E3"}
+    assert report.task_source_kinds == ("E1", "E3")
+    assert report.to_dict()["task_sources"] == {
+        "e1-a": "E1",
+        "e1-b": "E1",
+        "e3-c": "E3",
+    }
+    # JSON 形状：``sources`` 是 run 文件清单（可追溯），``task_sources`` 是任务→来源
+    # 映射，``origins`` 是这张表出现过的来源种类——三者口径不同，别混用。
+    assert report.to_dict()["origins"] == ["E1", "E3"]
+    rendered = render_markdown(report)
+    assert "来源" in rendered
+    assert "E3" in rendered

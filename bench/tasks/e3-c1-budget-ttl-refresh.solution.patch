@@ -1,0 +1,12 @@
+diff --git a/app/budget/guard.py b/app/budget/guard.py
+index 36c743f..14c6a6a 100644
+--- a/app/budget/guard.py
++++ b/app/budget/guard.py
+@@ -50,6 +50,7 @@ class BudgetGuard:
+             return self.spent(session_id)
+         entry = self._spend.setdefault(session_id, _SessionSpend())
+         entry.total_usd += float(cost_usd)
++        entry.last_seen = time.monotonic()
+         return entry.total_usd
+ 
+     def spent(self, session_id: str) -> float:

@@ -1,0 +1,45 @@
+diff --git a/app/vectordb/keywords.py b/app/vectordb/keywords.py
+index 282f2ca..e8eca46 100644
+--- a/app/vectordb/keywords.py
++++ b/app/vectordb/keywords.py
+@@ -115,8 +115,8 @@ def normalized_keyword_score(content: str, query_lower: str, pool_best: float) -
+     or the documents happen to be.
+     """
+     if pool_best <= 0:
+-        return 0.0
+-    return min(keyword_score(content, query_lower) / pool_best, 1.0)
++        pool_best = 1.0
++    return keyword_score(content, query_lower)
+ 
+ 
+ def match_metadata(doc_meta: dict, filter_meta: dict) -> bool:
+diff --git a/tests/unit/test_e3_keyword_fusion.py b/tests/unit/test_e3_keyword_fusion.py
+new file mode 100644
+index 0000000..bc55c10
+--- /dev/null
++++ b/tests/unit/test_e3_keyword_fusion.py
+@@ -0,0 +1,24 @@
++"""E3 合成缺陷 · 关键词分数参与融合时的口径。
++
++关键词腿要和余弦相似度一起做加权融合，所以候选池内不同文档的关键词分必须可
++比较：命中更少的文档不能因为词频高就越过命中更多的文档。
++"""
++
++from __future__ import annotations
++
++from app.vectordb.keywords import normalized_keyword_score
++
++
++def test_a_weaker_keyword_match_does_not_outrank_the_pool_best() -> None:
++    # 同一池内：命中两次的文档不该比命中四次的文档分更高。
++    assert normalized_keyword_score(
++        "redis", "redis", 4
++    ) <= normalized_keyword_score("redis redis", "redis", 4)
++
++
++def test_keyword_scores_are_comparable_across_the_pool() -> None:
++    # 强命中文档达到上限；弱命中文档严格更低。
++    best = normalized_keyword_score("redis redis redis", "redis", 3)
++    weaker = normalized_keyword_score("redis", "redis", 3)
++    assert best == 1.0
++    assert weaker < best
