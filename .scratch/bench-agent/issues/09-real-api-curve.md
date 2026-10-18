@@ -4,21 +4,31 @@
 
 **Blocked by:** 01 — 任务集；06 — L3；07 — 预算策略；08 — 报告
 
-**Status:** blocked — 缺真 API 凭据与中档模型选型
+**Status:** blocked — 中档模型与端点已定，**只缺 API key**（填 `.env` 的 `LLM_API_KEY`）
 
-- [ ] 选定中档模型，记录选型理由与 `RunResult` 里的实际 `model` 值
-- [ ] L0–L3 在同一任务集、同一预算下各跑完
+- [x] 选定中档模型：`nvidia/nemotron-3.5-super-vl-120b-a12b`（NVIDIA integrate API，
+      `https://integrate.api.nvidia.com/v1`）。已写入 `.env`（`LLM_PROVIDER=nvidia`）；
+      实际 `model` 值由 `RunResult.agent_run.model` 如实落盘。是否支持 native
+      tool-calling 由首跑验证——不支持会落 `outcome=error`，这本身也是结论。
+- [ ] L0–L3 在同一任务集、同一预算下各跑完  ← 等 `LLM_API_KEY`
 - [ ] 失败的档位按 B3 放宽后再跑一遍，标注增量成本
 - [ ] 产出曲线 + 完整 `RunResult` 归档
 - [x] 报告里每个数字都能追到具体的 run（08 的报告带 `sources` 来源文件名清单）
 - [x] 不把结果并进 CI（`bench/run_task.py` / `bench/report_curve.py` 都不在 `tests/`）
 
-**为什么卡住：** 这台机器的 LLM 配置指向**本机小模型**，不是 §12 要的 API 中档模型。
-`.env` 里 `LLM_PROVIDER=local` / `LLM_BASE_URL=http://localhost:11434/v1` /
-`LLM_MODEL=moa-qwen`，`OPENAI_BASE_URL` 同样指向 `localhost:11434`；没有云端 API 凭据。
-§13/§12 明确"本机小模型不参与 bench""模型走 API 中档"，所以**不能用它跑曲线**——照跑
-只会得到"所有档位都失败"的假结论，正是 §8 要避免的噪音。解除阻塞需要：一个 API 中档
-模型的 key + 模型名（写进 `LLM_*` 或 `--model`）。
+**为什么卡住：** 模型与端点已定（见上），只差 `LLM_API_KEY`。此前的阻塞是这台机器的
+LLM 配置指向**本机小模型**（`LLM_PROVIDER=local` / `LLM_MODEL=moa-qwen`），而 §13/§12
+明确"本机小模型不参与 bench""模型走 API 中档"——照跑只会得到"所有档位都失败"的假
+结论，正是 §8 要避免的噪音。现已把 `.env` 的 `LLM_*` 改指 NVIDIA integrate API，本地
+Ollama 配置留在同文件末尾注释里备切换。
+
+**端点踩坑记录（配好即验过）：** LiteLLM 不认 `nvidia/` 前缀，直接传
+`model=nvidia/nemotron-3.5-super-vl-120b-a12b` 会抛 `BadRequestError: LLM Provider
+NOT provided`。仓库 `app/agents/provider.py::_custom_provider_for` 在 `base_url` 含
+`nvidia` 时强制 `custom_llm_provider="openai"`，于是模型名原样透传、`api_base` 指向
+integrate 端点。实测 `LLMConfig.from_env("LLM")` + `_build_kwargs` 产出
+`{model: nvidia/nemotron-3.5-super-vl-120b-a12b, custom_llm_provider: openai,
+api_base: https://integrate.api.nvidia.com/v1}`，正确。
 
 **顺带修掉的真实缺陷（已改，随本票提交）：** `bench/run_task.py` 从不加载 `.env`，
 所以 `LLMConfig.from_env("LLM")` 退回默认值 `provider=direct` / `gpt-4o-mini` /
