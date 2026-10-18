@@ -1,0 +1,18 @@
+{
+  "task_id": "e3-c3-binary-write-review",
+  "base_commit": "2647e434feadbdda1bcfb95565eca41607e14290",
+  "difficulty": "易",
+  "source": "E3",
+  "fix_surface": "small",
+  "note": "合成缺陷：`_WRITE_MODES` 只剩文本模式（`w` / `a` / `x`），二进制写模式 `wb` / `ab` / `xb` 掉出了名单。规则评审器于是把 `open('data.bin', 'wb')` 判成干净输出、不进人工复核——写文件这道闸门对二进制模式失效。修复见 `solution.patch`（补回三个模式）。既有 `test_ast_detect_write_mode_open` / `_append` 只覆盖 `w` 与 `a`，覆盖不到二进制模式，所以注入后 `tests/unit` 全绿、只有本判据变红（spec §2.5）。fail-first 实测：`test_binary_write_mode_needs_review` 失败于 `assert False is True`（`need_human_review` 被判成 False）。",
+  "verify_command": [
+    "{python}",
+    "-m",
+    "pytest",
+    "tests/unit/test_e3_binary_write_review.py",
+    "-q"
+  ],
+  "test_paths": [
+    "tests/unit/test_e3_binary_write_review.py"
+  ]
+}

@@ -22,7 +22,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from bench.agent.types import B1_TIER, B3_TIER, BudgetTier
+from bench.agent.types import (
+    B1_TIER,
+    B3_TIER,
+    E1_ORIGIN,
+    BudgetTier,
+    TaskOrigin,
+)
 from bench.arms import arm_names
 
 #: 四档的规范顺序——边际收益是"后一列减前一列"，顺序错了结论就反了。取自 arm 注册表
@@ -105,6 +111,10 @@ class RunRow:
     wall_clock_s: float = 0.0
     #: 这份 run 来自哪个文件——报告里的数字靠它追回具体 run。
     source: str = ""
+    #: 任务来源（E1 = 真实历史 bug，E3 = 合成缺陷）。§5.4 的曲线表要靠它把两类
+    #: 任务分开说——混在一起时"合成缺陷是不是把难度做成了可控变量"没有分母。
+    #: 名字用 ``task_origin`` 而不是 ``source``：后者在本模块已经是"哪份 run 文件"。
+    task_origin: TaskOrigin = E1_ORIGIN
     #: 同 (task, arm) 的 B1 花费；B3 复跑时才有意义。
     baseline_cost_usd: float = 0.0
 
@@ -127,6 +137,10 @@ class RunRow:
         if tier not in (B1_TIER, B3_TIER):
             # 静默收下一个不认识的档位，会让它从曲线里"消失"又不报错——宁可炸。
             raise ValueError(f"未知预算档位: {tier!r}（只认 {B1_TIER} / {B3_TIER}）")
+        origin = str(payload.get("source", "") or E1_ORIGIN)
+        if origin not in ("E1", "E3"):
+            # 未知来源同理：不能悄悄归到 E1，否则报告口径会失真。
+            raise ValueError(f"未知任务来源: {origin!r}（只认 E1 / E3）")
         return cls(
             task_id=str(payload.get("task_id", "")),
             arm=str(payload.get("arm", "")),
@@ -140,6 +154,7 @@ class RunRow:
             ),
             wall_clock_s=float(payload.get("wall_clock_s", 0.0) or 0.0),
             source=source,
+            task_origin=origin,  # type: ignore[arg-type]
             baseline_cost_usd=float(payload.get("baseline_cost_usd", 0.0) or 0.0),
         )
 
@@ -171,6 +186,8 @@ class CellResult:
     arm: str
     counts: OutcomeCounts = OutcomeCounts()
     total_cost_usd: float = 0.0
+    #: 这个任务的来源（E1 / E3）。同格的多次 run 来源一致，取首个非空值。
+    task_origin: TaskOrigin = E1_ORIGIN
 
     @property
     def runs(self) -> int:
@@ -284,7 +301,7 @@ class DoseReport:
     marginals: tuple[MarginalStep, ...]
     total_runs: int
     #: 输入文件清单——报告里的数字靠它追回具体的 run。
-    sources: tuple[str, ...] = ()
+    run_sources: tuple[str, ...] = ()
 
     def cell(self, task_id: str, arm: str) -> CellResult:
         for item in self.cells:
@@ -322,6 +339,27 @@ class DoseReport:
         """每格最多一次运行：这是单点样本，不能当曲线读（§9）。"""
         return self.max_runs_per_cell <= 1
 
+    @property
+    def task_sources(self) -> dict[str, TaskOrigin]:
+        """每个任务来自哪一类（E1 / E3）。同一任务的多格共享同一来源。"""
+        mapping: dict[str, TaskOrigin] = {}
+        for cell in self.cells:
+            if cell.task_id not in mapping:
+                mapping[cell.task_id] = cell.task_origin
+        return mapping
+
+    @property
+    def task_source_kinds(self) -> tuple[TaskOrigin, ...]:
+        """这张表里出现过哪些任务来源——报告头部据此声明口径。"""
+        return tuple(
+            sorted({source for source in self.task_sources.values() if source})
+        )
+
+    @property
+    def sources(self) -> tuple[str, ...]:
+        """输入 run 文件清单。既有的可追溯口径，别改语义。"""
+        return self.run_sources
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "tier": self.tier,
@@ -331,7 +369,9 @@ class DoseReport:
             "max_runs_per_cell": self.max_runs_per_cell,
             "min_nonzero_runs_per_cell": self.min_nonzero_runs_per_cell,
             "is_single_sample": self.is_single_sample,
-            "sources": list(self.sources),
+            "sources": list(self.run_sources),
+            "task_sources": self.task_sources,
+            "origins": list(self.task_source_kinds),
             "cells": [
                 {
                     "task_id": item.task_id,
@@ -371,6 +411,7 @@ def _cell(rows: Sequence[RunRow], task_id: str, arm: str) -> CellResult:
         arm=arm,
         counts=OutcomeCounts.tally(chosen),
         total_cost_usd=sum(row.cost_usd for row in chosen),
+        task_origin=chosen[0].task_origin if chosen else E1_ORIGIN,
     )
 
 
@@ -437,7 +478,7 @@ def build_report(
         columns=columns,
         marginals=marginals,
         total_runs=len(selected),
-        sources=tuple(sorted({row.source for row in selected if row.source})),
+        run_sources=tuple(sorted({row.source for row in selected if row.source})),
     )
 
 
@@ -473,8 +514,15 @@ def render_markdown(report: DoseReport) -> str:
     if report.gaps:
         listed = "、".join(f"{task}×{arm}" for task, arm in report.gaps)
         lines.append(f"- 缺口（{len(report.gaps)} 格无样本）：{listed}")
-    if report.sources:
-        lines.append(f"- 来源 run（{len(report.sources)}）：{', '.join(report.sources)}")
+    if report.run_sources:
+        lines.append(
+            f"- 来源 run（{len(report.run_sources)}）：{', '.join(report.run_sources)}"
+        )
+    if report.task_source_kinds:
+        lines.append(
+            "- 任务来源（E1 = 真实历史 bug / E3 = 合成缺陷）："
+            f"{', '.join(report.task_source_kinds)}"
+        )
     lines.append("")
 
     # ① 主表：任务 × 档位，每格是通过率与平均成本。

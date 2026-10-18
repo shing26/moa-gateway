@@ -15,8 +15,10 @@ from bench.agent.types import (
     AgentRun,
     Budget,
     CodingAgent,
+    E1_ORIGIN,
     Outcome,
     RunResult,
+    TaskOrigin,
 )
 from bench.agent.tools import build_toolset
 from bench.harness.verify import run_command
@@ -49,7 +51,7 @@ class TaskSpec:
     test_paths: tuple[str, ...]
     test_patch: Path
     difficulty: str = ""
-    source: str = "E1"
+    source: TaskOrigin = E1_ORIGIN
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -62,6 +64,10 @@ class TaskSpec:
 def load_task(path: Path) -> TaskSpec:
     payload = json.loads(path.read_text(encoding="utf-8"))
     task_id = str(payload["task_id"])
+    source = str(payload.get("source", E1_ORIGIN))
+    if source not in ("E1", "E3"):
+        # 来源是闭集；收下一个不认识的来源会让它从报告里"消失"又不报错——宁可炸。
+        raise ValueError(f"{task_id}: 未知任务来源 {source!r}（只认 E1 / E3）")
     return TaskSpec(
         task_id=task_id,
         base_commit=str(payload["base_commit"]),
@@ -69,7 +75,7 @@ def load_task(path: Path) -> TaskSpec:
         test_paths=tuple(str(item) for item in payload.get("test_paths", ())),
         test_patch=path.parent / f"{task_id}.test.patch",
         difficulty=str(payload.get("difficulty", "")),
-        source=str(payload.get("source", "E1")),
+        source=source,  # type: ignore[arg-type]
     )
 
 
@@ -132,6 +138,7 @@ async def run_task(
         patch_touched_tests=patch_touched_tests,
         budget_tier=budget_tier,
         baseline_cost_usd=baseline_cost_usd,
+        source=spec.source,
     )
 
 
@@ -158,7 +165,8 @@ def summarize(result: RunResult) -> str:
     """一行摘要，给人看。"""
     usage: Any = result.agent_run.usage
     return (
-        f"{result.task_id} arm={result.arm} tier={result.budget_tier} "
+        f"{result.task_id} source={result.source} arm={result.arm} "
+        f"tier={result.budget_tier} "
         f"outcome={result.outcome} "
         f"status={result.agent_run.status} steps={len(result.agent_run.steps)} "
         f"cost=${usage.cost_usd:.6f} calls={usage.llm_calls} "

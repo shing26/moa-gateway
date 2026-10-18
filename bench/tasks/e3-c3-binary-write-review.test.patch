@@ -1,0 +1,37 @@
+diff --git a/app/evaluator/evaluator.py b/app/evaluator/evaluator.py
+index 8dac27d..4df86bf 100644
+--- a/app/evaluator/evaluator.py
++++ b/app/evaluator/evaluator.py
+@@ -34,7 +34,7 @@ _DANGEROUS_METHODS: set[str] = {
+     "rmtree", "remove", "unlink", "chmod", "chown",
+ }
+ 
+-_WRITE_MODES: set[str] = {"w", "wb", "a", "ab", "x", "xb"}
++_WRITE_MODES: set[str] = {"w", "a", "x"}
+ 
+ 
+ def _extract_call_names(node: ast.Call) -> list[str]:
+diff --git a/tests/unit/test_e3_binary_write_review.py b/tests/unit/test_e3_binary_write_review.py
+new file mode 100644
+index 0000000..7c2cb51
+--- /dev/null
++++ b/tests/unit/test_e3_binary_write_review.py
+@@ -0,0 +1,18 @@
++"""E3 合成缺陷 · 写文件的操作要进人工复核。
++
++以写模式打开文件属于需要复核的操作，二进制模式同样算：评审器不能只认文本模式。
++"""
++
++from __future__ import annotations
++
++import pytest
++
++from app.evaluator.evaluator import RuleEvaluator
++
++
++@pytest.mark.asyncio
++async def test_binary_write_mode_needs_review() -> None:
++    result = await RuleEvaluator().score("open('data.bin', 'wb')", intent="coding")
++
++    assert result.need_human_review is True
++    assert result.score == 0.0

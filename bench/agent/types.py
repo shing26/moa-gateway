@@ -41,6 +41,15 @@ BudgetTier = Literal["B1", "B3"]
 B1_TIER: BudgetTier = "B1"
 B3_TIER: BudgetTier = "B3"
 
+#: 任务来源。``E1`` = 真实历史 bug（修复来自 commit），``E3`` = 合成缺陷（注入自
+#: ``test.patch``）。报告按它把两类任务分开说，所以是闭集字面量而不是裸字符串——
+#: 与 ``AgentStatus`` / ``Outcome`` / ``BudgetTier`` 同一套写法，落盘物校验与报告
+#: 读的是同一个来源。
+TaskOrigin = Literal["E1", "E3"]
+
+E1_ORIGIN: TaskOrigin = "E1"
+E3_ORIGIN: TaskOrigin = "E3"
+
 
 @dataclass(frozen=True)
 class Step:
@@ -198,6 +207,9 @@ class RunResult:
     budget_tier: BudgetTier = B1_TIER
     #: 同 (task, arm) 在 B1 的花费；只在 B3 复跑时有意义。增量成本 = 本次 - 它。
     baseline_cost_usd: float = 0.0
+    #: 任务来源（``E1`` = 真实历史 bug / ``E3`` = 合成缺陷）。从任务定义透传到判决，
+    #: 报告靠它把两类任务分开说；缺省按 ``E1`` 读（既有任务全是 E1）。
+    source: TaskOrigin = E1_ORIGIN
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -233,9 +245,12 @@ __all__ = [
     "Budget",
     "BudgetTier",
     "CodingAgent",
+    "E1_ORIGIN",
+    "E3_ORIGIN",
     "Outcome",
     "RunResult",
     "Step",
     "SubtaskUsage",
+    "TaskOrigin",
     "Usage",
 ]
