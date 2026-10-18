@@ -4,7 +4,7 @@
 
 **Blocked by:** 01 — 任务集
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [x] 写下 E3 任务的合格判据，含 fail-first 与"不可一眼看穿"的检查
 - [x] 首批任务落盘并用 fail-first 筛过
@@ -80,6 +80,13 @@ E1 的 `solution` 来自历史修复 commit，E3 的基线是**干净的历史�
 
 **不阻塞 09**：E3 只做到"任务落盘 + fail-first 筛过 + 报告可区分"，没有跑真实
 API；09 的第一轮曲线可以只用 E1，E3 是加料不是前置。
+
+**已知取舍（合流时必须看一眼）**：三条 E3 任务的 `base_commit` 钉在本 branch 的
+`2647e43`——E3 的基线是"干净的历史提交 + `test.patch` 注入缺陷"，所以基线只能取一个
+真实提交，而它目前**只存在于本功能分支**。混到 main 的两种命运：merge commit（保留
+`2647e43` 可达）可以照跑；squash/rebase-merge 会把该提交丢掉，三条 E3 任务随之
+`MissingCommitError`（E1 那五条钉的是 main 上的历史提交，不受影响）。真要长期用，
+把三条 E3 重钉到合流后的 main 提交即可（改 `base_commit` 后重跑 fail-first 复验）。
 
 **README 同步**：测试基线实测 1359 passed / 4 skipped（badge / 摘要 / 离线保障 /
 目录树 / 门禁五处全部写 1359）。改前的 1358 是未实测的旧值，已按本轮全量结果纠正。
