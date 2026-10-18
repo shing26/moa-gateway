@@ -394,3 +394,25 @@ status=step_limit cost=$0.000000`）。
 代价：两个主轴并存，读报告时要先看清是哪一轴；`inf` 作为"不设美元上限"的哨兵进了
 `Budget`（不进任何落盘 JSON）。真实 token smoke 已复验降级路径有效——`--budget-axis
 tokens --main-tokens 20000` 在 25,467 token 处停下并落 `outcome=budget_exhausted`。
+
+### 13.4 L2/L3 的 planner 契约（2026-10-18，真实模型揪出的缺陷）
+
+首轮真实模型跑出四档结局时，L0/L1 是 `budget_exhausted`（66k token 侦察完没动手），
+而 L2/L3 各**一次调用、0 步**就结束：`stop_reason="planner 未完成"`。根因是 planner
+的接口自相矛盾——`L2PlannerWorkerCritic` 把 `pool.tools` 交给 planner，同时
+`PlanPolicy.planner_steps=1`：真实模型第一轮就调工具，唯一的一步被工具轮次吃掉，
+`advance` 返回 `step_limit`，整档在分解阶段结束，worker 一次都没跑。离线 scripted
+planner 只会回文本、从不调工具，所以此前没暴露。
+
+修法两条（`bench/arms/l2.py`，L3 继承自动生效）：
+
+1. **planner 不暴露工具**（空 `ToolRegistry`）——`chat_with_tools` 带 `tools=[]`，
+   模型没有工具通道可调。
+2. **planner 用自己的角色指令**（`bench/agent/planner.py::PLANNER_INSTRUCTIONS`）。
+   只去掉工具还不够：循环的基础 system prompt 是**编码 agent** 的（"先读再看"），实测
+   模型会把工具调用写进正文（`<|open|>argument ... <|call|>`），`parse_plan` 依旧读不
+   出来。补上"你是规划者，不探索、不调工具、只回 JSON"后，同一提示直接回出合法数组。
+
+契约因此写成 §5.0 的一个变体：planner 有目标、**没有工具**、只有一轮，产出是文本而非
+`AgentRun`——它是四档里唯一不满足"工具 + 循环"的节点，按"分解"这件事本身的性质就该
+如此，不是特例。回归用例钉住"planner `tools=[]`、worker 非空"。

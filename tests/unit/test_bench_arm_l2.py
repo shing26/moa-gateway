@@ -44,9 +44,12 @@ class _ScriptLLM:
         self.config = type("_Cfg", (), {"model": "scripted", "temperature": 0.0})()
         self.last_metrics: dict[str, Any] = {}
         self.seen: list[list[dict[str, Any]]] = []
+        #: 每次调用收到的工具表——钉"planner 不被暴露工具、worker 拿全套"这条。
+        self.seen_tools: list[list[Any]] = []
 
     async def chat_with_tools(self, messages, tools, **kwargs: Any) -> ChatResult:
         self.seen.append([dict(message) for message in messages])
+        self.seen_tools.append(list(tools))
         self.last_metrics = {
             "model_used": self.config.model,
             "cost_usd": self._cost,
@@ -229,6 +232,40 @@ async def test_next_subtask_sees_the_previous_result(tmp_path: Path) -> None:
     handoff = second.split("前面子任务已经产出的结果", 1)[1]
     assert "子任务 0" in handoff
     assert "产出 ALPHA" in handoff
+
+
+@pytest.mark.asyncio
+async def test_planner_is_offered_no_tools_while_the_worker_gets_them(
+    tmp_path: Path,
+) -> None:
+    """planner 只做分解，不该被暴露工具。
+
+    真实模型（NVIDIA nemotron）会立刻调工具；而 planner 的步数上限是 1，于是唯一
+    的一步被工具轮次吃掉、``advance`` 返回 ``step_limit``，整档在分解阶段直接判死。
+    空工具表让它只能回文本，``parse_plan`` 才有机会跑；worker 仍拿全套工具。
+    """
+    tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
+    worker = _Worker(["A"])
+
+    def script(messages: list[dict[str, Any]]) -> ScriptedTurn:
+        route = _route(messages)
+        if route == "planner":
+            return ScriptedTurn(final=_plan_json("写 A"))
+        if route == "critic":
+            return ScriptedTurn(final=_critic_json(True))
+        return worker.turn(messages)
+
+    llm = _ScriptLLM(script)
+    agent = build_l2(llm=llm, workspace=tmp_path, tools=tools)
+
+    run = await agent.run(workspace=tmp_path, goal="让验证通过", budget=Budget(5.0, 30))
+
+    assert run.status == "completed"
+    offered: dict[str, list[list[Any]]] = {"planner": [], "worker": [], "critic": []}
+    for messages, tool_schemas in zip(llm.seen, llm.seen_tools, strict=True):
+        offered[_route(messages)].append(tool_schemas)
+    assert offered["planner"] and all(item == [] for item in offered["planner"])
+    assert offered["worker"] and all(item for item in offered["worker"])
 
 
 @pytest.mark.asyncio
