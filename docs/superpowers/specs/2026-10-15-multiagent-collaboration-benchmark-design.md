@@ -416,3 +416,29 @@ planner 只会回文本、从不调工具，所以此前没暴露。
 契约因此写成 §5.0 的一个变体：planner 有目标、**没有工具**、只有一轮，产出是文本而非
 `AgentRun`——它是四档里唯一不满足"工具 + 循环"的节点，按"分解"这件事本身的性质就该
 如此，不是特例。回归用例钉住"planner `tools=[]`、worker 非空"。
+
+### 13.5 工具集补分页（2026-10-18，预算校准反推）
+
+把 B1 的 token 上限抬到 300k 做校准（`988fccb` / L0）后，结局仍是
+`budget_exhausted`，但轨迹说明了原因：**26 次调用、308k token、patch 0 字节**——模型
+一次 `write_file` 都没调用，56 次工具调用里 18 次被拒，全是
+`read_file(offset=…, limit=…)`。工具从没声明这两个参数，模型读不到想要的行段就重读
+整文件，把预算全烧在无效调用上。**这是"数值调不出来"的瓶颈：加 token 只是让循环转更久。**
+
+修 `bench/agent/tools.py`：
+
+1. `read_file` 支持按行 `offset`（1-based）/`limit`，**仍受 `read_bytes` 约束**——分页
+   是可用性补丁，不是绕过观察上限的口子；截断时回填 `offset=下一行的行号`，给出继续
+   读的锚点。
+2. `offset`/`limit` 的 schema 写成 `["integer", "string"]`：实测模型会把数字写成字符串
+   （`"160"`）。只声明 integer 会让它继续撞类型校验，等于没修。
+
+同一配置复跑变成 **`outcome=pass`**：模型读懂测试、定位 `app/middleware/auth.py`、补上
+`/knowledge` 与 `/api/v1/privacy` 前缀，`tests_touched=False`。这也顺带给出预算校准的
+真实系数：**~7.6k prompt token/步、~25 s/步、30 步 run ≈ 12.4 分钟**，且 30 步时撞的是
+**步数**上限而不是 token（只用了 237k）。所以 B1 定为 `--main-steps 40
+--main-tokens 400000`。
+
+留作后续的小修：模型偶尔会调用不存在的工具（实测 `edit_file`），当前记 `failed`；按
+ADR-018 的口径（模型自纠得了的算 `rejected`）它更该是 `rejected`，否则"环境坏了"的
+计数器会被模型的幻觉污染。

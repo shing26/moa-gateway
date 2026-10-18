@@ -85,6 +85,76 @@ async def test_read_file_numbers_lines_and_truncates(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_file_paginates_by_offset_and_limit(tmp_path: Path) -> None:
+    # 真实模型明确要求分页；不支持 offset/limit 时它会反复重读整文件，把预算烧光。
+    (tmp_path / "f.txt").write_text(
+        "line one\nline two\nline three\nline four\n", encoding="utf-8"
+    )
+    tools = make_tools(tmp_path)
+
+    outcome = await call_bench_tool(
+        tools.get("read_file"),
+        {"path": "f.txt", "offset": 2, "limit": 2},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "ok"
+    assert "line two" in outcome.detail
+    assert "line three" in outcome.detail
+    assert "line one" not in outcome.detail
+    assert "line four" not in outcome.detail
+    # 后面还有内容，要给下一页的锚点。
+    assert "offset=4" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_read_file_accepts_numeric_strings_from_the_model(tmp_path: Path) -> None:
+    (tmp_path / "f.txt").write_text("a\nb\nc\n", encoding="utf-8")
+    tools = make_tools(tmp_path)
+
+    # 模型实测会把 offset/limit 写成字符串；契约允许 string，handler 按整数解释。
+    outcome = await call_bench_tool(
+        tools.get("read_file"),
+        {"path": "f.txt", "offset": "2", "limit": "1"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "ok"
+    assert "   2  b" in outcome.detail
+    assert "   1  a" not in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_read_file_offset_past_eof_is_explicit(tmp_path: Path) -> None:
+    (tmp_path / "f.txt").write_text("a\nb\n", encoding="utf-8")
+    tools = make_tools(tmp_path)
+
+    outcome = await call_bench_tool(
+        tools.get("read_file"), {"path": "f.txt", "offset": 99}, workspace=tmp_path
+    )
+
+    assert outcome.kind == "ok"
+    assert "第 99 行起没有内容" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_read_file_pagination_still_respects_the_byte_cap(tmp_path: Path) -> None:
+    # 显式 LF：Windows 的 write_text 默认写 CRLF，会让这里的字节算术变成平台相关。
+    (tmp_path / "f.txt").write_text(
+        "aaaa\nbbbb\ncccc\n", encoding="utf-8", newline="\n"
+    )
+    tools = make_tools(tmp_path, read_bytes=11)
+
+    outcome = await call_bench_tool(
+        tools.get("read_file"), {"path": "f.txt"}, workspace=tmp_path
+    )
+
+    assert outcome.kind == "ok"
+    assert "已截断" in outcome.detail
+    assert "继续读请用 offset=3" in outcome.detail
+
+
+@pytest.mark.asyncio
 async def test_list_files_truncates_at_limit(tmp_path: Path) -> None:
     for index in range(5):
         (tmp_path / f"f{index}.txt").write_text("x", encoding="utf-8")

@@ -51,6 +51,18 @@ _SKIP_DIRS = frozenset({".git", "__pycache__", ".venv", ".pytest_cache", "node_m
 _BINARY_SNIFF = b"\x00"
 
 
+def _as_int(value: object, default: int) -> int:
+    """把模型给的整数参数转成 ``int``。
+
+    真实模型会把 ``offset`` 写成数字字符串（``"160"``）。声明里允许 string 只是为了让
+    这次调用能落地，这里仍按整数语义解释；解不出来就回默认值，绝不让它变成 500。
+    """
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass(frozen=True)
 class ToolLimits:
     """工具的观察上限。存在的理由：观察直接变成 token，而成本是本次的主判据。"""
@@ -147,19 +159,48 @@ def build_toolset(
     root = workspace.resolve()
     registry = ToolRegistry()
 
-    async def read_file(path: str) -> str:
+    async def read_file(path: str, offset: int = 1, limit: int = 0) -> str:
+        """按行读取；``offset`` 1-based，``limit`` 是行数（0 = 到文件尾）。
+
+        仍然受 ``read_bytes`` 约束——分页不是绕过观察上限的口子。真实模型会明确要求
+        ``offset/limit``；不支持它时实测会反复重读整文件、把预算烧在无效调用上。
+        """
         target = resolve_in_workspace(root, path)
         if not target.is_file():
             raise FileNotFoundError(f"不是文件: {path}")
-        raw = target.read_bytes()
-        truncated = len(raw) > limits.read_bytes
-        body = raw[: limits.read_bytes].decode("utf-8", "replace")
-        numbered = "\n".join(
-            f"{i:>4}  {line}" for i, line in enumerate(body.splitlines(), start=1)
-        )
-        if truncated:
-            numbered += f"\n…（文件超过 {limits.read_bytes} 字节，已截断）"
-        return numbered or "(空文件)"
+        start = max(1, _as_int(offset, 1))
+        want = max(0, _as_int(limit, 0))
+        picked: list[tuple[int, str]] = []
+        used = 0
+        has_more = False
+        last = start - 1
+        with target.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+            for lineno, line in enumerate(handle, start=1):
+                if lineno < start:
+                    continue
+                if want and len(picked) >= want:
+                    # 能走到这里说明后面还有一行，否则循环已经结束。
+                    has_more = True
+                    break
+                encoded = len(line.encode("utf-8", "replace"))
+                if used + encoded > limits.read_bytes:
+                    if not picked:
+                        # 单行就超上限：给截断后的这一行，避免 offset 原地打转。
+                        picked.append((lineno, line.rstrip("\r\n")[:4000]))
+                        last = lineno
+                    has_more = True
+                    break
+                picked.append((lineno, line.rstrip("\r\n")))
+                last = lineno
+                used += encoded
+        numbered = "\n".join(f"{i:>4}  {text}" for i, text in picked)
+        if not numbered:
+            return f"(第 {start} 行起没有内容)" if start > 1 else "(空文件)"
+        if has_more:
+            numbered += (
+                f"\n…（已截断：返回 {len(picked)} 行；继续读请用 offset={last + 1}）"
+            )
+        return numbered
 
     async def write_file(path: str, content: str) -> str:
         target = resolve_in_workspace(root, path)
@@ -239,11 +280,22 @@ def build_toolset(
     registry.register(
         AgentTool(
             name="read_file",
-            description="读取工作区内的一个文本文件，返回带行号的原文。",
+            description=(
+                "按行读取工作区内的一个文本文件，返回带行号的原文。"
+                "大文件用 offset/limit 分页，别反复重读整文件。"
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "相对工作区根的文件路径"}
+                    "path": {"type": "string", "description": "相对工作区根的文件路径"},
+                    "offset": {
+                        "type": ["integer", "string"],
+                        "description": "从第几行开始读（1-based，默认 1）",
+                    },
+                    "limit": {
+                        "type": ["integer", "string"],
+                        "description": "最多读多少行（默认 0 = 到文件尾，仍受字节上限约束）",
+                    },
                 },
                 "required": ["path"],
             },
