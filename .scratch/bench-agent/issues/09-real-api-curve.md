@@ -87,13 +87,15 @@ key 已在 `.env`，**免费模型按 token 主轴**（§5.3 降级路径）：
 # B1 每 (任务×档位) 跑 --repeats 次；B3 只对 B1 失败/超预算的档位放宽 token 上限复跑
 # （token 基线由 plan_b3_reruns 从 B1 结果推出）+ 落盘 + 报告
 .venv\Scripts\python.exe bench\run_curve.py --tasks 988fccb a746b81 --repeats 3 `
-  --budget-axis tokens --main-tokens 60000 --relaxed-tokens 180000 `
-  --main-steps 30 --relaxed-steps 90
+  --budget-axis tokens --main-tokens 400000 --relaxed-tokens 1200000 `
+  --main-steps 40 --relaxed-steps 120
 #   → .bench-work/curve/runs/b1/*.json、/b3/*.json、report-B1.json、report-B3.json
 #   （报告同时给美元与 token 两列；成本列会全 $0，看 token 列）
 ```
 
-上限数值待第一条曲线反推：8 次调用烧 57,712 prompt tokens，可据此定 `--main-tokens`。
+数值由校准反推（1 个 run 实测 ~7.6k token/步、~25 s/步）：30 步用掉 237k token，撞的是
+**步数**不是 token；所以抬到 40 步、token 留 400k 余量。**一个 run 约 12 分钟**，按 40 步
+可能到 17 分钟——题量与重复次数要按这个排（2 题 × 4 档 × 3 次 ≈ 5–7 小时）。
 
 **首轮真实曲线（2026-10-18，1 题 × 4 档 × 1 次，token 主轴）：** `988fccb` 上四档全
 没过，但四档的死法不同，而且暴露出一个**真缺陷**：
@@ -128,6 +130,33 @@ run_tests），**不再是 1 次调用判死**。
 `outcome=error`（§8 的噪音腿，不进通过率分母）。planner 那一轮也偶发同样 500。
 跑整轮曲线时 error 率会明显 >0；这是**端点的性质**，不是 bench 的判决问题——报告已把
 `error` 单独成列。
+
+**预算校准（2026-10-18）：瓶颈不在数值，在 `read_file` 缺分页——已修，修后首个 pass。**
+
+先按"30 步 × ~8k prompt token/步"把 B1 抬到 `--main-tokens 300000` 跑 `988fccb / L0`
+校准，结果是 **26 次调用、308k token、patch 0 字节**：模型全程在读，一次 `write_file`
+都没调；56 次工具调用里 **18 次被拒**，全是 `read_file(offset/limit)`——工具没声明这两个
+参数，它读不到就重读整文件，把预算烧在无效调用上。**加 token 只会让这个循环转更久。**
+
+修 `bench/agent/tools.py` 的 `read_file`：支持按行 `offset`/`limit`，仍受 `read_bytes`
+约束（分页不是绕过观察上限的口子），并接受模型实际会发的数字字符串（`"160"`）。
+同一配置复跑：**`outcome=pass`**——它读懂了测试、定位到 `app/middleware/auth.py`，补上
+`/knowledge` 与 `/api/v1/privacy` 两个前缀（正是任务的修复面），30 步时判 `step_limit`
+但判决已通过、`tests_touched=False`。
+
+校准实测（这次是**数值**该用的依据）：
+
+| 指标 | 实测 |
+|---|---|
+| 步数 / 调用 | 30 / 30（撞步数上限，没撞 token 上限） |
+| prompt / completion | 226,913 / 10,531（合计 237,444） |
+| 单步 prompt | ~7.6k token |
+| 墙钟 | 743 s（**~25 s/步、~12.4 min/run**） |
+| 工具分布 | read_file 18、run_tests 9、list_files 4、search 3、write_file 2、edit_file 2（未注册→failed） |
+
+→ 结论：**token 上限不是绑定约束，步数才是**（300k 没用满就撞了 30 步）。参数建议见下；
+`edit_file` 是模型幻觉出的工具名（bench 只有五个工具），当前记 `failed`；按 ADR-018 的
+口径它更该是 `rejected`（模型自纠得了），留作后续小修。
 
 分步版（想逐步核对时用）：
 
