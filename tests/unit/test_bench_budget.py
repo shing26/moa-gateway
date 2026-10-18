@@ -11,6 +11,7 @@ from bench.agent.types import AgentRun, Budget, RunResult, Usage
 from bench.harness.budget import (
     B1_TIER,
     B3_TIER,
+    NO_COST_LIMIT,
     BudgetPolicy,
     b3_candidates,
     plan_b3_reruns,
@@ -26,11 +27,12 @@ def _result(
     tier: str = B1_TIER,
     cost: float = 0.0,
     baseline: float = 0.0,
+    tokens: int = 0,
 ) -> RunResult:
     run = AgentRun(
         status="completed",
         steps=(),
-        usage=Usage(cost_usd=cost),
+        usage=Usage(cost_usd=cost, prompt_tokens=tokens),
         model="m",
         temperature=0.0,
     )
@@ -137,3 +139,52 @@ def test_token_cap_is_a_fallback_stop_not_the_main_criterion() -> None:
     assert unlimited.stop_status(usage=usage, steps_used=0) is None
     # 全局预算切段时 token 兜底跟着走。
     assert unlimited.remaining(usage=usage, steps_used=0).max_tokens == 0
+
+
+def test_token_axis_is_a_documented_fallback_for_unpriced_models() -> None:
+    # 免费端点：cost_usd 恒为 0，美元这条永远不触发，"等预算"只能改按 token 算。
+    policy = BudgetPolicy(axis="tokens", main_tokens=20_000, relaxed_tokens=60_000)
+
+    b1 = policy.b1()
+    b3 = policy.b3()
+
+    assert b1.max_tokens == 20_000
+    assert b3.max_tokens == 60_000
+    # 美元这条不设哨兵：inf 让 stop_status 的美元判断永远为假，判停交给 token。
+    assert b1.max_cost_usd == NO_COST_LIMIT
+    assert b3.max_cost_usd == NO_COST_LIMIT
+    assert policy.for_tier(B1_TIER) == b1
+    assert policy.for_tier(B3_TIER) == b3
+    # 一旦累计 token 到顶，仍然是 budget_exhausted 这个自报状态。
+    assert (
+        b1.stop_status(
+            usage=Usage(prompt_tokens=20_000), steps_used=0
+        )
+        == "budget_exhausted"
+    )
+
+
+def test_token_axis_without_token_caps_is_rejected() -> None:
+    # 主轴切 tokens 却不给上限 = 既没有美元判据也没有 token 判据，必须炸而不是放行。
+    with pytest.raises(ValueError):
+        BudgetPolicy(axis="tokens").b1()
+
+
+def test_unknown_axis_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        BudgetPolicy(axis="cents").b1()  # type: ignore[arg-type]
+
+
+def test_plan_b3_carries_the_token_baseline_too() -> None:
+    # 两次 B1 尝试各 1000 token → B3 的 token 基线是 2000。
+    results = [
+        _result("t1", "L3", "fail", tier=B1_TIER, tokens=1000),
+        _result("t1", "L3", "fail", tier=B1_TIER, tokens=1000),
+    ]
+    policy = BudgetPolicy(axis="tokens", main_tokens=50_000, relaxed_tokens=90_000)
+
+    plan = plan_b3_reruns(results, policy=policy)
+
+    assert len(plan) == 1
+    assert plan[0].baseline_tokens == 2000
+    assert plan[0].budget.max_tokens == 90_000

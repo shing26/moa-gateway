@@ -63,10 +63,21 @@ def _write_run(
 
 
 def _row(
-    task: str, arm: str, outcome: str, cost: float = 0.0, tier: str = "B1"
+    task: str,
+    arm: str,
+    outcome: str,
+    cost: float = 0.0,
+    tier: str = "B1",
+    *,
+    tokens: int = 0,
 ) -> RunRow:
     return RunRow(
-        task_id=task, arm=arm, outcome=outcome, cost_usd=cost, budget_tier=tier
+        task_id=task,
+        arm=arm,
+        outcome=outcome,
+        cost_usd=cost,
+        budget_tier=tier,
+        prompt_tokens=tokens,
     )
 
 
@@ -274,6 +285,48 @@ def test_b3_report_reports_incremental_cost_over_b1_baseline() -> None:
     assert column.total_cost_usd == pytest.approx(1.1)
     assert column.total_incremental_cost_usd == pytest.approx(0.7)
     assert "增量成本" in render_markdown(report)
+
+
+def test_token_columns_are_aggregated_alongside_dollars() -> None:
+    report = build_report(
+        [
+            _row("t1", "L0", "pass", 0.0, tokens=1000),
+            _row("t1", "L0", "fail", 0.0, tokens=3000),
+        ]
+    )
+
+    cell = report.cell("t1", "L0")
+    column = next(item for item in report.columns if item.arm == "L0")
+
+    assert cell.total_tokens == 4000
+    assert cell.avg_tokens == 2000
+    # 每次通过摊到的 token：两次共 4000、一次通过 → 4000。没通过时是 None，不是 0。
+    assert column.tokens_per_pass == 4000
+    assert report.to_dict()["cells"][0]["avg_tokens"] == 2000
+    assert report.to_dict()["columns"][0]["tokens_per_pass"] == 4000
+
+
+def test_marginal_reports_the_token_delta_too() -> None:
+    report = build_report(
+        [
+            _row("t1", "L0", "fail", 0.0, tokens=1000),
+            _row("t1", "L1", "fail", 0.0, tokens=4000),
+        ]
+    )
+
+    step = next(item for item in report.marginals if item.arm == "L1")
+
+    assert step.delta_avg_tokens == 3000
+
+
+def test_unpriced_report_points_the_reader_at_the_token_column() -> None:
+    # 免费端点：成本列全是 $0。报告必须点破"看 token"，否则会被读成"没有成本差别"。
+    report = build_report([_row("t1", "L0", "pass", 0.0, tokens=1234)])
+
+    rendered = render_markdown(report)
+
+    assert "无定价信息" in rendered
+    assert "1,234" in rendered
 
 
 def test_run_row_from_dict_reads_the_task_source_with_e1_default() -> None:

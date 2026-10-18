@@ -202,6 +202,16 @@ B1 要回答的是"同等花费下谁更强"；token 数只是成本的一个来
 "多 agent 但每 agent 更省"这类情况无法比较。token 上限作为**兜底**保留（防止单个
 agent 无节制地刷 token），但它不是主判据。
 
+**降级路径（2026-10-18 修订）：主轴可切到 token。** 上面"单位是美元"有个前提——
+provider 报得出成本。免费/无定价端点（实测 NVIDIA integrate API 的 nemotron）返回的
+`cost_usd` 恒为 0，`litellm.completion_cost` 直接抛 `This model isn't mapped yet`；
+美元这条判据永远不触发，"等预算谁更强"根本无从算起。此时把主轴切成 token：四档共用
+同一个 **token** 上限，美元这条不设（`BudgetPolicy(axis="tokens")` 把 `max_cost_usd`
+置为 `inf`），token 成为唯一可比的货币。这是**降级不是替换**——有定价的模型仍按美元
+跑。配套两条：报告同时输出美元与 token 两列，成本列全 0 时点破"模型无定价信息，
+请看 token 列"；B3 的"多花了多少"在 token 主轴下按增量 token 记
+（`RunResult.incremental_tokens`）。
+
 ### 5.4 核心结果表
 
 ```
@@ -306,8 +316,11 @@ agent 无节制地刷 token），但它不是主判据。
   （`e3-c1-*` / `e3-c2-*` / `e3-c3-*`）已用 fail-first 筛过，任务定义里带
   `source: "E3"` 与 `fix_surface`，报告按来源区分 E1/E3。构造细节与剔除候选见
   `.scratch/bench-agent/issues/10-e3-synthetic-defects.md`。
-- 每题预算上限的具体数值需按真实预算反推。
-- 中档模型的具体选型未定。
+- 每题预算上限的具体数值需按真实预算反推（真实模型 smoke 已跑：8 次调用烧
+  57,712 prompt tokens，可据此反推 token 上限）。
+- ~~中档模型的具体选型未定~~（2026-10-18 定）：`nvidia/nemotron-3.5-super-vl-120b-a12b`
+  @ `https://integrate.api.nvidia.com/v1`。**免费模型**，`cost_usd` 恒为 0，因此按
+  §5.3 的降级路径走 **token 主轴**。原生 tool-calling 实测可用。
 
 ## 13. 修订记录（2026-10-17，§5.0 落地）
 
@@ -356,3 +369,28 @@ test patch 的上下文是 LF，`git apply` 直接失败。物化时必须显式
 `app/agent_core/react.py` 的 `ReActLoop` 用 JSON-in-text（ADR-023 决策 3 已排除），
 `app/agents/stubs.py` 的 `_execute_with_tools` 出口是字符串（没有失败），
 `bench/agent/loop.py` 的 `LLMBackedAgent` 才是要复用的那一条。
+
+### 13.3 §5.3 token 主轴（2026-10-18，免费模型倒逼的降级）
+
+09 的真实模型选型（NVIDIA `nemotron-3.5-super-vl-120b-a12b`）是**免费端点**：真实
+调用能返回内容与 `tool_calls`，但 `litellm.completion_cost` 抛 `This model isn't
+mapped yet`、provider 也不回传成本，`cost_usd` 恒为 0。后果不是"成本很低"，而是
+**§5.3 的美元判据根本不触发**——B1 的"等预算"没有约束力，`budget_exhausted` 不会因
+钱出现，报告成本列全是 $0。这是在 09 首跑 smoke 时实测出来的（`outcome=fail
+status=step_limit cost=$0.000000`）。
+
+按 §5.3 新增的降级路径落地为三处改动：
+
+1. **`BudgetPolicy.axis`**（`bench/harness/budget.py`）：`cost`（默认）/ `tokens`。
+   `tokens` 时四档共用同一个 token 上限，美元这条置为 `inf`（永不触发），判停交给
+   token；B1/B3 用各自的 token 上限。`main_tokens` / `relaxed_tokens` 是这两个上限；
+   `max_tokens` 仍是 cost 主轴下的兜底，语义未变。
+2. **报告的 token 列**（`bench/report/aggregate.py`）：每格/每列/每步都多一套 token
+   口径（`avg_tokens`、`tokens_per_pass`、`delta_avg_tokens`），B3 多一列增量 token。
+   成本列全 0 时报告头部点破"模型无定价信息，请看 token 列"。
+3. **B3 的 token 基线**：`RunResult.baseline_tokens` / `incremental_tokens`，由
+   `plan_b3_reruns` 从 B1 结果推出，与 `baseline_cost_usd` 并列。
+
+代价：两个主轴并存，读报告时要先看清是哪一轴；`inf` 作为"不设美元上限"的哨兵进了
+`Budget`（不进任何落盘 JSON）。真实 token smoke 已复验降级路径有效——`--budget-axis
+tokens --main-tokens 20000` 在 25,467 token 处停下并落 `outcome=budget_exhausted`。

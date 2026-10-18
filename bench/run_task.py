@@ -73,15 +73,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0.0,
         help="B3 复跑时同 (task, arm) 的 B1 花费，用于算增量成本",
     )
+    parser.add_argument(
+        "--baseline-tokens",
+        type=int,
+        default=0,
+        help="B3 复跑时同 (task, arm) 的 B1 token 用量（主轴是 token 时算增量）",
+    )
+    parser.add_argument(
+        "--budget-axis",
+        choices=["cost", "tokens"],
+        default="cost",
+        help="等预算主轴：cost = 美元（默认）；tokens = 免费/无定价端点（见 §5.3）",
+    )
     parser.add_argument("--max-steps", type=int, default=None, help="覆盖该档默认步数上限")
     parser.add_argument(
         "--max-cost-usd", type=float, default=None, help="覆盖该档默认美元上限"
     )
+    parser.add_argument("--main-tokens", type=int, default=None, help="B1 token 上限")
+    parser.add_argument("--relaxed-tokens", type=int, default=None, help="B3 token 上限")
     parser.add_argument(
         "--max-tokens",
         type=int,
         default=None,
-        help="覆盖 token 兜底上限（0 = 不设；主线判据仍是美元）",
+        help="覆盖 token 兜底上限（0 = 不设；主轴是 cost 时才用它）",
     )
     parser.add_argument("--model", default="", help="覆盖 LLM_MODEL（用 LiteLLM 的限定名）")
     parser.add_argument("--temperature", type=float, default=None)
@@ -99,7 +113,12 @@ def build_llm(args: argparse.Namespace) -> LLMClient:
 
 def _resolve_budget(args: argparse.Namespace) -> Budget:
     """预算来自档位策略（B1/B3 的单一来源），``--max-*`` 只做显式覆盖。"""
-    budget = BudgetPolicy().for_tier(args.budget_tier)
+    overrides: dict[str, object] = {"axis": args.budget_axis}
+    for attr in ("main_tokens", "relaxed_tokens"):
+        value = getattr(args, attr)
+        if value is not None:
+            overrides[attr] = value
+    budget = dataclasses.replace(BudgetPolicy(), **overrides).for_tier(args.budget_tier)
     if args.max_cost_usd is not None:
         budget = dataclasses.replace(budget, max_cost_usd=args.max_cost_usd)
     if args.max_steps is not None:
@@ -123,7 +142,12 @@ async def main(argv: list[str] | None = None) -> int:
         return 4
     spec = load_task(Path(args.tasks_dir) / f"{args.task}.task.json")
 
-    budget = _resolve_budget(args)
+    try:
+        budget = _resolve_budget(args)
+    except ValueError as exc:
+        # 主轴切到 tokens 却没给 token 上限——这类错配要在花钱之前就说清楚。
+        logger.error("预算配置有误：%s", exc)
+        return 5
     try:
         result = await run_task(
             spec=spec,
@@ -134,6 +158,7 @@ async def main(argv: list[str] | None = None) -> int:
             budget=budget,
             budget_tier=args.budget_tier,
             baseline_cost_usd=args.baseline_cost_usd,
+            baseline_tokens=args.baseline_tokens,
         )
     except MissingCommitError as exc:
         logger.error("基线提交不可用：%s（需要完整克隆，浅克隆拿不到历史）", exc)
