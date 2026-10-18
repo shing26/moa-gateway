@@ -37,6 +37,21 @@ model: "openai/moa-qwen"}`。**这是一个诚实的 `fail`，不是曲线数据
 
 **解除阻塞后的 runbook（人工、花钱、不进 CI）：**
 
+一条命令跑完整轮（B1 主实验 → 由 B1 结果推 B3 放宽复跑 → 两份聚合报告）：
+
+```powershell
+# 1) 指向 API 中档模型（provider/model 按实际凭据填）
+$env:LLM_MODEL = "<mid-tier-model>"; $env:LLM_PROVIDER = "<provider>"
+$env:LLM_API_KEY = "<key>"; $env:LLM_BASE_URL = "<base-url>"
+
+# 2) 一条命令：B1（每 (任务×档位) 跑 --repeats 次）+ B3（只对 B1 失败/超预算的
+#    档位放宽复跑，基线花费由 plan_b3_reruns 从 B1 结果推出）+ 落盘 + 报告
+.venv\Scripts\python.exe bench\run_curve.py --tasks 988fccb a746b81 --repeats 3
+#   → .bench-work/curve/runs/b1/*.json、/b3/*.json、report-B1.json、report-B3.json
+```
+
+分步版（想逐步核对时用）：
+
 ```powershell
 # 1) 指向 API 中档模型（示例：provider/model 按实际凭据填）
 $env:LLM_MODEL = "<mid-tier-model>"; $env:LLM_PROVIDER = "<provider>"
