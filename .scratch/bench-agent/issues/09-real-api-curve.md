@@ -95,6 +95,40 @@ key 已在 `.env`，**免费模型按 token 主轴**（§5.3 降级路径）：
 
 上限数值待第一条曲线反推：8 次调用烧 57,712 prompt tokens，可据此定 `--main-tokens`。
 
+**首轮真实曲线（2026-10-18，1 题 × 4 档 × 1 次，token 主轴）：** `988fccb` 上四档全
+没过，但四档的死法不同，而且暴露出一个**真缺陷**：
+
+| 档 | B1 结局 | 调用 | token | 说明 |
+|---|---|---|---|---|
+| L0 | budget_exhausted | 9 | 66,019 | 侦察到预算耗尽，没走到写修复 |
+| L1 | budget_exhausted | 8 | 65,366 | 同上；Critic 回边没轮上 |
+| L2 | fail（step_limit） | **1** | 1,206 | **planner 未完成**——见下 |
+| L3 | fail（step_limit） | **1** | 1,216 | 同 L2（L3 复用 L2 的 planner） |
+
+**缺陷：L2/L3 的 planner 用一次调用就判死。** `L2PlannerWorkerCritic.__init__` 把
+`pool.tools`（全套工具）交给 planner，而 `planner_steps=1`——真实模型第一轮就调工具，
+唯一的一步被工具轮次吃掉，`advance` 返回 `step_limit`，整档在**分解阶段**结束，
+worker 一次都没跑。前几轮离线测试没抓到它，因为 scripted planner 只会回文本、从不调
+工具。修了两处（都在 `bench/arms/l2.py`，L3 继承自动生效）：
+
+1. **planner 不暴露工具**（空 `ToolRegistry`）。`chat_with_tools` 带 `tools=[]`，模型
+   只能回文本。
+2. **planner 换角色指令**（`planner.PLANNER_INSTRUCTIONS`）。只去掉工具还不够：基础
+   system prompt 是编码 agent 的（"先读再看""每一步做一件事"），实测模型会把工具调用
+   **写进正文**（`<|open|>argument ... <|call|>`），`parse_plan` 照样读不出来。补一句
+   "你是规划者，不探索、不调工具、只回 JSON" 后，同一提示下模型直接回出合法 JSON 数组。
+
+回归用例 `tests/unit/test_bench_arm_l2.py::test_planner_is_offered_no_tools_while_the_worker_gets_them`
+钉住"planner 收到 `tools=[]`、worker 收到非空工具表"。修后真实 L2 复跑：planner 产出
+4 条子任务（`subtask_count=4`）、worker 真跑了 9 步（list_files / read_file / search /
+run_tests），**不再是 1 次调用判死**。
+
+**端点噪声（要记的结论之一）：** 修好 planner 后，L2 复跑仍在 worker 段撞上端点 500
+（`litellm.InternalServerError: Failed to generate completions`），落成
+`outcome=error`（§8 的噪音腿，不进通过率分母）。planner 那一轮也偶发同样 500。
+跑整轮曲线时 error 率会明显 >0；这是**端点的性质**，不是 bench 的判决问题——报告已把
+`error` 单独成列。
+
 分步版（想逐步核对时用）：
 
 ```powershell

@@ -46,6 +46,7 @@ from bench.agent.execution import (
 from bench.agent.expert import ExpertPool, ToolExpert
 from bench.agent.loop import LLMBackedAgent
 from bench.agent.planner import (
+    PLANNER_INSTRUCTIONS,
     Plan,
     PlanParseError,
     Subtask,
@@ -118,8 +119,16 @@ class L2PlannerWorkerCritic:
         self._critic: ToolExpert = pool.get("review")
         #: worker 与 L0 一样是中性单 agent（专家角色留给多专家档位）。
         self._worker = LLMBackedAgent(pool.llm, pool.tools)
-        #: 规划者不探索工作区，只要一次模型调用；机制上仍是同一条工具循环。
-        self._planner = LLMBackedAgent(pool.llm, pool.tools)
+        #: 规划者不探索工作区，只要一次模型调用；机制上仍是同一条工具循环，但两处必须
+        #: 收窄，否则整档在分解阶段就判死（实测 NVIDIA nemotron 首跑连挂两次）：
+        #: ① **不暴露工具**。复用 ``pool.tools`` + ``planner_steps=1`` 是个陷阱——模型
+        #:    只要在第一轮调一次工具，唯一的一步就被工具轮次吃掉，``advance`` 返回
+        #:    ``step_limit``（首跑：L2/L3 各 1 次调用、0 步、``planner 未完成``）。
+        #: ② **换掉"边走边看"的角色指令**。基础 prompt 是编码 agent 的，会鼓励它先读
+        #:    文件；实测它会把工具调用写进正文，``parse_plan`` 同样读不出来。
+        self._planner = LLMBackedAgent(
+            pool.llm, ToolRegistry(), instructions=PLANNER_INSTRUCTIONS
+        )
         #: 采样的温度与本次作答的模型一样，从实际跑循环的那个 client 读——不写死一个
         #: 与配置无关的常数，否则报告里的 temperature 是"实现猜的"，不是"真跑的"。
         self._temperature = pool.temperature

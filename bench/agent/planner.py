@@ -54,6 +54,15 @@ class Plan:
 class PlanParseError(ValueError):
     """planner 的输出里读不出结构化计划。"""
 
+#: planner 会话的角色指令，追加在循环基础 system prompt 之后（§5.1 的形状）。
+#: 必须显式说"不探索、不调工具、只回 JSON"：基础 prompt 是**编码 agent** 的，会鼓励
+#: 它"先读再看"，实测那个 urge 会让 planner 把工具调用写进正文（``<|open|>argument
+#: ...``），``parse_plan`` 直接读不出来。
+PLANNER_INSTRUCTIONS = (
+    "你是任务规划者，不是执行者：本轮**不要**读文件、**不要**调用任何工具、"
+    "**不要**探索工作区。你的回复只能是要求的 JSON 数组本身，不要任何解释或前后缀。"
+)
+
 
 def parse_plan(text: str, *, max_subtasks: int = 4) -> Plan:
     """把 planner 的终局解析成 ``Plan``。读不出来抛 ``PlanParseError``。"""
@@ -227,6 +236,7 @@ def build_plan_review_message(
 
 
 __all__ = [
+    "PLANNER_INSTRUCTIONS",
     "Plan",
     "PlanParseError",
     "Subtask",
