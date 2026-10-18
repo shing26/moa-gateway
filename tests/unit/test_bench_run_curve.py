@@ -15,6 +15,7 @@ import pytest
 from bench import run_curve as cli
 from bench.agent.types import AgentRun, RunResult, Usage
 from bench.arms import arm_names
+from bench.harness.budget import NO_COST_LIMIT, BudgetPolicy
 from bench.harness.runner import InvalidTaskError, TaskSpec
 
 
@@ -36,11 +37,13 @@ def _result(
     outcome: str,
     cost: float,
     baseline: float,
+    baseline_tokens: int = 0,
+    tokens: int = 0,
 ) -> RunResult:
     run = AgentRun(
         status="completed",
         steps=(),
-        usage=Usage(cost_usd=cost),
+        usage=Usage(cost_usd=cost, prompt_tokens=tokens, completion_tokens=0),
         model="m",
         temperature=0.0,
     )
@@ -57,6 +60,7 @@ def _result(
         wall_clock_s=0.0,
         budget_tier=tier,  # type: ignore[arg-type]
         baseline_cost_usd=baseline,
+        baseline_tokens=baseline_tokens,
         source=spec.source,
     )
 
@@ -74,11 +78,14 @@ class FakeRunner:
         *,
         invalid: frozenset[str] = frozenset(),
         cost: float = 0.1,
+        tokens: int = 0,
     ) -> None:
         self.outcomes = outcomes or {}
         self.invalid = set(invalid)
         self.cost = cost
-        self.calls: list[tuple[str, str, str, float]] = []
+        self.tokens = tokens
+        #: 每次调用：任务、档位、预算档、美元上限、token 上限。
+        self.calls: list[tuple[str, str, str, float, int]] = []
 
     async def __call__(
         self,
@@ -92,9 +99,16 @@ class FakeRunner:
         budget: object,
         budget_tier: str,
         baseline_cost_usd: float,
+        baseline_tokens: int = 0,
     ) -> RunResult:
         self.calls.append(
-            (spec.task_id, arm, budget_tier, getattr(budget, "max_cost_usd", 0.0))
+            (
+                spec.task_id,
+                arm,
+                budget_tier,
+                getattr(budget, "max_cost_usd", 0.0),
+                getattr(budget, "max_tokens", 0),
+            )
         )
         if spec.task_id in self.invalid:
             raise InvalidTaskError(spec.task_id)
@@ -110,6 +124,8 @@ class FakeRunner:
             outcome=outcome,
             cost=self.cost,
             baseline=baseline_cost_usd,
+            baseline_tokens=baseline_tokens,
+            tokens=self.tokens,
         )
 
 
@@ -120,6 +136,7 @@ async def _run(
     runner: FakeRunner,
     arms: list[str],
     repeats: int = 1,
+    policy: BudgetPolicy | None = None,
 ) -> cli.CurveOutcome:
     return await cli.run_curve(
         specs=specs,
@@ -131,6 +148,7 @@ async def _run(
         b3_dir=tmp_path / "runs" / "b3",
         factory_for=lambda arm: object(),
         runner=runner,
+        policy=policy,
     )
 
 
@@ -182,7 +200,9 @@ async def test_b3_only_reruns_b1_failures_and_carries_the_baseline(
         "t1-L3-1.json",
         "t2-L2-1.json",
     ]
-    assert ("t1", "L0", "B3") not in [(t, a, tier) for t, a, tier, _ in runner.calls]
+    assert ("t1", "L0", "B3") not in [
+        (t, a, tier) for t, a, tier, _, _ in runner.calls
+    ]
 
     # 基线取自 B1 同格的花费，且 B3 用的是放宽档的美元上限，不是 B1 的。
     b3_json = json.loads(
@@ -190,7 +210,7 @@ async def test_b3_only_reruns_b1_failures_and_carries_the_baseline(
     )
     assert b3_json["budget_tier"] == "B3"
     assert b3_json["baseline_cost_usd"] == pytest.approx(0.4)
-    b3_budget = next(cost for _, _, tier, cost in runner.calls if tier == "B3")
+    b3_budget = next(cost for _, _, tier, cost, _ in runner.calls if tier == "B3")
     assert b3_budget > 1.5  # 放宽档，大于 B1 默认上限
 
     assert out.b1_report.tier == "B1"
@@ -250,6 +270,67 @@ def test_policy_applies_only_the_flags_given() -> None:
 def test_unknown_arms_are_detected_against_the_registry() -> None:
     assert cli._unknown_arms(["L0", "L9", "L3"]) == ("L9",)
     assert cli._unknown_arms(arm_names()) == ()
+
+
+@pytest.mark.asyncio
+async def test_token_axis_binds_on_tokens_and_leaves_dollars_unset(
+    tmp_path: Path,
+) -> None:
+    # 免费端点：cost_usd 恒为 0，美元这条不能当判据。主轴切 tokens 后，预算靠
+    # token 上限约束，且美元上限是"不设"（inf），两条判据不会互相打架。
+    policy = BudgetPolicy(axis="tokens", main_tokens=5_000, relaxed_tokens=15_000)
+    runner = FakeRunner({("t1", "L3"): "fail", ("t1", "L3", "B3"): "pass"}, tokens=1200)
+
+    out = await _run(
+        tmp_path, specs=[_spec("t1")], runner=runner, arms=["L3"], policy=policy
+    )
+
+    b1 = next(call for call in runner.calls if call[2] == "B1")
+    b3 = next(call for call in runner.calls if call[2] == "B3")
+    # 美元这条不设（inf），判停交给各自的 token 上限。
+    assert b1[3] == NO_COST_LIMIT and b1[4] == 5_000
+    assert b3[3] == NO_COST_LIMIT and b3[4] == 15_000
+    assert out.b1_runs == 1
+    assert out.b3_runs == 1
+
+
+@pytest.mark.asyncio
+async def test_b3_carries_the_b1_token_baseline(tmp_path: Path) -> None:
+    policy = BudgetPolicy(axis="tokens", main_tokens=5_000, relaxed_tokens=15_000)
+    runner = FakeRunner({("t1", "L3"): "fail", ("t1", "L3", "B3"): "pass"}, tokens=1200)
+
+    out = await _run(
+        tmp_path, specs=[_spec("t1")], runner=runner, arms=["L3"], policy=policy
+    )
+
+    b3_json = json.loads((out.b3_dir / "t1-L3-1.json").read_text(encoding="utf-8"))
+    # B1 那次花了 1200 token，B3 的增量就该从 1200 起算。
+    assert b3_json["baseline_tokens"] == 1200
+
+
+@pytest.mark.asyncio
+async def test_token_axis_without_token_caps_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError):
+        await _run(
+            tmp_path,
+            specs=[_spec("t1")],
+            runner=FakeRunner(),
+            arms=["L0"],
+            policy=BudgetPolicy(axis="tokens"),
+        )
+
+
+def test_budget_axis_flag_reaches_the_policy() -> None:
+    tokens = cli._policy(
+        cli._parse_args(
+            ["--tasks", "t1", "--budget-axis", "tokens", "--main-tokens", "9000"]
+        )
+    )
+    assert tokens.axis == "tokens"
+    assert tokens.b1().max_tokens == 9000
+    assert tokens.b1().max_cost_usd == NO_COST_LIMIT
+    # 默认仍是美元主轴：不显式切就不会悄悄改用 token。
+    assert cli._policy(cli._parse_args(["--tasks", "t1"])).axis == "cost"
 
 
 @pytest.mark.asyncio

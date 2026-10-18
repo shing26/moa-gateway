@@ -41,6 +41,15 @@ BudgetTier = Literal["B1", "B3"]
 B1_TIER: BudgetTier = "B1"
 B3_TIER: BudgetTier = "B3"
 
+#: 等预算主轴（§5.3）。``cost`` = 四档共用同一个美元上限（默认，provider 有定价时）；
+#: ``tokens`` = 四档共用同一个 token 上限（provider 不给成本信号时——如免费端点——美元
+#: 恒为 0，"同等花费"无从比较，token 是唯一可比的货币）。闭集字面量与报告、CLI 读同一
+#: 个来源，避免各自写裸字符串。
+BudgetAxis = Literal["cost", "tokens"]
+
+COST_AXIS: BudgetAxis = "cost"
+TOKEN_AXIS: BudgetAxis = "tokens"
+
 #: 任务来源。``E1`` = 真实历史 bug（修复来自 commit），``E3`` = 合成缺陷（注入自
 #: ``test.patch``）。报告按它把两类任务分开说，所以是闭集字面量而不是裸字符串——
 #: 与 ``AgentStatus`` / ``Outcome`` / ``BudgetTier`` 同一套写法，落盘物校验与报告
@@ -207,6 +216,9 @@ class RunResult:
     budget_tier: BudgetTier = B1_TIER
     #: 同 (task, arm) 在 B1 的花费；只在 B3 复跑时有意义。增量成本 = 本次 - 它。
     baseline_cost_usd: float = 0.0
+    #: 同 (task, arm) 在 B1 的 token 用量；只在 B3 复跑时有意义。主轴是 token 时，
+    #: 增量按它算——"多花了多少"在免费端点上只能是 token 口径。
+    baseline_tokens: int = 0
     #: 任务来源（``E1`` = 真实历史 bug / ``E3`` = 合成缺陷）。从任务定义透传到判决，
     #: 报告靠它把两类任务分开说；缺省按 ``E1`` 读（既有任务全是 E1）。
     source: TaskOrigin = E1_ORIGIN
@@ -218,6 +230,11 @@ class RunResult:
     def incremental_cost_usd(self) -> float:
         """相对 B1 基线的增量成本（§5.3 要求诚实标注"多花了多少"）。"""
         return max(0.0, self.agent_run.usage.cost_usd - self.baseline_cost_usd)
+
+    @property
+    def incremental_tokens(self) -> int:
+        """相对 B1 基线的增量 token（主轴是 token 时"多花了多少"的口径）。"""
+        return max(0, self.agent_run.usage.total_tokens - self.baseline_tokens)
 
 
 class CodingAgent(Protocol):
@@ -243,7 +260,9 @@ __all__ = [
     "B1_TIER",
     "B3_TIER",
     "Budget",
+    "BudgetAxis",
     "BudgetTier",
+    "COST_AXIS",
     "CodingAgent",
     "E1_ORIGIN",
     "E3_ORIGIN",
@@ -252,5 +271,6 @@ __all__ = [
     "Step",
     "SubtaskUsage",
     "TaskOrigin",
+    "TOKEN_AXIS",
     "Usage",
 ]

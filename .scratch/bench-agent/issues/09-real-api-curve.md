@@ -4,24 +4,25 @@
 
 **Blocked by:** 01 — 任务集；06 — L3；07 — 预算策略；08 — 报告
 
-**Status:** in-progress — key 已填、端点与工具链已跑通（见下「首次真实模型 smoke」）；
-**美元轴被成本缺口卡住**（litellm 无此模型定价 → `cost_usd` 恒为 0），待定：给价 or 改 token 轴
+**Status:** ready — key/端点/工具链全通；模型是**免费**的（`cost_usd` 恒为 0），已按
+§5.3 降级路径落成 **token 主轴**（`BudgetPolicy.axis="tokens"` + 报告 token 列），
+真实 token smoke 复验通过。差最后一步：跑一整轮曲线（数小时）。
 
 - [x] 选定中档模型：`nvidia/nemotron-3.5-super-vl-120b-a12b`（NVIDIA integrate API，
       `https://integrate.api.nvidia.com/v1`）。已写入 `.env`（`LLM_PROVIDER=nvidia`）；
       实际 `model` 值由 `RunResult.agent_run.model` 如实落盘。是否支持 native
       tool-calling 由首跑验证——不支持会落 `outcome=error`，这本身也是结论。
-- [ ] L0–L3 在同一任务集、同一预算下各跑完  ← 等 `LLM_API_KEY`
+- [ ] L0–L3 在同一任务集、同一 token 预算下各跑完
 - [ ] 失败的档位按 B3 放宽后再跑一遍，标注增量成本
 - [ ] 产出曲线 + 完整 `RunResult` 归档
 - [x] 报告里每个数字都能追到具体的 run（08 的报告带 `sources` 来源文件名清单）
 - [x] 不把结果并进 CI（`bench/run_task.py` / `bench/report_curve.py` 都不在 `tests/`）
 
-**为什么卡住：** 模型与端点已定（见上），只差 `LLM_API_KEY`。此前的阻塞是这台机器的
-LLM 配置指向**本机小模型**（`LLM_PROVIDER=local` / `LLM_MODEL=moa-qwen`），而 §13/§12
-明确"本机小模型不参与 bench""模型走 API 中档"——照跑只会得到"所有档位都失败"的假
-结论，正是 §8 要避免的噪音。现已把 `.env` 的 `LLM_*` 改指 NVIDIA integrate API，本地
-Ollama 配置留在同文件末尾注释里备切换。
+**解除过程：** 最初的阻塞是这台机器的 LLM 配置指向**本机小模型**
+（`LLM_PROVIDER=local` / `LLM_MODEL=moa-qwen`），而 §13/§12 明确"本机小模型不参与
+bench""模型走 API 中档"——照跑只会得到"所有档位都失败"的假结论，正是 §8 要避免的
+噪音。现在 `.env` 的 `LLM_*` 已改指 NVIDIA integrate API、key 已填，本地 Ollama 配置
+留在同文件末尾注释里备切换。**当前不再被外部阻塞**；剩下的是自己跑完整轮（数小时）。
 
 **端点踩坑记录（配好即验过）：** LiteLLM 不认 `nvidia/` 前缀，直接传
 `model=nvidia/nemotron-3.5-super-vl-120b-a12b` 会抛 `BadRequestError: LLM Provider
@@ -45,6 +46,12 @@ tests_touched=False`。观察到三件事：
    provider 也不返回成本（`response_cost=None`、`_hidden_params` 无成本）。后果是 B1
    「等预算」按美元根本不触发、`budget_exhausted` 不会因钱触发、报告成本列全是 $0。
    §5.3 的主判据因此不成立。
+
+   **已解决（免费模型 → §5.3 降级路径）**：`BudgetPolicy.axis="tokens"` 把主轴切到
+   token、美元这条置 `inf`；报告加了 token 列；B3 的增量也按 token 记。复验：
+   `--budget-axis tokens --main-tokens 20000` 在 25,467 token 处停下，落
+   `outcome=budget_exhausted status=budget_exhausted wall=74.6s`——判停确实由 token
+   触发，美元上限没干扰。
 
 **轨迹里的能力信号**：8 步全花在侦察（列文件 → 读 ci.yml/CONTEXT.md → 列 tests →
 跑两次全量单测 → 读 test_auth.py/test_rag.py），从没走到写修复就到步数上限。另，
@@ -73,18 +80,20 @@ model: "openai/moa-qwen"}`。**这是一个诚实的 `fail`，不是曲线数据
 
 **解除阻塞后的 runbook（人工、花钱、不进 CI）：**
 
-一条命令跑完整轮（B1 主实验 → 由 B1 结果推 B3 放宽复跑 → 两份聚合报告）：
+一条命令跑完整轮（B1 主实验 → 由 B1 结果推 B3 放宽复跑 → 两份聚合报告）。模型/端点/
+key 已在 `.env`，**免费模型按 token 主轴**（§5.3 降级路径）：
 
 ```powershell
-# 1) 指向 API 中档模型（provider/model 按实际凭据填）
-$env:LLM_MODEL = "<mid-tier-model>"; $env:LLM_PROVIDER = "<provider>"
-$env:LLM_API_KEY = "<key>"; $env:LLM_BASE_URL = "<base-url>"
-
-# 2) 一条命令：B1（每 (任务×档位) 跑 --repeats 次）+ B3（只对 B1 失败/超预算的
-#    档位放宽复跑，基线花费由 plan_b3_reruns 从 B1 结果推出）+ 落盘 + 报告
-.venv\Scripts\python.exe bench\run_curve.py --tasks 988fccb a746b81 --repeats 3
+# B1 每 (任务×档位) 跑 --repeats 次；B3 只对 B1 失败/超预算的档位放宽 token 上限复跑
+# （token 基线由 plan_b3_reruns 从 B1 结果推出）+ 落盘 + 报告
+.venv\Scripts\python.exe bench\run_curve.py --tasks 988fccb a746b81 --repeats 3 `
+  --budget-axis tokens --main-tokens 60000 --relaxed-tokens 180000 `
+  --main-steps 30 --relaxed-steps 90
 #   → .bench-work/curve/runs/b1/*.json、/b3/*.json、report-B1.json、report-B3.json
+#   （报告同时给美元与 token 两列；成本列会全 $0，看 token 列）
 ```
+
+上限数值待第一条曲线反推：8 次调用烧 57,712 prompt tokens，可据此定 `--main-tokens`。
 
 分步版（想逐步核对时用）：
 

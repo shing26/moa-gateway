@@ -117,6 +117,8 @@ class RunRow:
     task_origin: TaskOrigin = E1_ORIGIN
     #: 同 (task, arm) 的 B1 花费；B3 复跑时才有意义。
     baseline_cost_usd: float = 0.0
+    #: 同 (task, arm) 的 B1 token 用量；主轴是 token 时增量按它算。
+    baseline_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -126,6 +128,11 @@ class RunRow:
     def incremental_cost_usd(self) -> float:
         """相对 B1 基线的增量成本（§5.3：诚实标注"多花了多少"）。"""
         return max(0.0, self.cost_usd - self.baseline_cost_usd)
+
+    @property
+    def incremental_tokens(self) -> int:
+        """相对 B1 基线的增量 token（主轴是 token 时"多花了多少"的口径）。"""
+        return max(0, self.total_tokens - self.baseline_tokens)
 
     @classmethod
     def from_dict(
@@ -156,6 +163,7 @@ class RunRow:
             source=source,
             task_origin=origin,  # type: ignore[arg-type]
             baseline_cost_usd=float(payload.get("baseline_cost_usd", 0.0) or 0.0),
+            baseline_tokens=int(payload.get("baseline_tokens", 0) or 0),
         )
 
 
@@ -186,6 +194,10 @@ class CellResult:
     arm: str
     counts: OutcomeCounts = OutcomeCounts()
     total_cost_usd: float = 0.0
+    #: 这一格全部 run 的 token 进出合计。provider 不给成本信号时（免费端点），
+    #: 美元列恒为 0，token 是唯一能看出差别的口径。
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
     #: 这个任务的来源（E1 / E3）。同格的多次 run 来源一致，取首个非空值。
     task_origin: TaskOrigin = E1_ORIGIN
 
@@ -223,6 +235,14 @@ class CellResult:
         return self.total_cost_usd / self.runs if self.runs else None
 
     @property
+    def total_tokens(self) -> int:
+        return self.total_prompt_tokens + self.total_completion_tokens
+
+    @property
+    def avg_tokens(self) -> float | None:
+        return self.total_tokens / self.runs if self.runs else None
+
+    @property
     def outcomes(self) -> dict[str, int]:
         return self.counts.outcomes
 
@@ -235,6 +255,9 @@ class ArmColumn:
     counts: OutcomeCounts = OutcomeCounts()
     total_cost_usd: float = 0.0
     total_incremental_cost_usd: float = 0.0
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_incremental_tokens: int = 0
     tasks: int = 0
 
     @property
@@ -270,9 +293,22 @@ class ArmColumn:
         return self.total_cost_usd / self.runs if self.runs else None
 
     @property
+    def total_tokens(self) -> int:
+        return self.total_prompt_tokens + self.total_completion_tokens
+
+    @property
+    def avg_tokens(self) -> float | None:
+        return self.total_tokens / self.runs if self.runs else None
+
+    @property
     def cost_per_pass_usd(self) -> float | None:
         """每通过一次的美元成本；一次都没通过时是 ``None``（不是 0）。"""
         return self.total_cost_usd / self.passes if self.passes else None
+
+    @property
+    def tokens_per_pass(self) -> float | None:
+        """每通过一次的 token 开销；一次都没通过时是 ``None``（不是 0）。"""
+        return self.total_tokens / self.passes if self.passes else None
 
     @property
     def outcomes(self) -> dict[str, int]:
@@ -287,6 +323,7 @@ class MarginalStep:
     previous_arm: str
     delta_pass_rate: float | None
     delta_avg_cost_usd: float | None
+    delta_avg_tokens: float | None = None
 
 
 @dataclass(frozen=True)
@@ -382,6 +419,8 @@ class DoseReport:
                     "avg_cost_usd": item.avg_cost_usd,
                     **item.outcomes,
                     "total_cost_usd": item.total_cost_usd,
+                    "avg_tokens": item.avg_tokens,
+                    "total_tokens": item.total_tokens,
                 }
                 for item in self.cells
             ],
@@ -394,6 +433,10 @@ class DoseReport:
                     "avg_cost_usd": item.avg_cost_usd,
                     "cost_per_pass_usd": item.cost_per_pass_usd,
                     "total_incremental_cost_usd": item.total_incremental_cost_usd,
+                    "avg_tokens": item.avg_tokens,
+                    "total_tokens": item.total_tokens,
+                    "tokens_per_pass": item.tokens_per_pass,
+                    "total_incremental_tokens": item.total_incremental_tokens,
                     **item.outcomes,
                 }
                 for item in self.columns
@@ -411,6 +454,8 @@ def _cell(rows: Sequence[RunRow], task_id: str, arm: str) -> CellResult:
         arm=arm,
         counts=OutcomeCounts.tally(chosen),
         total_cost_usd=sum(row.cost_usd for row in chosen),
+        total_prompt_tokens=sum(row.prompt_tokens for row in chosen),
+        total_completion_tokens=sum(row.completion_tokens for row in chosen),
         task_origin=chosen[0].task_origin if chosen else E1_ORIGIN,
     )
 
@@ -422,6 +467,9 @@ def _column(rows: Sequence[RunRow], arm: str) -> ArmColumn:
         counts=OutcomeCounts.tally(chosen),
         total_cost_usd=sum(row.cost_usd for row in chosen),
         total_incremental_cost_usd=sum(row.incremental_cost_usd for row in chosen),
+        total_prompt_tokens=sum(row.prompt_tokens for row in chosen),
+        total_completion_tokens=sum(row.completion_tokens for row in chosen),
+        total_incremental_tokens=sum(row.incremental_tokens for row in chosen),
         tasks=len({row.task_id for row in chosen}),
     )
 
@@ -467,6 +515,9 @@ def build_report(
             delta_avg_cost_usd=_delta(
                 columns[index].avg_cost_usd, columns[index - 1].avg_cost_usd
             ),
+            delta_avg_tokens=_delta(
+                columns[index].avg_tokens, columns[index - 1].avg_tokens
+            ),
         )
         for index in range(1, len(columns))
     )
@@ -488,6 +539,10 @@ def _fmt_rate(rate: float | None) -> str:
 
 def _fmt_cost(cost: float | None) -> str:
     return "-" if cost is None else f"${cost:.4f}"
+
+
+def _fmt_tokens(count: float | None) -> str:
+    return "-" if count is None else f"{count:,.0f}"
 
 
 def render_markdown(report: DoseReport) -> str:
@@ -523,10 +578,19 @@ def render_markdown(report: DoseReport) -> str:
             "- 任务来源（E1 = 真实历史 bug / E3 = 合成缺陷）："
             f"{', '.join(report.task_source_kinds)}"
         )
+    if report.total_runs and all(
+        column.total_cost_usd == 0.0 for column in report.columns
+    ):
+        # 免费/无定价端点：美元列恒为 0，读曲线只能看 token。这里点破，免得把
+        # "全是 $0" 误读成"没有成本差别"。
+        lines.append(
+            "- **模型无定价信息：成本列恒为 $0，请看 token 列**"
+            "（等预算主轴应切到 tokens，见 §5.3 降级路径）。"
+        )
     lines.append("")
 
     # ① 主表：任务 × 档位，每格是通过率与平均成本。
-    lines.append("### 通过率 / 平均成本")
+    lines.append("### 通过率 / 平均成本 / 平均 token")
     lines.append("")
     lines.append("| 任务 | " + " | ".join(report.arms) + " |")
     lines.append("| --- | " + " | ".join("---" for _ in report.arms) + " |")
@@ -534,6 +598,7 @@ def render_markdown(report: DoseReport) -> str:
         cells = [report.cell(task_id, arm) for arm in report.arms]
         rendered = " | ".join(
             f"{_fmt_rate(cell.pass_rate)} / {_fmt_cost(cell.avg_cost_usd)}"
+            f" / {_fmt_tokens(cell.avg_tokens)}"
             if cell.runs
             else "-（缺口）"
             for cell in cells
@@ -541,6 +606,7 @@ def render_markdown(report: DoseReport) -> str:
         lines.append(f"| {task_id} | {rendered} |")
     totals = " | ".join(
         f"{_fmt_rate(column.pass_rate)} / {_fmt_cost(column.avg_cost_usd)}"
+        f" / {_fmt_tokens(column.avg_tokens)}"
         for column in report.columns
     )
     lines.append(f"| **全部** | {totals} |")
@@ -550,14 +616,17 @@ def render_markdown(report: DoseReport) -> str:
     lines.append("### 结局分布（各自成列，不与 fail 混算）")
     lines.append("")
     lines.append(
-        "| 档位 | runs | 有效样本 | pass | fail | budget_exhausted | error | 总成本 |"
+        "| 档位 | runs | 有效样本 | pass | fail | budget_exhausted | error "
+        "| 总成本 | 总 token | 每通过 token |"
     )
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for column in report.columns:
         lines.append(
             f"| {column.arm} | {column.runs} | {column.valid_runs} | "
             f"{column.passes} | {column.fails} | {column.budget_exhausted} | "
-            f"{column.errors} | {_fmt_cost(column.total_cost_usd)} |"
+            f"{column.errors} | {_fmt_cost(column.total_cost_usd)} | "
+            f"{_fmt_tokens(column.total_tokens)} | "
+            f"{_fmt_tokens(column.tokens_per_pass)} |"
         )
     lines.append("")
 
@@ -575,22 +644,28 @@ def render_markdown(report: DoseReport) -> str:
             if step.delta_avg_cost_usd is None
             else f"${step.delta_avg_cost_usd:+.4f}"
         )
+        delta_tokens = (
+            "-"
+            if step.delta_avg_tokens is None
+            else f"{step.delta_avg_tokens:+,.0f} token"
+        )
         lines.append(
             f"- **{step.arm} - {step.previous_arm}**：通过率 {delta_rate}、"
-            f"平均成本 {delta_cost}"
+            f"平均成本 {delta_cost}、平均 token {delta_tokens}"
         )
     lines.append("")
 
     # ④ B3 复跑额外报一条增量成本——§5.3 要求诚实标注"多花了多少"。
     if report.tier == B3_TIER:
-        lines.append("### 相对 B1 的增量成本（B3 才有的口径）")
+        lines.append("### 相对 B1 的增量成本 / token（B3 才有的口径）")
         lines.append("")
-        lines.append("| 档位 | 总成本 | 总增量成本 |")
-        lines.append("| --- | --- | --- |")
+        lines.append("| 档位 | 总成本 | 总增量成本 | 总增量 token |")
+        lines.append("| --- | --- | --- | --- |")
         for column in report.columns:
             lines.append(
                 f"| {column.arm} | {_fmt_cost(column.total_cost_usd)} | "
-                f"{_fmt_cost(column.total_incremental_cost_usd)} |"
+                f"{_fmt_cost(column.total_incremental_cost_usd)} | "
+                f"{_fmt_tokens(column.total_incremental_tokens)} |"
             )
         lines.append("")
     return "\n".join(lines)

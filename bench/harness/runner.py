@@ -91,6 +91,7 @@ async def run_task(
     timeout_s: float = 300.0,
     budget_tier: str = "B1",
     baseline_cost_usd: float = 0.0,
+    baseline_tokens: int = 0,
 ) -> RunResult:
     workspace = materialize(
         repo=repo,
@@ -138,6 +139,7 @@ async def run_task(
         patch_touched_tests=patch_touched_tests,
         budget_tier=budget_tier,
         baseline_cost_usd=baseline_cost_usd,
+        baseline_tokens=baseline_tokens,
         source=spec.source,
     )
 

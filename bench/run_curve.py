@@ -115,6 +115,7 @@ async def run_curve(
                     budget=policy.b1(),
                     tier=B1_TIER,
                     baseline=0.0,
+                baseline_tokens=0,
                     goal=goal,
                     out=b1_dir / f"{spec.task_id}-{arm}-{repeat}.json",
                     invalid=invalid,
@@ -140,6 +141,7 @@ async def run_curve(
                 budget=plan.budget,
                 tier=B3_TIER,
                 baseline=plan.baseline_cost_usd,
+                baseline_tokens=plan.baseline_tokens,
                 goal=goal,
                 out=b3_dir / f"{plan.task_id}-{plan.arm}-{repeat}.json",
                 invalid=invalid,
@@ -176,6 +178,7 @@ async def _one(
     budget: Budget,
     tier: str,
     baseline: float,
+    baseline_tokens: int,
     goal: str,
     out: Path,
     invalid: list[str],
@@ -192,6 +195,7 @@ async def _one(
             budget=budget,
             budget_tier=tier,
             baseline_cost_usd=baseline,
+            baseline_tokens=baseline_tokens,
         )
     except InvalidTaskError as exc:
         logger.warning("任务无效，跳过：%s", exc)
@@ -225,10 +229,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="落盘目录（默认 <workdir>/runs；B1 与 B3 分两个子目录）",
     )
+    parser.add_argument(
+        "--budget-axis",
+        choices=["cost", "tokens"],
+        default="cost",
+        help="等预算主轴：cost = 美元（默认）；tokens = 免费/无定价端点（见 §5.3）",
+    )
     parser.add_argument("--main-cost-usd", type=float, default=None, help="覆盖 B1 美元上限")
     parser.add_argument("--main-steps", type=int, default=None, help="覆盖 B1 步数上限")
     parser.add_argument("--relaxed-cost-usd", type=float, default=None, help="覆盖 B3 美元上限")
     parser.add_argument("--relaxed-steps", type=int, default=None, help="覆盖 B3 步数上限")
+    parser.add_argument("--main-tokens", type=int, default=None, help="覆盖 B1 token 上限")
+    parser.add_argument("--relaxed-tokens", type=int, default=None, help="覆盖 B3 token 上限")
     parser.add_argument("--max-tokens", type=int, default=None, help="覆盖 token 兜底上限")
     parser.add_argument("--model", default="", help="覆盖 LLM_MODEL")
     parser.add_argument("--temperature", type=float, default=None)
@@ -246,18 +258,20 @@ def _build_llm(args: argparse.Namespace) -> LLMClient:
 
 def _policy(args: argparse.Namespace) -> BudgetPolicy:
     policy = BudgetPolicy()
-    overrides: dict[str, object] = {}
+    overrides: dict[str, object] = {"axis": args.budget_axis}
     for attr, flag in (
         ("main_cost_usd", "main_cost_usd"),
         ("main_steps", "main_steps"),
         ("relaxed_cost_usd", "relaxed_cost_usd"),
         ("relaxed_steps", "relaxed_steps"),
+        ("main_tokens", "main_tokens"),
+        ("relaxed_tokens", "relaxed_tokens"),
         ("max_tokens", "max_tokens"),
     ):
         value = getattr(args, flag)
         if value is not None:
             overrides[attr] = value
-    return dataclasses.replace(policy, **overrides) if overrides else policy
+    return dataclasses.replace(policy, **overrides)
 
 
 def _unknown_arms(arms: Iterable[str]) -> tuple[str, ...]:
