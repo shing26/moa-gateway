@@ -4,7 +4,8 @@
 
 **Blocked by:** 01 — 任务集；06 — L3；07 — 预算策略；08 — 报告
 
-**Status:** blocked — 中档模型与端点已定，**只缺 API key**（填 `.env` 的 `LLM_API_KEY`）
+**Status:** in-progress — key 已填、端点与工具链已跑通（见下「首次真实模型 smoke」）；
+**美元轴被成本缺口卡住**（litellm 无此模型定价 → `cost_usd` 恒为 0），待定：给价 or 改 token 轴
 
 - [x] 选定中档模型：`nvidia/nemotron-3.5-super-vl-120b-a12b`（NVIDIA integrate API，
       `https://integrate.api.nvidia.com/v1`）。已写入 `.env`（`LLM_PROVIDER=nvidia`）；
@@ -29,6 +30,31 @@ NOT provided`。仓库 `app/agents/provider.py::_custom_provider_for` 在 `base_
 integrate 端点。实测 `LLMConfig.from_env("LLM")` + `_build_kwargs` 产出
 `{model: nvidia/nemotron-3.5-super-vl-120b-a12b, custom_llm_provider: openai,
 api_base: https://integrate.api.nvidia.com/v1}`，正确。
+
+**首次真实模型 smoke（988fccb / L0 / `--max-steps 8`，非曲线数据）：** 全链路打通——
+物化 → fail-first（退出码 1）→ 工具循环（8 次 LLM 调用）→ 采集 patch → 还原 → 验证。
+落盘 `outcome=fail status=step_limit steps=14 cost=$0.000000 wall=107.4s
+tests_touched=False`。观察到三件事：
+
+1. **原生 tool-calling 可用**：模型正确返回 `tool_calls`（探针里 `get_time`、bench 里
+   `list_files`/`read_file`/`run_tests` 都真跑了）。这是硬前提，过了。
+2. **它是 reasoning 模型**：`reasoning_content` 独立字段、`reasoning_tokens` 计入
+   completion。`max_tokens=16` 时推理吃光配额、`content` 返回空——bench 不能给太小的
+   token 上限（`LLMConfig.max_tokens` 默认 4096，够用）。
+3. **美元轴是死的**：`litellm.completion_cost` 直接抛 `This model isn't mapped yet`，
+   provider 也不返回成本（`response_cost=None`、`_hidden_params` 无成本）。后果是 B1
+   「等预算」按美元根本不触发、`budget_exhausted` 不会因钱触发、报告成本列全是 $0。
+   §5.3 的主判据因此不成立。
+
+**轨迹里的能力信号**：8 步全花在侦察（列文件 → 读 ci.yml/CONTEXT.md → 列 tests →
+跑两次全量单测 → 读 test_auth.py/test_rag.py），从没走到写修复就到步数上限。另，
+模型反复用 `read_file(path, offset, limit)`，而 bench 的 `read_file` 未声明
+`offset`/`limit` → 16 次工具调用里 6 次 `rejected`。这是模型没守 schema（本身就是
+能力信号），也可能提示工具集该支持分页读。
+
+**成本/时间体量提醒**：此模型 ~13s/次调用、8 次侦察烧了 57,712 prompt tokens。全套
+5 题 × 4 档 × 3 次 = 60 run 若都跑满 30 步，是数小时量级。跑曲线前建议先把第一条
+的决定（美元 or token 轴）与步数上限一起定下来再压题量。
 
 **顺带修掉的真实缺陷（已改，随本票提交）：** `bench/run_task.py` 从不加载 `.env`，
 所以 `LLMConfig.from_env("LLM")` 退回默认值 `provider=direct` / `gpt-4o-mini` /
