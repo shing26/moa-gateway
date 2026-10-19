@@ -4,18 +4,19 @@
 
 **Blocked by:** 01 — 任务集；06 — L3；07 — 预算策略；08 — 报告
 
-**Status:** ready — key/端点/工具链全通；**2026-10-19 换模到 `nvidia/nemotron-3-super-120b-a12b`
-并修了两条抖动重试，见文末**；模型是**免费**的（`cost_usd` 恒为 0），已按
-§5.3 降级路径落成 **token 主轴**（`BudgetPolicy.axis="tokens"` + 报告 token 列），
-真实 token smoke 复验通过。差最后一步：跑一整轮曲线（数小时）。
+**Status:** **done** — 2026-10-19 用 `nvidia/nemotron-3-super-120b-a12b`（免费端点）
+跑完 2 题 × 4 档 × 1 次，B1 八条全部有效、B3 三条补齐，曲线有分化（见文末
+「最终曲线」）。**单一重复、仅 2 题**，结论是方向性的，不是统计性的。
 
-- [x] 选定中档模型：`nvidia/nemotron-3.5-super-vl-120b-a12b`（NVIDIA integrate API，
+- [x] 选定中档模型：**最终**用 `nvidia/nemotron-3-super-120b-a12b`（NVIDIA integrate API，
       `https://integrate.api.nvidia.com/v1`）。已写入 `.env`（`LLM_PROVIDER=nvidia`）；
       实际 `model` 值由 `RunResult.agent_run.model` 如实落盘。是否支持 native
       tool-calling 由首跑验证——不支持会落 `outcome=error`，这本身也是结论。
-- [ ] L0–L3 在同一任务集、同一 token 预算下各跑完
-- [ ] 失败的档位按 B3 放宽后再跑一遍，标注增量成本
-- [ ] 产出曲线 + 完整 `RunResult` 归档
+      （原选型 `nemotron-3.5-super-vl-120b-a12b` 在 A/B 里被同任务的
+      lightning-30b 与 step-5-preview 比下去，见文末。）
+- [x] L0–L3 在同一任务集、同一 token 预算下各跑完
+- [x] 失败的档位按 B3 放宽后再跑一遍，标注增量成本
+- [x] 产出曲线 + 完整 `RunResult` 归档
 - [x] 报告里每个数字都能追到具体的 run（08 的报告带 `sources` 来源文件名清单）
 - [x] 不把结果并进 CI（`bench/run_task.py` / `bench/report_curve.py` 都不在 `tests/`）
 
@@ -268,5 +269,74 @@ L1 是唯一做成的一档，判停是"Critic 连续打回达上限"——同�
 （原来这里是空的）。用例：`test_planner_parse_failure_is_asked_again` 钉"问一次就恢复"，
 `test_unreadable_plan_is_an_honest_error` 钉"问满 3 次才认输"。
 
-**待办：** B3 跑完后，用修好的 planner 单独补跑 `988fccb` 的 L3——`error` 不是 B3 的
-候选，不补这一格曲线就是空的。
+**已补：** B3 跑完后用修好的 planner 单独补跑了 `988fccb` 的 L3（40 步、4 个子任务、
+237,070 prompt + 27,508 completion）。原 `error` 那条留成
+`runs/b1/988fccb-L3-1.error.json.bak`，报告只读补跑那条。
+
+---
+
+## 最终曲线（2026-10-19）
+
+模型 `nvidia/nemotron-3-super-120b-a12b`（免费端点，`temperature=1.0`），
+2 题 × 4 档 × 1 次，B1 = 40 步 / 400k token，B3 = 120 步 / 1.2M token。
+归档 `.bench-work\d3\runs\{b1,b3}\*.json`、`report-B1.json`、`report-B3.json`。
+
+### B1（8/8 有效，零 error）
+
+| 任务 | L0 | L1 | L2 | L3 |
+|---|---|---|---|---|
+| `988fccb` | fail（7 步 / 43k） | **pass**（13 / 350k） | budget_exhausted（37 / 415k） | fail（40 / 265k，4 子任务） |
+| `a746b81` | **pass**（35 / 287k） | **pass**（25 / 146k） | **pass**（40 / 328k） | **pass**（40 / 171k） |
+
+| 档 | 通过率 | 平均 token | 平均每 pass token |
+|---|---|---|---|
+| L0 | 50% | 165,071 | 330,141 |
+| L1 | **100%** | 248,192 | 248,192 |
+| L2 | 50%（1 条撞预算） | 371,190 | 742,380 |
+| L3 | 50% | 217,867 | 435,733 |
+
+边际：**L0→L1 +50pp / +83k token；L1→L2 −50pp / +123k；L2→L3 +0pp / −153k。**
+
+读法：**L1 是峰值**。同样的模型、同样的题，只加一条 Critic 回边就能把 `988fccb`
+从 fail 翻成 pass；再往上加 planner（L2）成本涨了、通过率反而掉回来。L3 的 token
+比 L2 低是因为它把活分给并发 worker，但通过率没比 L2 好。**"更多 agent" 在这两题上
+没有换来更好的判决**——这是这一轮最有内容的一句话。
+
+### B3（放宽后复跑 B1 里失败的格）
+
+| 格 | B1 | B3 | 增量 token | 结论 |
+|---|---|---|---|---|
+| `988fccb` / L0 | fail（7 步 / 43k） | fail（9 步 / 69k） | +25,645 | 放宽救不了"过早收工"——是行为问题不是资源问题 |
+| `988fccb` / L2 | budget_exhausted（37 / 415k） | **pass**（55 / 523k / 1479s） | +107,980 | 预算确实是瓶颈 |
+| `988fccb` / L3 | fail（40 / 265k） | **pass**（77 / 648k / 604s） | +383,634 | 同上；代价是 2.4 倍 token |
+
+L1 与 `a746b81` 四档在 B1 就通过，不是 B3 候选。
+
+### 结论与限制
+
+**结论**：曲线有分化，"结构换能力"在这两题上确实成立，但**只在 L0→L1 这一段**；
+L1 之上是净亏损（成本涨、通过率不涨）。L0 的失败是行为层的（模型 7 步就自报完成），
+放宽预算无效；L2/L3 的失败是资源层的，放宽就过。
+
+**限制（必须随结论一起引用）**：
+
+1. **`repeats=1`**，报告自己标了 `is_single_sample=true`、每个格子都 `under_sampled`。
+   这张表是**方向性证据**，不是统计结论——单个 pass/fail 翻转就足以改变任何一列。
+2. **只有 2 题**（E1 共 5 题），且 L2 的 50% 是"1 pass + 1 budget_exhausted"，
+   L3 是"1 pass + 1 fail"，n=1 的格子里任何解释都成立。
+3. **B3 的 L3 格是手工补跑的**：`run_task.py` 不带 `--baseline-tokens`，事后按 B1
+   同格的 264,578 补上（`incremental_tokens` 是派生字段，直接读 `baseline_tokens`）。
+4. 补跑的 L3 用的是 `7c0a7e0`（planner 有界重问），其余 7 条用的是它之前的代码。
+   改动只影响解析失败的重问，不影响模型与档位行为。
+
+### 过程中修掉的四个真缺陷（都在真实模型下才暴露）
+
+| # | 症状 | 修法 | commit |
+|---|---|---|---|
+| 1 | L2/L3 的 planner 被工具轮次吃掉，一次调用判死 | planner 用空工具表 + 角色指令 | `0cf5ae9` |
+| 2 | `read_file` 不声明 `offset/limit`，预算烧在重读整文件上 | 支持分页，schema 同时收 int/string | `81af9d2` |
+| 3 | 一次端点 500 把整条 12 分钟的 run 判死 | `_llm_turn()` 有界重试 3 次 | `a55944f` |
+| 4 | planner 一次读不出 JSON 让整档 0 步落 `error` | `planner_attempts=3` + 错误回灌重问 | `7c0a7e0` |
+
+外加一条 Windows 环境问题：`tar.extractall(filter="data")` 偶发
+`OSError: [WinError 1450]`（`a55944f` 里一起修了）。
