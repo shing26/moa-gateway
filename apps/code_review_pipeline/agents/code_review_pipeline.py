@@ -19,13 +19,23 @@ from apps.code_review_pipeline.routing.github_webhook_adapter import (
 )
 from apps.code_review_pipeline.schemas.pipeline import AgentFindingResult, Finding, PipelineResult
 from apps.code_review_pipeline.schemas.pr_context import PRContext
+from apps.code_review_pipeline.workspace import (
+    GitHubArchiveWorkspaceProvisioner,
+    ReviewWorkspace,
+)
 
 logger = logging.getLogger("moa.code_review.pipeline")
 
 
 class CodeReviewPipeline:
-    def __init__(self, *, github_client: GitHubClient) -> None:
+    def __init__(
+        self,
+        *,
+        github_client: GitHubClient,
+        workspace_provisioner: Any | None = None,
+    ) -> None:
         self._github_client = github_client
+        self._workspace_provisioner = workspace_provisioner
         self._triage = TriageAgent()
         self._static = StaticAnalysisAgent()
         self._semantic = SemanticReviewAgent()
@@ -42,6 +52,38 @@ class CodeReviewPipeline:
 
         logger.info("pr loaded repo=%s pr=%s files=%d", pr.repo, pr.pr_number, len(pr.changed_files))
 
+        workspace = await self._prepare_workspace(pr)
+        try:
+            return await self._run_with_workspace(event, pr, workspace)
+        finally:
+            await self._cleanup_workspace(workspace)
+
+    async def _prepare_workspace(self, pr: PRContext) -> ReviewWorkspace | None:
+        if self._workspace_provisioner is None:
+            return None
+        try:
+            return await self._workspace_provisioner.prepare(pr)
+        except Exception as exc:
+            logger.warning("workspace provisioning failed for %s#%s: %s", pr.repo, pr.pr_number, exc)
+            return ReviewWorkspace(
+                path=None,
+                error=f"workspace provision failed: {exc}",
+            )
+
+    async def _cleanup_workspace(self, workspace: ReviewWorkspace | None) -> None:
+        if workspace is None or self._workspace_provisioner is None:
+            return
+        try:
+            await self._workspace_provisioner.cleanup(workspace)
+        except Exception as exc:
+            logger.warning("workspace cleanup failed: %s", exc)
+
+    async def _run_with_workspace(
+        self,
+        event: MoAEvent,
+        pr: PRContext,
+        workspace: ReviewWorkspace | None,
+    ) -> tuple[PRContext, PipelineResult]:
         # Build a shared diff payload for agents.
         # Week3: enrich semantic review with team-specific RAG context.
         diff_payload = {
@@ -93,7 +135,14 @@ class CodeReviewPipeline:
             }
 
         semantic_output = await self._semantic.execute(semantic_envelope)
-        test_output = await self._test.execute(_envelope_from_event(event, diff_payload, agent="test_coverage"))
+        test_output = await self._test.execute(
+            _envelope_from_event(
+                event,
+                diff_payload,
+                agent="test_coverage",
+                workspace=workspace,
+            )
+        )
         report_output = await self._report.execute(
             _envelope_from_event(event, diff_payload, agent="report", report_inputs={
                 "triage": _safe_json(triage_output),
@@ -133,10 +182,22 @@ class CodeReviewPipeline:
     @staticmethod
     def from_env() -> CodeReviewPipeline:
         # 选型交给 github_provider：真 GitHub / 离线 fixture 只在那一个文件里判断。
-        return CodeReviewPipeline(github_client=build_github_client())
+        client = build_github_client()
+        return CodeReviewPipeline(
+            github_client=client,
+            workspace_provisioner=GitHubArchiveWorkspaceProvisioner(client),
+        )
 
 
-def _envelope_from_event(event: MoAEvent, diff_payload: dict[str, Any], *, agent: str, rag_context: dict[str, Any] | None = None, report_inputs: dict[str, Any] | None = None) -> AgentEnvelope:
+def _envelope_from_event(
+    event: MoAEvent,
+    diff_payload: dict[str, Any],
+    *,
+    agent: str,
+    rag_context: dict[str, Any] | None = None,
+    report_inputs: dict[str, Any] | None = None,
+    workspace: ReviewWorkspace | None = None,
+) -> AgentEnvelope:
     slot: dict[str, Any] = {
         "agent": agent,
         "diff": diff_payload.get("diff", ""),
@@ -147,6 +208,16 @@ def _envelope_from_event(event: MoAEvent, diff_payload: dict[str, Any], *, agent
         slot["rag_context"] = rag_context
     if report_inputs is not None:
         slot["report_inputs"] = report_inputs
+    if workspace is not None:
+        path = getattr(workspace, "path", None)
+        if path:
+            slot["workspace_path"] = str(path)
+        verify_command = getattr(workspace, "verify_command", ()) or ()
+        if verify_command:
+            slot["verify_command"] = [str(token) for token in verify_command]
+        error = str(getattr(workspace, "error", "") or "").strip()
+        if error:
+            slot["workspace_error"] = error
 
     from app.agents.contract import AgentEnvelope
     return AgentEnvelope(

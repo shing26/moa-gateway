@@ -223,6 +223,14 @@ class Settings:
         self.code_review_auto_migrate: bool = _parse_bool(
             os.getenv("CODE_REVIEW_AUTO_MIGRATE"), True
         )
+        # PR 审查工作区：chroot 在临时目录里，测试命令可由仓库显式覆盖。
+        # 留空时使用系统临时目录 / 自动探测 pytest。
+        self.code_review_workspace_root: str = os.getenv(
+            "CODE_REVIEW_WORKSPACE_ROOT", ""
+        )
+        self.code_review_verify_command: str = os.getenv(
+            "CODE_REVIEW_VERIFY_COMMAND", ""
+        )
 
         # 写回 GitHub 默认**关**（即 dry-run）。刻意与"功能开关"的直觉相反：
         # 往真实 PR 上贴评论是有外部后果的动作，而漏发只是少一次自动化。
