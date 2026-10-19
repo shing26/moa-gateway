@@ -4,7 +4,8 @@
 
 **Blocked by:** 01 — 任务集；06 — L3；07 — 预算策略；08 — 报告
 
-**Status:** ready — key/端点/工具链全通；模型是**免费**的（`cost_usd` 恒为 0），已按
+**Status:** ready — key/端点/工具链全通；**2026-10-19 换模到 `nvidia/nemotron-3-super-120b-a12b`
+并修了两条抖动重试，见文末**；模型是**免费**的（`cost_usd` 恒为 0），已按
 §5.3 降级路径落成 **token 主轴**（`BudgetPolicy.axis="tokens"` + 报告 token 列），
 真实 token smoke 复验通过。差最后一步：跑一整轮曲线（数小时）。
 
@@ -184,3 +185,64 @@ foreach ($task in "a746b81","0896629","988fccb","bd4f186","60c64ed") {
 成本按 §10 粗估：5 题 × 4 档 × 3 次 = 60 个 run，中档模型下十几美元（题集可先减到
 2–3 题压到个位数）。归档约定：一 run 一 JSON 落 `.bench-work/runs/`，聚合结果与
 markdown 报告落盘，报告里每个数字都能追回具体文件名。
+
+---
+
+## 2026-10-19 换模型 + 两个真缺陷（第一轮 curve2 折了）
+
+### 换模型：`nvidia/nemotron-3-super-120b-a12b`
+
+按"免费端点 + 原生 tool-calling + 面向 coding/agentic"把 NVIDIA 免费模型过了一遍
+（`build.nvidia.com` 的 `nim_type_preview` = "Free Endpoint"，共 39 条；先取
+SSR 的 model 记录，再逐个打真实端点）。实测（同一把 key，1 次 `get_time`
+tool-calling 小请求；括号里是 5 连发的成功/中位延迟）：
+
+| 模型 | tool-calling | 说明 |
+|---|---|---|
+| `nvidia/nemotron-3-super-120b-a12b` | ✅（5/5，1.1s） | 120B/12B active，1M ctx；模型卡"excelling in agentic reasoning, coding, planning, tool calling" |
+| `nvidia/nemotron-3.5-lightning-30b-a3b` | ✅（5/5，0.9s） | 30B/3B active，"Long-running autonomous agents"、sub-agent workhorse |
+| `nvidia/nemotron-3-ultra-550b-a55b` | ✅（5/5，1.3s） | 1M ctx，agentic reasoning / coding / planning / tool calling |
+| `stepfun-ai/step-5-preview` | ✅（5/5，0.9s） | 600B/27B active，1M ctx，long-horizon tool use、软件工程 |
+| `nvidia/nemotron-3.5-super-vl-120b-a12b` | ✅（5/5，0.9s） | 原选型（VL），能力已证（L0 出过 pass），但端点抖动下同款 |
+| `meta/muse-glimmer-30b` | ✅（3.9s） | native tool-calling |
+| `openai/gpt-oss-20b` | ✅（1.5s） | reasoning，20B |
+| `poolside/laguna-xs-2.1` | ⚠️（3/5，58.5s） | "long-horizon agentic coding"，但慢且超时 |
+| `deepseek-ai/deepseek-v4.1-flash` | ✅（23s） | 慢 |
+| `z-ai/glm-5.3` | ✅（74s） | 753B，冷启动极慢（id 是 `z-ai/glm-5.3`，点号） |
+| `google/gemma-4-31b-it` | ❌（60–200s 超时） | 不可用 |
+
+**选定 `nvidia/nemotron-3-super-120b-a12b`**：与已证的 120B 同档（chart 的"中档"
+要求），去掉 VL 开销，模型卡逐字写清了 agentic reasoning / coding / tool calling。
+模型卡另有一条硬要求：**`temperature=1.0` / `top_p=0.95`**，所以 `.env` 的
+`LLM_TEMPERATURE` 从 0 抬到 1.0（`LLMConfig` 没有 `top_p` 字段，留默认）。
+
+### 缺陷 1：一次端点抖动就把整条 run 判死
+
+第一轮真实曲线（`curve2`，旧模型）跑到第三题就没了，两条已完成的 run 都是
+`outcome=error`。翻日志：90 次 LLM 调用里 2 次 500（`Failed to generate
+completions`），而 `LoopSession.advance` 把**任何** LLM 异常直接落 `error`——
+40 步的 run 在 2% 单次失败率下只有约 45% 能活到终点。这不是判决，是噪音。
+
+修：`bench/agent/loop.py` 加 `_llm_turn()` 有界重试（3 次、1s/3s 退避，
+`CancelledError` 不重试），耗尽后照旧落 `error`。四个结局的语义一字未改。
+用例：`test_llm_failure_is_error` 改成"每次都抛"，新增
+`test_transient_llm_error_is_retried_then_completes`。
+
+### 缺陷 2：Windows 上解包偶发 `OSError: [WinError 1450]`
+
+同一次 `curve2` 的崩溃点不是模型，是 `materialize` 里
+`tar.extractall(dest, filter="data")`——`filter` 会对每个成员调一次
+`os.path.realpath`，Windows 上偶发"系统资源不足"。修：
+`bench/harness/workspace.py` 把解包提成 `_extract_archive()`，抖动时清空半成品
+目录后重试（3 次、0.5s 起步退避）。
+
+### 现在的跑法
+
+```powershell
+.venv\Scripts\python.exe bench\run_curve.py --tasks 988fccb a746b81 --repeats 1 `
+  --budget-axis tokens --main-tokens 400000 --relaxed-tokens 1200000 `
+  --main-steps 40 --relaxed-steps 120 --workdir .bench-work\d3
+```
+
+`workdir` 用短名（`d3`）是为了压路径长度。进度看 `.bench-work\d3\runs\b1\*.json`，
+日志 `.bench-work\d3.err.log`。

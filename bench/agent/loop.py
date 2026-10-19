@@ -5,7 +5,7 @@
 1. 本轮模型没再要求调工具 ⇒ ``completed``（**先判完成**）；
 2. 否则累计成本已达上限 ⇒ ``budget_exhausted``；
 3. 否则继续，步数用尽 ⇒ ``step_limit``；
-4. LLM 调用抛错 ⇒ ``error``。
+4. LLM 调用抛错、且重试预算耗尽 ⇒ ``error``。
 
 第 1、2 条的先后顺序是重点：模型刚好在预算越顶的那一轮交了终局，那它**确实
 完成了**，记成 ``budget_exhausted`` 是把成功说成失败。反之"想继续但没钱了"
@@ -13,6 +13,11 @@
 
 美元预算只能事后累计（调用前无从得知这次花多少），所以实现上允许最后一次
 调用把预算越过一点；判据是"累计值已达到上限"。
+
+``error`` 前面有一层**有界重试**：免费/预览端点偶发 500（``Failed to generate
+completions``）是 §8 所说的噪音腿，一次抖动就把整条 run 判成 ``error``，长曲线
+会被噪声淹没。重试只在**调用失败**时发生，不改四个结局的语义——耗尽后照旧落
+``error``。工具异常不走这条（它们降级成 observation，见 ``execute_call``）。
 
 ``LoopSession`` 是这条循环的续跑缝
 ----------------------------------
@@ -24,6 +29,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -38,6 +44,12 @@ from bench.agent.tools import call_bench_tool
 from bench.agent.types import AgentRun, AgentStatus, Budget, Step, Usage
 
 logger = logging.getLogger("bench.agent.loop")
+
+#: 一次 LLM 调用允许的尝试次数（含首次）。免费端点实测约 2% 的调用会 500，
+#: 40 步的 run 因此有近一半概率被一次抖动杀掉——重试把这条噪声腿压下去。
+LLM_RETRY_ATTEMPTS = 3
+#: 每次重试前的退避（毫秒），最后一次的值会重复用于更后面的尝试。
+LLM_RETRY_BACKOFF_MS = (1000, 3000)
 
 
 class _ToolRunner(Protocol):
@@ -183,7 +195,7 @@ class LoopSession:
             self._last_index = index
             self.served_calls += 1
             try:
-                result = await self._runner._llm.chat_with_tools(self._messages, schemas)
+                result = await self._llm_turn(schemas)
             except Exception as exc:  # noqa: BLE001 - 基础设施故障就是 error 这条腿
                 logger.warning("agent llm call failed: %s", exc)
                 self.error = f"{type(exc).__name__}: {exc}"
@@ -237,6 +249,37 @@ class LoopSession:
             self.turns += 1
 
         return "step_limit"
+
+    async def _llm_turn(self, schemas: list[dict[str, Any]]) -> Any:
+        """要一轮决策，基础设施异常按 ``LLM_RETRY_ATTEMPTS`` 有界重试。
+
+        重试预算内成功就当作这一轮正常返回；耗尽后把最后一次异常原样抛出，
+        由调用方落 ``error``。``asyncio.CancelledError`` 不重试——取消会吞掉
+        取消信号，必须原样上抛（与 ``app/agents/retry.py`` 同一口径）。
+        """
+        last: Exception | None = None
+        for attempt in range(1, LLM_RETRY_ATTEMPTS + 1):
+            try:
+                return await self._runner._llm.chat_with_tools(self._messages, schemas)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 任何调用故障都可重试
+                last = exc
+                if attempt >= LLM_RETRY_ATTEMPTS:
+                    break
+                delay_ms = LLM_RETRY_BACKOFF_MS[
+                    min(attempt - 1, len(LLM_RETRY_BACKOFF_MS) - 1)
+                ]
+                logger.warning(
+                    "agent llm call failed (attempt %d/%d): %s; retrying in %dms",
+                    attempt,
+                    LLM_RETRY_ATTEMPTS,
+                    exc,
+                    delay_ms,
+                )
+                await asyncio.sleep(delay_ms / 1000)
+        assert last is not None  # 只有在至少失败过一次时才会走到这里
+        raise last
 
     def build_run(
         self,

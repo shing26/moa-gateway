@@ -442,3 +442,27 @@ planner 只会回文本、从不调工具，所以此前没暴露。
 留作后续的小修：模型偶尔会调用不存在的工具（实测 `edit_file`），当前记 `failed`；按
 ADR-018 的口径（模型自纠得了的算 `rejected`）它更该是 `rejected`，否则"环境坏了"的
 计数器会被模型的幻觉污染。
+
+### 13.6 换模型与两条抖动重试（2026-10-19）
+
+**换模型。** §12 那个"中档模型已定"的选型从 `nvidia/nemotron-3.5-super-vl-120b-a12b`
+换成 **`nvidia/nemotron-3-super-120b-a12b`**（同为 NVIDIA 免费端点、120B/12B active、
+1M context）。理由：模型卡逐字写着 "excelling in agentic reasoning, coding, planning,
+tool calling"，而且去掉了对本 bench 无用的视觉分支。**免费端点没有定价**，所以
+`BudgetPolicy.axis="tokens"` 这条 §5.3 降级路径不变。模型卡要求
+`temperature=1.0` / `top_p=0.95`，因此 `.env` 的 `LLM_TEMPERATURE` 从 0 抬到 1.0；
+`LLMConfig` 没有 `top_p` 字段，走默认。免费模型全表与逐一实测见
+`.scratch/bench-agent/issues/09-real-api-curve.md`。
+
+**抖动重试（两条，都不改四个结局的语义）。** 第一轮真实曲线（`curve2`）暴露出两个
+与模型无关的脆弱点，都是"环境抖一次、整条 run 陪葬"：
+
+1. **LLM 调用**：`LoopSession.advance` 把任何异常直接落 `error`。实测 90 次调用里 2 次
+   端点 500，按这个比例 40 步的 run 只有约 45% 能活到终点——噪音会淹没判决。现在
+   `_llm_turn()` 做 3 次有界重试（1s/3s 退避，`CancelledError` 不重试），耗尽后照旧
+   落 `error`。
+2. **工作区解包**：`tar.extractall(dest, filter="data")` 在 Windows 上偶发
+   `OSError: [WinError 1450] 系统资源不足`（`filter` 会对每个成员调 `os.path.realpath`）。
+   现在 `_extract_archive()` 清空半成品目录后有界重试 3 次。
+
+两条都属于 §8 的噪音腿：让判决尽量只反映"agent 做没做成"，而不是端点或文件系统。
