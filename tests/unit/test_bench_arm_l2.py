@@ -365,12 +365,49 @@ async def test_critic_rejection_reruns_the_plan_with_the_revision_instruction(
 
 
 @pytest.mark.asyncio
-async def test_unreadable_plan_is_an_honest_error(tmp_path: Path) -> None:
-    """planner 没产出可读计划时报 error，不自己编一份计划接着跑。"""
+async def test_planner_parse_failure_is_asked_again(tmp_path: Path) -> None:
+    """planner 第一次回散文时把错误回灌重问，而不是整档陪葬。
+
+    真实模型（nemotron-3-super-120b，``temperature=1.0``）实测会间歇性地不按 JSON
+    回：同一轮 L2 的 planner 出了合法计划，L3 的读不出来，于是整档 0 步、0 patch
+    落 ``error``。那是一次格式抖动，不是能力结论。
+    """
     tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
+    worker = _Worker(["A"])
+    calls = {"planner": 0}
+
+    def script(messages: list[dict[str, Any]]) -> ScriptedTurn:
+        route = _route(messages)
+        if route == "planner":
+            calls["planner"] += 1
+            if calls["planner"] == 1:
+                return ScriptedTurn(final="我觉得这个任务还挺复杂的，先看看吧")
+            return ScriptedTurn(final=_plan_json("写 A"))
+        if route == "critic":
+            return ScriptedTurn(final=_critic_json(True))
+        return worker.turn(messages)
+
+    llm = _ScriptLLM(script)
+    agent = build_l2(llm=llm, workspace=tmp_path, tools=tools)
+    run = await agent.run(workspace=tmp_path, goal="目标", budget=Budget(5.0, 30))
+
+    assert run.status == "completed"
+    assert run.subtask_count == 1
+    assert calls["planner"] == 2
+    # 重问带上了上一次的解析错误原文，而不是把同一个问题原样再发一遍。
+    retry_prompt = _user_text(llm.seen[1])
+    assert "读不出子任务" in retry_prompt
+
+
+@pytest.mark.asyncio
+async def test_unreadable_plan_is_an_honest_error(tmp_path: Path) -> None:
+    """planner 反复读不出来才报 error——重问有界，也不自己编一份计划接着跑。"""
+    tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
+    calls = {"planner": 0}
 
     def script(messages: list[dict[str, Any]]) -> ScriptedTurn:
         if _route(messages) == "planner":
+            calls["planner"] += 1
             return ScriptedTurn(final="我觉得这个任务还挺复杂的，先看看吧")
         return ScriptedTurn(final=_critic_json(True))
 
@@ -380,6 +417,10 @@ async def test_unreadable_plan_is_an_honest_error(tmp_path: Path) -> None:
     assert run.status == "error"
     assert run.subtask_count == 0
     assert run.stop_reason
+    # 问满 ``PlanPolicy.planner_attempts`` 次就认输，不是无限重问。
+    assert calls["planner"] == PlanPolicy().planner_attempts
+    # 解析失败的原因进 error，复盘时看得到模型到底回了什么形状。
+    assert "读不出子任务" in run.error
 
 
 def _git(repo: Path, *args: str) -> str:

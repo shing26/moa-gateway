@@ -22,7 +22,8 @@ context，外加前面子任务的产出——它不会自己去读 planner 的�
 ------------------------------------
 planner 的输出是 LLM 的自由文本。读不出结构化计划时，编一份"看起来像"的计划会让
 整档跑在一个没人写过的计划上——那比直接失败更坏。所以 ``parse_plan`` 读不出来就抛
-``PlanParseError``，由 L2 如实记成 ``error``。
+``PlanParseError``，由 L2 在**有限次重问**之后如实记成 ``error``（重问的措辞见
+``build_plan_retry_message``：一次格式抖动不该等于零信息量的失败）。
 """
 
 from __future__ import annotations
@@ -211,6 +212,26 @@ def build_plan_message(*, goal: str, max_subtasks: int) -> str:
     )
 
 
+def build_plan_retry_message(*, error: str) -> str:
+    """解析失败后的重问：把读不出来的原因原样回灌，只要一个 JSON 数组。
+
+    与 ``build_plan_message`` 同形（分派逻辑靠"只回一个 JSON 数组"认出 planner），
+    区别是把上一次的解析错误摆在最前面——模型看得到自己错在哪。
+
+    为什么需要这条重问：``PlanPolicy.planner_steps`` 是 1，即一次调用定生死。实测
+    （2026-10-19，nemotron-3-super-120b @ temperature=1.0）planner 会**间歇性**地不按
+    JSON 回——同一轮 L2 的 planner 是好的，L3 的就读不出来，于是整档 0 步落 ``error``。
+    那是一次格式抖动，不该让 L2/L3 在分解阶段直接消失。
+    """
+    return (
+        f"上一次的回答读不出计划：{error}\n\n"
+        "只回一个 JSON 数组，不要任何解释、代号或 ``` 围栏。每个元素必须同时有非空的 "
+        "instruction 与 context：\n"
+        '{"instruction": "这一步具体做什么", '
+        '"context": "执行这一步需要的前置事实（失败长什么样、根因、涉及哪个文件哪一行）"}'
+    )
+
+
 def build_plan_review_message(
     *,
     goal: str,
@@ -241,6 +262,7 @@ __all__ = [
     "PlanParseError",
     "Subtask",
     "build_plan_message",
+    "build_plan_retry_message",
     "build_plan_review_message",
     "parse_plan",
     "render_plan",
