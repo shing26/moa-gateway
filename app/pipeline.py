@@ -306,6 +306,31 @@ class MoAPipeline:
         target: str,
         request: Any | None = None,
     ) -> PipelineResult:
+        """请求入口：整个请求生命周期内独占该会话（探索性验收 D4，2026-10-19）。
+
+        锁放在这里而不是 ``Engine.handle_event`` 里面，是因为"一次请求"不等于
+        "一次状态推进"：本方法要连续推 ROUTED → EXECUTING → OUTPUT_READY →
+        COMPLETED，中间还夹着路由 / 检索 / LLM 的 await。只锁单次调用时，
+        同会话两条并发消息会各自按对方的中间状态算下一步——后到的那条在
+        EXECUTING 上再发 TASK_STARTED，就是 500 ``invalid_state_transition``
+        （实测 3 并发挂 2）。
+
+        语义：同会话**先到先处理**（后来的等前一条走完），跨会话完全并行；
+        无会话隔离的匿名请求因 `session_id` 相同而共用一把锁，属于已知代价。
+        """
+        async with self.engine.session_lock(event.session_id):
+            return await self._run_locked(
+                event, channel=channel, target=target, request=request,
+            )
+
+    async def _run_locked(
+        self,
+        event: MoAEvent,
+        *,
+        channel: str,
+        target: str,
+        request: Any | None = None,
+    ) -> PipelineResult:
         start = time.monotonic()
         # 审计 trace 贯通：本请求内所有审计条目共享 event.trace_id
         bind_trace(event.trace_id)

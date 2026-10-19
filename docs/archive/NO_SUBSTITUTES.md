@@ -1,3 +1,5 @@
+> **已归档（2026-10-19）**：本文件是历史产物（Stage 1 的交接清单，当时只有 9 条测试）；文中的仓库内路径按**移动前**的位置书写（本文件现在 `docs/archive/`）。归档说明见 `docs/archive/README.md`。
+
 # MoA Engine — Stage 1 Handoff Checklist
 
 ## 完成交付物 (Stage 1 已完成)

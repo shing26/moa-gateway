@@ -6,7 +6,7 @@
 
 ## 背景
 
-R6（多级 supervisor）在 `delivery/高层架构设计.md` 与 `delivery/UserStory.md` 里
+R6（多级 supervisor）在 `docs/archive/高层架构设计.md` 与 `docs/archive/UserStory.md` 里
 被列为**延后到完整版的增强项**，理由当时是"MVP 先跑通分发与闭环，多级协作为增强项"。
 随后《定位与减法清单（2026-09-22）》把这条线连同任务 Agent、长期记忆一起
 归入"冻结：保留代码、停止扩展"，并把"双引擎"列为"不再给它添场景"。
@@ -19,7 +19,8 @@ R6（多级 supervisor）在 `delivery/高层架构设计.md` 与 `delivery/User
 ## 决策
 
 1. **只解除 R6 这一条**，其余冻结项不动。任务 Agent、长期记忆、Web Chat 仍是
-   "同一编排层的示例应用"；PR 审查垂直应用仍是"只读审查"。解除的是
+   "同一编排层的示例应用"；PR 审查垂直应用当时按"只读审查"记（见 ADR-021 与
+   ADR-012 的 2026-10-19 订正：写回与经审批合并通道后来落地了）。解除的是
    "**多 Agent 协作作为一条能力线**"，不是"把冻结全部推翻"。
 2. **协作链路是新增路径，不进入请求主路径**。理由：
    - 意图路由的 `INTENT_AGENT_MAP` 与 `_AGENT_KEYS` 自检是既有契约，
@@ -31,7 +32,7 @@ R6（多级 supervisor）在 `delivery/高层架构设计.md` 与 `delivery/User
      一个用代码回答"主流框架能否实现同样的约束"，一个**提供能力**。
 3. **形态**：Supervisor 规划 → 按子任务 handoff 到专家（复用
    `AGENT_REGISTRY` 里的 coder/general/review）→ Critic 评审 → 有界 revise 回边
-   → 汇总 → 既有 guard/HITL/审计。这是 `delivery/research_report.md` 已经调研过
+   → 汇总 → 既有 guard/HITL/审计。这是 `docs/archive/research_report.md` 已经调研过
    的 LangGraph supervisor 模式，不是新范式。
 4. **运行时**：LangGraph `StateGraph`（可选 extra，CI 的 `--all-extras` 已覆盖）。
    FSM 继续承担单 Agent 请求路径；协作是**第三种**编排路径。
