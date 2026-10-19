@@ -30,6 +30,18 @@ class _FallbackScriptedLLM(ScriptedLLM):
         return result
 
 
+class _AlwaysFailingLLM(ScriptedLLM):
+    """每次调用都抛——用来钉住"重试耗尽才落 error"，脚本用完不算失败。"""
+
+    def __init__(self, *, calls: list[int] | None = None) -> None:
+        super().__init__([], model="failing")
+        self._calls = calls if calls is not None else []
+
+    async def chat_with_tools(self, messages, tools, **kwargs):  # type: ignore[override]
+        self._calls.append(1)
+        raise RuntimeError("boom")
+
+
 @pytest.mark.asyncio
 async def test_terminal_turn_is_completed(tmp_path: Path) -> None:
     agent = make_agent(tmp_path, [ScriptedTurn(final="做完了")])
@@ -63,11 +75,31 @@ async def test_cost_over_budget_is_budget_exhausted(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_llm_failure_is_error(tmp_path: Path) -> None:
-    agent = make_agent(tmp_path, [ScriptedTurn(error="boom")])
+async def test_llm_failure_is_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # 退避在测试里归零，钉的是语义不是墙钟。
+    monkeypatch.setattr("bench.agent.loop.LLM_RETRY_BACKOFF_MS", (0, 0))
+    llm = _AlwaysFailingLLM()
+    tools = build_toolset(workspace=tmp_path, verify_command=FAILING_VERIFY)
+    agent = LLMBackedAgent(llm, tools)
     run = await agent.run(workspace=tmp_path, goal="目标", budget=Budget(1.0, 5))
     assert run.status == "error"
     assert "boom" in run.error
+    # 重试是有限的：尝试次数就是常量本身，不是无限重试。
+    assert len(llm._calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_transient_llm_error_is_retried_then_completes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """一次端点抖动不该把整条 run 判成 error——重试后接着走。"""
+    monkeypatch.setattr("bench.agent.loop.LLM_RETRY_BACKOFF_MS", (0, 0))
+    agent = make_agent(tmp_path, [ScriptedTurn(error="500"), ScriptedTurn(final="做完了")])
+    run = await agent.run(workspace=tmp_path, goal="目标", budget=Budget(1.0, 5))
+    assert run.status == "completed"
+    assert run.error == ""
+    # 重试的那一轮没有落到轨迹上：失败不是一步。
+    assert [step.action for step in run.steps] == ["finish"]
 
 
 @pytest.mark.asyncio

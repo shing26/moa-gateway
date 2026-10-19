@@ -28,11 +28,20 @@ from __future__ import annotations
 
 import io
 import logging
+import shutil
 import subprocess
 import tarfile
+import time
 from pathlib import Path
 
 logger = logging.getLogger("bench.harness.workspace")
+
+#: ``tarfile`` 的 ``filter="data"`` 会对每个成员调一次 ``os.path.realpath``；在
+#: Windows 上这一句偶发 ``OSError: [WinError 1450] 系统资源不足``（curve 实测第
+#: 三条 run 上炸掉，前两条正常）。它是环境抖动而不是数据问题，重试一次即可；
+#: 重试前必须清空半成品目录，否则第二次会撞"文件已存在"。
+_EXTRACT_ATTEMPTS = 3
+_EXTRACT_BACKOFF_S = 0.5
 
 
 class MissingCommitError(RuntimeError):
@@ -55,6 +64,31 @@ def _git_bytes(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[byt
     return subprocess.run(  # noqa: S603
         ["git", *args], cwd=str(cwd), capture_output=True, check=False
     )
+
+
+def _extract_archive(data: bytes, dest: Path) -> None:
+    """把 ``git archive`` 的 tar 展开到 ``dest``，抖动时有界重试。"""
+    for attempt in range(1, _EXTRACT_ATTEMPTS + 1):
+        try:
+            with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+                # filter="data" 会丢弃绝对路径、``..`` 与设备文件等危险成员。
+                tar.extractall(dest, filter="data")
+            return
+        except OSError as exc:
+            if attempt >= _EXTRACT_ATTEMPTS:
+                raise
+            logger.warning(
+                "tar extraction failed (attempt %d/%d): %s; retrying",
+                attempt,
+                _EXTRACT_ATTEMPTS,
+                exc,
+            )
+            for child in dest.iterdir():
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+            time.sleep(_EXTRACT_BACKOFF_S * attempt)
 
 
 def materialize(
@@ -89,11 +123,11 @@ def materialize(
         raise MissingCommitError(
             f"git archive {base_commit} 失败（提交可能不在本地，浅克隆会这样）"
         )
-    with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
-        # filter="data" 会丢弃绝对路径、`..` 与设备文件等危险成员。pyproject 声明
-        # requires-python >= 3.12，而这个参数 3.12 起是默认安全策略的一部分，
-        # 所以不做旧解释器回退——留着回退只会让"安全版本"变成一条不被走到的分支。
-        tar.extractall(dest, filter="data")
+    # ``_extract_archive`` 里 filter="data" 会丢弃绝对路径、`..` 与设备文件等危险
+    # 成员。pyproject 声明 requires-python >= 3.12，而这个参数 3.12 起是默认安全
+    # 策略的一部分，所以不做旧解释器回退——留着回退只会让"安全版本"变成一条不被
+    # 走到的分支。
+    _extract_archive(archive.stdout, dest)
 
     git(["init", "-q", "-b", "main"], cwd=dest)
     # Windows 上默认的 autocrlf 会把 LF 换成 CRLF，于是"agent 改了一个字节"
