@@ -1,7 +1,7 @@
 # ADR-0021: PR 合并作为经审批的写操作
 
 日期：2026-10-08
-状态：已接受（待实施）
+状态：已实施（本行原记"待实施"，2026-10-19 订正，见文末「落地记录」）
 关联：ADR-013（HITL 回调信任）、ADR-019（审计链与保留）、
 `apps/code_review_pipeline/routing/github_client.py`、
 `apps/code_review_pipeline/routing/github_review_route.py`、`app/config.py`
@@ -193,7 +193,12 @@ GitHub 的合并按钮。**
 
 ### 诚实标注
 
-- 本 ADR 只确立方向与边界，**尚未实施**，因此没有任何实现层面的证据。
+- **代码已落地，产品验收未达成——两件事不要混**。代码在 2026-10-19 核实：
+  `MergeExecutor` 接在 `app/routes/feishu.py:326` 与 `app/routes/webhook.py:262`，
+  `MergePoller` 由 `app/merge_worker.py:42` 驱动，`app/main.py:57` 启动时跑
+  `merge_channel_readiness` 预检，开关是 `CODE_REVIEW_MERGE_ENABLED`（`app/config.py`）。
+  但**产品验收（连续 10 个 PR）一条都没有**：开关默认关，没有真实用户走过这条通道。
+  本文后面"验收"一节写的是**目标**，不是已取得的证据。
 - "CI 红时推送的失败信息对用户是否真的有用"属于未验证假设：若用户从不点开链接，
   决策 4 的一半（红侧）也应重新评估。
 
@@ -201,12 +206,33 @@ GitHub 的合并按钮。**
 
 - **审查 pipeline 的位置变了**：它从"独立产物"变成"合并卡片上的一段参考信息"。
   它的存废从此由使用数据决定，而不是由它自身的复杂度决定。
-- **`README` 存在一处需要同步的漂移**：README 第 308 行附近称"PR 审查是只读审查，
-  `GitHubClient` 只有 `get_pr` / `get_pr_files`，没有写回"，但代码里早已有
-  `create_review` / `list_reviews`。本 ADR 落地时会进一步引入 merge，该表述必须一并修正。
+- **`README` 的漂移已修正**（2026-10-19）：此前 README 称"PR 审查是只读审查，
+  `GitHubClient` 只有 `get_pr` / `get_pr_files`，没有写回"，而代码里早有
+  `create_review` / `list_reviews`；本 ADR 又引入了 merge。现在 README 与
+  `delivery/定位与减法清单.md` 都写明这是一条**经审批的写回 + 合并通道**。
 - **权限集中的风险**：合并权限收拢到网关后，网关的 GitHub token 成为单点高价值目标。
   这是"权限收拢"的代价，第一版接受它，但必须在部署侧明确该 token 的存放与最小范围。
 - **审计链的完整性变得可验证**：从"演示数据"变成"每周 2 条真实记录"，这是本项目
   第一次能让审计链面对真实流量。
 - **不得顺势扩大宣称**：在连续 10 个 PR 达成之前，README 与简历只应写"支持经审批的
   PR 合并通道"，**不得**写"自动化 PR 合并"或"CI 自动修复"。
+
+## 落地记录（2026-10-19 订正）
+
+本文此前一直挂着"已接受（**待实施**）"，但代码在**它被写下之前就已经落地了**——这是
+文档没跟上代码，不是功能没做。逐条对照：
+
+| 本 ADR 的决策 | 代码位置 |
+| :--- | :--- |
+| 审批门禁驱动的合并执行 | `apps/code_review_pipeline/merge_executor.py`（`MergeExecutor`） |
+| 两个回调入口共用同一条执行路径 | `app/routes/feishu.py:326`、`app/routes/webhook.py:262` |
+| 合并前校验（CI 绿、白名单、幂等） | `apps/code_review_pipeline/merge_preflight.py` |
+| 待批任务轮询 | `apps/code_review_pipeline/merge_poller.py` + `app/merge_worker.py:42` |
+| 启动期通道自检 | `app/main.py:57`（`merge_channel_readiness`） |
+| 开关与配置 | `CODE_REVIEW_MERGE_ENABLED`（`app/config.py:237`） |
+
+测试面：`tests/unit/test_merge_executor.py`、`test_merge_poller.py`、`test_merge_preflight.py`，
+以及 `tests/integration/test_merge_channel_e2e.py`、`test_merge_cross_process.py`。
+
+**仍然未做的是验收，不是实现**：连续 10 个真实 PR 的产品判据一条都没有，开关默认关闭。
+所以对外只能说"支持经审批的 PR 合并通道"，不能说"自动化 PR 合并"。

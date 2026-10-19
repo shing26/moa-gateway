@@ -76,8 +76,11 @@
 - **PR 审查卡片不再伪装审批**。该链路从不 `store_hitl`（`apps/` 下 0 处），却渲染带
   批准/拒绝按钮的 `ApprovalCard` —— 点了必然回"已失效"。新增 `hitl_kind="notification"`
   渲染形态（无 action 元素），`feishu_notifier._build_approval_card` 随之改名
-  `_build_review_card` 并标注"本卡片为通知，不支持在此批准/拒绝"。**PR 审查的定位明确为
-  "只读审查"**，写回 + HITL 存储 + 审计三件属独立议题。
+  `_build_review_card` 并标注"本卡片为通知，不支持在此批准/拒绝"。**当时**把 PR 审查的定位
+  定成"只读审查"，写回 + HITL 存储 + 审计三件留作独立议题。
+  *（2026-10-19 订正：那三件后来做了——`publish_review` 写回、ADR-021 的经审批合并通道。
+  本条只保留"通知卡片不再伪装审批"这一半；当前的定位口径以 README 与
+  `delivery/定位与减法清单.md` 为准。）*
 - **OTel：更正分类 + 降级表述**。原分类把它放在"需要外部条件"，但 **collector 本地 Docker
   就能跑**（实测 Docker 29.5.3 可用），所以它不是被外部卡住，只是标准管道工作未做。ADR-007
   已加"现状更正"注记（依赖缺失 → 设了 endpoint 也只会 console；回退只在构造期异常；仅 2 个

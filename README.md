@@ -1,9 +1,9 @@
 <div align="center">
 
 # MoA Gateway
-### Multi-Agent Orchestration & Governance Gateway
+### 可验证的 AI 工程：LLM 治理运行时 + 多智能体实验台
 
-面向企业级生产场景的高可靠多智能体编排与治理网关
+仓库名保留历史写法（`Gateway` / `MoA` 两个词在正文口径里停用，理由见下）。项目本身是**一层 LLM 治理运行时**（`app/`）加**一个等预算的多智能体实验台**（`bench/`）；开发辅助（改 bug、审 PR）是任务载体，不是产品定位。
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688.svg)](https://fastapi.tiangolo.com/)
@@ -12,17 +12,18 @@
 [![pgvector](https://img.shields.io/badge/pgvector-4169E1?logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector)
 [![Elasticsearch](https://img.shields.io/badge/Elasticsearch-005571?logo=elasticsearch&logoColor=white)](https://www.elastic.co/elasticsearch)
 <br>
-[![Tests](https://img.shields.io/badge/tests-1386%20passed-brightgreen.svg)](https://github.com/shing26/moa-gateway/actions)
+[![Tests](https://img.shields.io/badge/tests-1388%20passed-brightgreen.svg)](https://github.com/shing26/moa-gateway/actions)
 [![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Security: Bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
 
 <p align="center">
-<b>1386</b> 自动化测试 · <b>22</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
+<b>1388</b> 自动化测试 · <b>22</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
 </p>
 
 <p align="center">
   <a href="#-核心工程防线">核心工程防线</a> •
   <a href="#-真实节点拓扑">节点拓扑</a> •
+  <a href="#-多智能体剂量实验台bench">剂量实验台</a> •
   <a href="#-秒级实测零网络依赖">秒级实测</a> •
   <a href="#-本地运行">本地运行</a> •
   <a href="#-项目结构概览">项目结构</a> •
@@ -33,22 +34,26 @@
 </div>
 
 > [!NOTE]
-> **架构定位说明**：
-> 本项目命名中的 **MoA** 指代 **Multi-Agent Orchestration & Governance（多智能体编排与工程治理）**。
-> 区别于学术界的 Prompt-level 模型组合（Mixture-of-Agents），本项目聚焦于高可靠网关场景下的**状态流转确定性、自研 FSM 与 LangGraph 双引擎等价性对拍、双层安全质检（Evaluate + Guard）以及全链路离线度量闭环**。
-> 它首先是一层 **LLM 治理层**（拦截、审批、留痕、回归），其次才是多执行体运行时：主请求路径是"选一个执行体跑到底"的分发，多 Agent 分工与反思是**显式开启、默认关闭**的独立协作线（ADR-022）。
+> **这是什么、不是什么**：
+> 这个项目是**一层 LLM 治理运行时**（`app/`：拦截、审批、留痕、回归）加**一个等预算的多智能体实验台**（`bench/`：同一任务集、同一预算下把 agent 结构从 L0 加到 L3，看边际收益）。
+> 三个词在这里**停用**：
+> - **网关**——设计文档 §2.1 判定不成立：请求进来之后是它在干活，不是转发给别人、也不替谁挡流量。"网关"会让人以为它只是中间层。仓库名是历史遗留。
+> - **多智能体系统**——产品层的主链路是 5 次**顺序** LLM 调用（`apps/code_review_pipeline`，没有 handoff、没有并行调度）。真正的多智能体只在 `bench/` 的剂量实验里，默认关闭、显式入口（ADR-022）。
+> - **开发辅助类 Agent**——改 bug / 审 PR 是**任务载体**，它们的价值是给治理层和实验台提供真实负载，不是要做成产品。
+>
+> 对外一句话：**"我建了个实验台，测出多智能体协作在编码任务上的边际收益在第几档转负——并且我能证明我的 agent 没有在撒谎。"**
 
 ---
 
-## 💡 为什么需要 MoA Gateway？
+## 💡 这个项目在接哪些坑？
 
-多数 Demo 级 Agent 系统停留在 Prompt 串联或单向 ReAct 循环中，在生产落地时极易遭遇三大瓶颈：
+多数 Demo 级 Agent 系统停留在 Prompt 串联或单向 ReAct 循环中，落地时极易撞上三个瓶颈：
 
 1. **状态黑盒与无限震荡**：缺乏严格的状态机约束，反思逻辑陷入死循环或 Token 跑飞。
 2. **协议虚假成功**：`SubAgent` 协议只有一个字符串出口（`execute() -> str`），失败与成功共用同一条通道——专家因环境缺失（如 `GITHUB_TOKEN` 未配置）把失败当答案返回时，下游会把它当正常内容放行（本仓实测出现过：Critic 甚至 approve 之后原样交付）。
 3. **技术盲目堆砌**：缺乏量化评测体系，盲目引入 Rerank 等模块，在特征同源时导致排序指标（nDCG）负向倒退。
 
-MoA Gateway 将多智能体系统收敛至**确定性工程治理**之下，提供高可用、可观测、防击穿的生产级运行时环境。
+前两条构成 `app/`（治理运行时）的存在理由。第三条之外还有更根本的一问：**把这些都做对之后，多智能体到底值不值得？** 这是一个还没有答案的实验问题，由 `bench/` 用等预算的 L0–L3 剂量实验正面回答，而不是靠架构图宣称。
 
 ---
 
@@ -81,7 +86,7 @@ MoA Gateway 将多智能体系统收敛至**确定性工程治理**之下，提�
 ### 5. 全链路审计与零成本 CI 确定性测试
 
 * **全生命周期记账**：共享 `trace_id` 经 ContextVar 贯穿路由、执行、质检全流程，协作层自身的 Token 与延迟也纳管记账；`budget_guard` 会话级成本熔断（`BUDGET_SESSION_LIMIT_USD`）；审计 WAL 写成链（`prev_hash` / `entry_hash`，能指出第一个被改过的行号——tamper-evident，不是 tamper-proof）。
-* **离线确定性保障**：Mock 协作 / 任务 LLM 与真机调合同构，CI 在 100% 零网络、零 Token 消耗下完成拓扑与流式验证，沉淀 **1386 passed / 4 skipped**。
+* **离线确定性保障**：Mock 协作 / 任务 LLM 与真机调合同构，CI 在 100% 零网络、零 Token 消耗下完成拓扑与流式验证，沉淀 **1388 passed / 4 skipped**。
 
 ---
 
@@ -152,6 +157,42 @@ plan ──▶ dispatch ──▶ Send 扇出并发 ──▶ execute_expert ×N
 
 ---
 
+## 🧪 多智能体剂量实验台（bench/）
+
+`bench/` 是仓库的第二个主体。它把"多智能体到底强不强"当成一个**可证伪的实验问题**：同一任务集、同一 token 预算、同一中档模型，只改编排拓扑，看通过率与成本的边际变化。
+
+| 档 | 编排（唯一变量） | 说明 |
+| :---: | :--- | :--- |
+| **L0** | 单 agent 循环 | 零点，与其余三档共用同一套工具 / 指令 / 判停条件 |
+| **L1** | L0 + 一条**有界** Critic 回边 | worker 自报完成后由 `review` 专家复核，打回就按指令再改 |
+| **L2** | Planner + 1 worker + Critic | 先分解成带上下文的子任务，再逐个交接执行、复核 |
+| **L3** | L2 + N 并发 worker | 扇出执行、reducer 合并、按子任务重跑 |
+
+- **判决不由执行体自报**：agent 交 `AgentRun`（它认为自己做了什么、为什么停下），harness 交 `RunResult`（它到底过没过）——两套类型分开，patch 由 harness 采集（`bench/agent/types.py`、ADR-023）。
+- **能失败**：任务先跑一次 fail-first（基线必须红），agent 跑完再由固定验证命令判决；`fail` / `budget_exhausted` / `error` 是三种不同的结局，不当成同一种东西。
+- **防作弊靠还原**：验证前把测试文件还原到任务定义的 test patch 版本，并删掉 `tests/` 下新增的未跟踪文件。
+
+### 第一轮真实曲线（2026-10-19）
+
+模型 `nvidia/nemotron-3-super-120b-a12b`（免费端点，`temperature=1.0`），2 题 × 4 档 × 1 次：
+
+| 档 | 通过率 | 平均 token | 平均每 pass token |
+| :---: | ---: | ---: | ---: |
+| L0 | 50% | 165,071 | 330,141 |
+| **L1** | **100%** | 248,192 | 248,192 |
+| L2 | 50%（1 条撞预算） | 371,190 | 742,380 |
+| L3 | 50% | 217,867 | 435,733 |
+
+边际：**L0→L1 +50pp / +83k token；L1→L2 −50pp / +123k；L2→L3 +0pp / −153k。**
+读法是"**L1 是峰值**"：同样的模型、同样的题，只加一条 Critic 回边就把其中一题从 fail 翻成 pass；再往上加 planner（L2）成本涨了、通过率反而掉回来。L3 的 token 比 L2 低，是因为它把活分给并发 worker，但通过率没比 L2 更好。
+
+> [!IMPORTANT]
+> **这是方向性证据，不是统计结论**：`repeats=1`（报告里每个格子都标 `under_sampled`）、只有 2 题。单个 pass/fail 翻转就足以改变任何一列。
+
+复现：`uv run python bench/run_curve.py --tasks 988fccb a746b81 --repeats 3`（**真花钱、不进 CI**），归档在 `.bench-work/`（不入库）。
+
+---
+
 ## ⚡ 秒级实测（零网络依赖）
 
 以下四条命令全部在本机实测可跑：mock / 确定性模式，不依赖外部 API Key 与外部网络，单条约 3–8 秒（含启动开销）。
@@ -189,8 +230,8 @@ uv run python scripts/doctor.py # 环境诊断：Python / .env / 端口 / Redis 
 > [!TIP]
 > **Windows 用户**：请用 `python -m app` 启动（而不是直接 `uvicorn`）——它会在 Uvicorn 建 loop 前切换到 Selector 事件循环，psycopg 的异步 pgvector 连接池需要它。
 
-- 持久化依赖用仓库 Compose 起：`docker compose -f docker-compose.dev.yml up -d redis postgres`（Redis `6380` / pgvector `5433` / 网关 `8081`，避开常用端口）。
-- 演示前一键起停：`powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1`（按序拉起容器 → Ollama → 网关，等 `/healthz` 通过）。
+- 持久化依赖用仓库 Compose 起：`docker compose -f docker-compose.dev.yml up -d redis postgres`（Redis `6380` / pgvector `5433` / 应用 `8081`，避开常用端口）。
+- 演示前一键起停：`powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1`（按序拉起容器 → Ollama → 应用，等 `/healthz` 通过）。
 - 访问入口：`/dashboard`（管理后台）、`/dashboard/chat`（自主任务对话）、`/health` 与 `/healthz`（健康检查）。
 
 ---
@@ -218,13 +259,15 @@ moa-gateway/
 ├── apps/
 │   └── code_review_pipeline/   # PR 审查垂直应用 + ADR-021 经审批合并通道
 ├── bench/       # §5.0 agent 原语 + §5.1 带工具专家 + harness + 预算 B1/B3 + 报告聚合 + 任务定义（剂量曲线实验）
+├── delivery/    # 定位与减法清单（对外口径的单一来源）+ 交付材料摘要
 ├── docs/
 │   ├── adr/                           # ADR-002 ~ ADR-023（22 份）
+│   ├── archive/                       # 历史文档 9 份（未按此实施，见 archive/README.md）
 │   ├── multi-agent-collaboration.md # 协作链路架构与并发写治理说明
 │   └── retrieval-evaluation.md      # 检索 gold set、度量基线与精排止损归档
 ├── evals/       # 数据集与 run_evals.py（intent / guard / e2e / retrieval / hitl_feedback）
 ├── scripts/     # 演示与验收：run_collaboration / rag_case / compare_rerank / doctor / redteam …
-└── tests/       # 1386 单元测试 + 双引擎 Parity 对照集成测试
+└── tests/       # 1388 单元测试 + 双引擎 Parity 对照集成测试
 ```
 
 ---
@@ -255,16 +298,16 @@ moa-gateway/
 > [!IMPORTANT]
 > **口径说明**：这是**固定顺序的多阶段流水线**，不是"多智能体协同"——五个审查器由 `run()` 依次 `await`，彼此没有 handoff、没有并行调度，唯一的数据传递是上一阶段的产出喂给下一阶段。
 
-- 入口：`POST /webhook/github/review`（GitHub webhook body）或网关指令 `/review` 后输入 `owner/repo#PR号`；无 `GITHUB_TOKEN` 时优雅降级，不崩溃。
+- 入口：`POST /webhook/github/review`（GitHub webhook body）或指令 `/review` 后输入 `owner/repo#PR号`；无 `GITHUB_TOKEN` 时优雅降级，不崩溃。
 - 报告阶段出现 `critical` / `high` 发现，或 `medium` 发现 ≥3 条，或任一审查器返回无法解析的内容，即 `overall_need_human_review=True`，落库并进飞书卡片（2026-10-12 修复：此前该标记恒为 `False`，回归测试见 `tests/unit/test_review_hitl_escalation.py`）。
-- **合并是独立的经审批通道**（ADR-021，`CODE_REVIEW_MERGE_ENABLED=1`）：CI 绿 → 飞书弹审批卡片 → 人点批准 → 网关合并 → 审计。合并必须过审批门，全程留痕。
+- **合并是独立的经审批通道**（ADR-021，`CODE_REVIEW_MERGE_ENABLED=1`）：CI 绿 → 飞书弹审批卡片 → 人点批准 → 运行时合并 → 审计。合并必须过审批门，全程留痕。
 
 ---
 
 ## 🧪 质量保障与门禁
 
 ```bash
-pytest tests/unit -q                          # 1386 passed / 4 skipped（零网络零 token）
+pytest tests/unit -q                          # 1388 passed / 4 skipped（零网络零 token）
 ruff check .                                  # 代码风格
 bandit -r app -q -s B105,B107,B110,B112,B324  # 安全扫描
 python evals/run_evals.py --offline           # e2e 真跑业务链路（真 pipeline + 正则路由 + mock agent）
@@ -282,6 +325,7 @@ GitHub Actions CI（Python 3.12）依次执行：pytest → ruff → 防源码�
 - **意图 Eval 只测正则表**：50 条中 46 条（92%）正则直出、4 条落默认意图——该维度不注入 LLM，"默认值命中默认值"；模型兜底路径的稳定性由 `intent_consistency` 维度单独测（预热后 55/55 一致）。
 - **e2e 的 `intent_match` 是"与数据集标签的偏离率"，不是路由准确率**；judge 均分随机器 / 模型变化，不写死数字。
 - **HITL 不跨重启**：会话状态在进程内、挂起记录在 Redis，重启后未决审批按 ADR-012 惰性作废（审计 `hitl_expired`）并告知用户——这是有意为之，要么接外部状态存储，要么承认它只在进程生命周期内有效。
+- **同会话是排队的，不是并行的**：`MoAPipeline.run` 整个请求生命周期独占该会话（先到先处理，跨会话完全并行）——同会话并发投喂过去会撞出 `invalid_state_transition` 500，现在改为排队。代价是同一会话里一条慢请求会挡住下一条（LLM 超时上限之内）；不限流的匿名请求共用同一把锁（ADR-016 §五）。
 - **OTel 是预留接口，不是链路**：全仓只有 2 个 span、未声明 exporter 依赖，设了端点也只落到 console。
 - **协作链路五条边界**（ADR-022）：不进意图路由、不驱动会话 FSM、`depends_on` 只记录不调度、checkpointer 是进程内 `InMemorySaver`、`COLLAB_LLM=litellm` 解析失败会降级规则式 mock。
 - **成本量化本地不可验**：`avg_cost_usd` 恒 0（本地 Ollama 不计费）；`hitl_feedback` 4 条全是本地模拟种子，介入率无统计意义。
@@ -293,5 +337,5 @@ GitHub Actions CI（Python 3.12）依次执行：pytest → ruff → 防源码�
 <div align="center">
 <sub><b>Python 3.12 · FastAPI · LangGraph · Redis · pgvector · Elasticsearch · uv</b></sub>
 <br>
-<sub>本 README 的每个定量声明都可用上文命令在本地复现 · 架构决策归档于 docs/adr/（22 份）</sub>
+<sub>本 README 的每个定量声明都可用上文命令在本地复现（bench 曲线那条真花钱） · 架构决策归档于 docs/adr/（22 份）</sub>
 </div>

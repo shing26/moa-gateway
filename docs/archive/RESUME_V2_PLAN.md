@@ -1,3 +1,5 @@
+> **已归档（2026-10-19）**：本文件是历史产物，未按此实施；文中的仓库内路径按**移动前**的位置书写（本文件现在 `docs/archive/`）。归档说明见 `docs/archive/README.md`。
+
 # agent-gateway 改造计划（Resume V2）
 
 > 目标：把 moa-gateway 迭代为 **agent-gateway** —— 一份同时支撑「Agent 工程岗」与「后端/全栈岗」简历叙事的项目。

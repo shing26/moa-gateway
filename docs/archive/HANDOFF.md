@@ -1,3 +1,5 @@
+> **已归档（2026-10-19）**：本文件是历史产物，未按此实施；文中的仓库内路径按**移动前**的位置书写（本文件现在 `docs/archive/`）。归档说明见 `docs/archive/README.md`。
+
 # 交接文档：moa-gateway → agent-gateway 改造（给编码 AI harness）
 
 > 读者：接手的 AI 编码 harness（Codex / Claude Code / Cursor / 其他 Agent）。
