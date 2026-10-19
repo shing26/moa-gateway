@@ -246,3 +246,27 @@ completions`），而 `LoopSession.advance` 把**任何** LLM 异常直接落 `e
 
 `workdir` 用短名（`d3`）是为了压路径长度。进度看 `.bench-work\d3\runs\b1\*.json`，
 日志 `.bench-work\d3.err.log`。
+
+### 第一轮 B1（`988fccb`，nemotron-3-super-120b-a12b）：有分化
+
+| 档 | outcome | 自报 status | 步数 | token | patch | 备注 |
+|---|---|---|---|---|---|---|
+| L0 | fail | completed | 7 | 43,201 | 0 B | 自报做完；和 A/B 里同款过早收工 |
+| L1 | **pass** | step_limit | 13 | 350,064 | 1,382 B | Critic 回边救回来的 |
+| L2 | budget_exhausted | budget_exhausted | 37 | 414,593 | 0 B | 「计划未执行完」 |
+| L3 | error | error | 0 | 737 | 0 B | 「planner 未产出可读的计划」 |
+
+L1 是唯一做成的一档，判停是"Critic 连续打回达上限"——同一模型、同一道题，光靠循环
+结构就从 fail 翻到 pass，正是这条 bench 要看的形状。
+
+**L3 的 error 是缺陷，不是噪音。** planner 只花了 420 prompt / 317 completion token，
+输出读不出计划，`PlanParseError` 直接把整档判死（0 步）。而同一轮 L2 的 planner 是好的
+——`temperature=1.0` 下的间歇性格式抖动。`planner_steps=1` 等于一次读不出就陪葬。
+
+已修（`PlanPolicy.planner_attempts=3`）：同一会话里把 `PlanParseError` 原文回灌重问
+（`build_plan_retry_message`），耗尽才落 `error`；解析原因也进 `AgentRun.error`
+（原来这里是空的）。用例：`test_planner_parse_failure_is_asked_again` 钉"问一次就恢复"，
+`test_unreadable_plan_is_an_honest_error` 钉"问满 3 次才认输"。
+
+**待办：** B3 跑完后，用修好的 planner 单独补跑 `988fccb` 的 L3——`error` 不是 B3 的
+候选，不补这一格曲线就是空的。

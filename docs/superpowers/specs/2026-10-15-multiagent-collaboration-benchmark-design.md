@@ -464,5 +464,11 @@ tool calling"，而且去掉了对本 bench 无用的视觉分支。**免费端�
 2. **工作区解包**：`tar.extractall(dest, filter="data")` 在 Windows 上偶发
    `OSError: [WinError 1450] 系统资源不足`（`filter` 会对每个成员调 `os.path.realpath`）。
    现在 `_extract_archive()` 清空半成品目录后有界重试 3 次。
+3. **planner 解析**：`PlanPolicy.planner_steps=1` 意味着 planner 一次读不出结构化计划，
+   整档就以 0 步、0 patch 落 `error`。实测同一轮 L2 的 planner 出了合法 JSON、L3 的没有
+   （`temperature=1.0` 下的间歇性格式抖动），于是 L3 在分解阶段凭空消失。现在
+   `planner_attempts=3`：同一会话里把 `PlanParseError` 原文回灌重问（
+   `build_plan_retry_message`），耗尽才落 `error`，且解析原因进 `AgentRun.error`。
 
-两条都属于 §8 的噪音腿：让判决尽量只反映"agent 做没做成"，而不是端点或文件系统。
+三条都属于 §8 的噪音腿：让判决尽量只反映"agent 做没做成"，而不是端点、文件系统或
+一次模型格式抖动。

@@ -30,6 +30,7 @@ Critic 只决定"这一轮该不该放它走"。harness 仍可能在跑完验证
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,7 @@ from bench.agent.planner import (
     PlanParseError,
     Subtask,
     build_plan_message,
+    build_plan_retry_message,
     build_plan_review_message,
     parse_plan,
 )
@@ -65,6 +67,8 @@ from bench.agent.types import (
 )
 from bench.arms.registry import Arm
 
+logger = logging.getLogger("bench.arms.l2")
+
 
 @dataclass(frozen=True)
 class PlanPolicy:
@@ -73,6 +77,9 @@ class PlanPolicy:
     max_subtasks: int = 4
     #: planner 自己的步数上限。分解不探索工作区，默认一次调用收工。
     planner_steps: int = 1
+    #: planner 读不出计划时允许问几次（含首次）。见 ``L2PlannerWorkerCritic._plan``：
+    #: 一次格式抖动不该让整档以 0 步、0 patch 落 ``error``。
+    planner_attempts: int = 3
     #: Critic 复核的步数上限（它可能想自己重读、重跑）。
     critic_steps: int = 4
 
@@ -87,6 +94,9 @@ class _PlanResult:
     turns: int
     steps: tuple[Step, ...]
     model: str
+    #: 读不出计划时的原文归因（``PlanParseError`` 的那句话）。进 ``AgentRun.error``：
+    #: 否则复盘只剩一句 "planner 未产出可读的计划"，看不到它到底回了什么形状。
+    error: str = ""
 
 
 @dataclass(frozen=True)
@@ -126,6 +136,9 @@ class L2PlannerWorkerCritic:
         #:    ``step_limit``（首跑：L2/L3 各 1 次调用、0 步、``planner 未完成``）。
         #: ② **换掉"边走边看"的角色指令**。基础 prompt 是编码 agent 的，会鼓励它先读
         #:    文件；实测它会把工具调用写进正文，``parse_plan`` 同样读不出来。
+        #: ③ **读不出计划时有界重问**（``PlanPolicy.planner_attempts``）。① ② 修完仍
+        #:    会间歇性撞上：同一轮 L2 的 planner 出了合法 JSON，L3 的没有——实测
+        #:    2026-10-19，temperature=1.0。一次格式抖动不该让整档 0 步落 ``error``。
         self._planner = LLMBackedAgent(
             pool.llm, ToolRegistry(), instructions=PLANNER_INSTRUCTIONS
         )
@@ -167,6 +180,7 @@ class L2PlannerWorkerCritic:
                 temperature=self._temperature,
                 subtask_count=0,
                 stop_reason=_plan_stop_reason(plan_result.status),
+                error=plan_result.error,
             )
 
         stopped = budget.stop_status(usage=combined, steps_used=turns)
@@ -353,17 +367,45 @@ class L2PlannerWorkerCritic:
         session.add_user_message(
             build_plan_message(goal=goal, max_subtasks=self._policy.max_subtasks)
         )
-        status = await session.advance(max_turns=planner_steps)
-        steps = tuple(session.steps)
-        if status != "completed":
-            return _PlanResult(None, status, session.usage, session.turns, steps, session.model)
-        try:
-            plan = parse_plan(session.finish_content, max_subtasks=self._policy.max_subtasks)
-        except PlanParseError:
+        # 同一会话里重问：planner 看得见自己上一次的原文与那句解析错误，而不是被
+        # 当成两个无关的问题各问一次。
+        attempts = max(1, self._policy.planner_attempts)
+        last_error = ""
+        for attempt in range(1, attempts + 1):
+            status = await session.advance(max_turns=planner_steps)
+            steps = tuple(session.steps)
+            if status != "completed":
+                return _PlanResult(
+                    None, status, session.usage, session.turns, steps, session.model
+                )
+            try:
+                plan = parse_plan(
+                    session.finish_content, max_subtasks=self._policy.max_subtasks
+                )
+            except PlanParseError as exc:
+                last_error = str(exc)
+                if attempt >= attempts:
+                    break
+                logger.warning(
+                    "planner 的输出读不出计划（第 %d/%d 次）：%s；把错误回灌重问",
+                    attempt,
+                    attempts,
+                    last_error,
+                )
+                session.add_user_message(build_plan_retry_message(error=last_error))
+                continue
             return _PlanResult(
-                None, "error", session.usage, session.turns, steps, session.model
+                plan, status, session.usage, session.turns, steps, session.model
             )
-        return _PlanResult(plan, status, session.usage, session.turns, steps, session.model)
+        return _PlanResult(
+            None,
+            "error",
+            session.usage,
+            session.turns,
+            tuple(session.steps),
+            session.model,
+            error=last_error,
+        )
 
     async def _rerun(
         self,
