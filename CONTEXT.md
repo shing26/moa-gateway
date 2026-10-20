@@ -98,3 +98,48 @@ _Avoid_: 使用、上线
 审计条目中**真正被写入存储**的字段——与"只在运行期内存里存在"的字段相对。
 这两者的差别曾经让文档替实现担保过。
 _Avoid_: 审计字段（那是上位概念，不区分是否落盘）
+
+## PR Review 价值闭环
+
+**候选 Finding (Candidate Finding)**:
+Report worker 产出的、尚未经过 Critic 的审查候选。候选可以保留、修订或丢弃，
+候选本身不是可以写回 GitHub 的结论。
+_Avoid_: finding（不区分候选与发布）
+
+**Review Critic**:
+对每条候选 Finding 做 `keep / revise / drop` 的独立判决者。它可以要求一次
+Report worker 修订回边；Critic 失败不能让 R1 静默降级成 R0。
+_Avoid_: 第二个报告生成器、人工审批
+
+**Finding Disposition**:
+人工对已发布 Finding 的终态标签：`accepted_actionable`、`accepted_non_actionable`、
+`false_positive`、`duplicate`、`already_known`。模型预标与人工终审是两种不同的
+label source，不能用预标冒充闭环完成。预标固定放在嵌套 `model_prelabel`，顶层
+`disposition` 为空时 `label_source` 也必须为空。
+_Avoid_: 通过率、模型评分
+
+**Evaluation Corpus**:
+锁定 base/head SHA 的公开 PR 集合，加上每条只有一个已知缺陷的受控 recall 集。
+它用于同模型、同预算下比较 R0、R1 与一次预声明改进，不是持续用户样本。
+_Avoid_: 线上流量、生产基准
+
+**Evidence Gate**:
+发布前的确定性条件：没有可验证证据的 Finding 不能进入人工发布审批，也不能写回
+GitHub。它不把模型的 confidence 当成证据。
+_Avoid_: 置信度阈值、模型自证
+
+**Evidence Coverage**:
+已发布 Finding 中，至少有一条证据能解析到本次 diff、PR 工作区文件或确定性工具输出
+并写入 `evidence_verified=true` 的比例。它衡量可核查性，不等同于 factual precision，
+也不把随便带前缀的文本或模型自报的布尔值算作证据。
+_Avoid_: 置信度均值、证据条数
+
+**Review Run**:
+同一 PR/head 被重新执行时产生的新 generation。`trace_id` 继续表达业务身份，
+`review_run_id` 表达这次执行；旧卡片标注、发布和反馈在数据库条件更新处失效。
+_Avoid_: trace_id（它不能区分同一 head 的重试）
+
+**Publish Approval**:
+所有最终 Finding 都有人工 disposition 后，审批人才能批准写回。写回固定为 GitHub
+`COMMENT` review；它不是自动合并门禁，也不调用 merge API。
+_Avoid_: 自动批准、自动合并

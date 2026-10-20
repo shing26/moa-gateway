@@ -79,6 +79,7 @@ def parse_feishu_event(body):
     result = {
         "event_type": event_type,
         "challenge": challenge,
+        "event_id": header.get("event_id") or body.get("event_id") or body.get("uuid") or "",
         "message_id": None, "chat_id": None,
         "sender_id": None, "text": None,
         # 审批人（卡片点击者）——"谁批准了"以前在数据层答不上（2026-09-23 补）
@@ -112,6 +113,7 @@ def parse_feishu_event(body):
         result["event_type"] = "card_action"
         result["message_id"] = body.get("open_message_id")
         result["chat_id"] = body.get("open_chat_id")
+        result["action"] = body.get("action", {}).get("value", {})
         # v1 卡片动作把点击者放在顶层
         result["operator_id"] = body.get("open_id") or body.get("user_id") or None
         return result

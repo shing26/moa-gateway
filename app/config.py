@@ -223,12 +223,29 @@ class Settings:
         self.code_review_auto_migrate: bool = _parse_bool(
             os.getenv("CODE_REVIEW_AUTO_MIGRATE"), True
         )
+        # PR 审查工作区：chroot 在临时目录里，测试命令可由仓库显式覆盖。
+        # 留空时使用系统临时目录 / 自动探测 pytest。
+        self.code_review_workspace_root: str = os.getenv(
+            "CODE_REVIEW_WORKSPACE_ROOT", ""
+        )
+        self.code_review_verify_command: str = os.getenv(
+            "CODE_REVIEW_VERIFY_COMMAND", ""
+        )
 
         # 写回 GitHub 默认**关**（即 dry-run）。刻意与"功能开关"的直觉相反：
         # 往真实 PR 上贴评论是有外部后果的动作，而漏发只是少一次自动化。
         # 所以默认走 dry-run（判定路径完全相同，只在最后一步停下），要真发显式开。
         self.code_review_publish_dry_run: bool = _parse_bool(
             os.getenv("CODE_REVIEW_PUBLISH_DRY_RUN"), True
+        )
+        # Review L1 / feedback are demo defaults, but both have explicit kill
+        # switches so an operator can return to the R0 pipeline without a code
+        # change.
+        self.code_review_critic_enabled: bool = _parse_bool(
+            os.getenv("CODE_REVIEW_CRITIC_ENABLED"), True
+        )
+        self.code_review_finding_feedback_enabled: bool = _parse_bool(
+            os.getenv("CODE_REVIEW_FINDING_FEEDBACK_ENABLED"), True
         )
 
         # ── 合并通道（ADR-021）────────────────────────────────────────────

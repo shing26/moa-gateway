@@ -150,6 +150,53 @@ async def test_processor_failure_marks_failed_and_acks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_state_persistence_keeps_message_pending() -> None:
+    """If ``failed`` cannot be persisted, ACK would orphan the task."""
+
+    class _BrokenStore(ReviewStore):
+        def transition_task(self, identity, action, **kwargs):  # type: ignore[no-untyped-def]
+            if action == "fail":
+                raise RuntimeError("database unavailable")
+            return super().transition_task(identity, action, **kwargs)
+
+    store = _BrokenStore()
+    store.save(_record())
+    queue = FakeQueue([[_message()]])
+
+    async def _boom(_msg: TaskMessage) -> str:
+        raise RuntimeError("agent exploded")
+
+    worker = TaskWorker(queue, store, _boom, consumer="w1")  # type: ignore[arg-type]
+    assert await worker.run_once(block_ms=1) == 0
+    assert store.get_task_state(IDENTITY) == TaskState.RUNNING.value
+    assert queue.acked == []
+
+
+@pytest.mark.asyncio
+async def test_outcome_persistence_failure_is_not_acked() -> None:
+    """A final-state write failure must leave the message in PEL for reclaim."""
+
+    class _BrokenStore(ReviewStore):
+        def transition_task(self, identity, action, **kwargs):  # type: ignore[no-untyped-def]
+            if action == "request_approval":
+                raise RuntimeError("database unavailable")
+            return super().transition_task(identity, action, **kwargs)
+
+    store = _BrokenStore()
+    store.save(_record())
+    queue = FakeQueue([[_message()]])
+
+    async def _proc(_msg: TaskMessage) -> str:
+        return TaskState.WAITING_APPROVAL.value
+
+    worker = TaskWorker(queue, store, _proc, consumer="w1")  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        await worker.run_once(block_ms=1)
+    assert store.get_task_state(IDENTITY) == TaskState.RUNNING.value
+    assert queue.acked == []
+
+
+@pytest.mark.asyncio
 async def test_unknown_task_is_dropped() -> None:
     """消息指向不存在的任务行：ack 掉，不无限重投一条永远做不了事的消息。"""
     store = ReviewStore()

@@ -1,0 +1,44 @@
+diff --git a/app/channels/feishu_event.py b/app/channels/feishu_event.py
+--- a/app/channels/feishu_event.py
++++ b/app/channels/feishu_event.py
+@@ -49,6 +49,5 @@ def _extract_text(msg_type: str, raw: Any) -> str:
+                 out: list[str] = []
+                 _flatten_post(payload[key], out)
+                 joined = " ".join(p.strip() for p in out if p.strip())
+-                if joined:
+-                    return joined
++                return joined
+         return ""
+diff --git a/tests/unit/test_e3_feishu_post_fallback.py b/tests/unit/test_e3_feishu_post_fallback.py
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/test_e3_feishu_post_fallback.py
+@@ -0,0 +1,28 @@
++from __future__ import annotations
++
++import json
++
++from app.channels.feishu_event import parse_feishu_event
++
++
++def test_empty_rich_text_v2_falls_back_to_legacy_content() -> None:
++    body = {
++        "schema": "2.0",
++        "header": {"event_type": "im.message.receive_v1"},
++        "event": {
++            "message": {
++                "chat_id": "oc-test",
++                "msg_type": "post",
++                "content": json.dumps(
++                    {
++                        "content_v2": [],
++                        "content": [
++                            [{"tag": "text", "text": "still readable"}]
++                        ],
++                    }
++                ),
++            }
++        },
++    }
++
++    assert parse_feishu_event(body)["text"] == "still readable"

@@ -111,6 +111,25 @@ def _build_tool_context(findings: Sequence[Any]) -> str:
     return "\n".join(lines)
 
 
+def _attach_tool_evidence(response: str, findings: Sequence[Finding]) -> str:
+    """Attach runner-owned evidence without trusting model-generated evidence."""
+    try:
+        payload = json.loads(response)
+    except (TypeError, json.JSONDecodeError):
+        return response
+    if not isinstance(payload, dict):
+        return response
+    payload["tool_evidence"] = sorted(
+        {
+            str(item)
+            for finding in findings
+            for item in finding.evidence
+            if str(item).strip()
+        }
+    )
+    return json.dumps(payload, ensure_ascii=False)
+
+
 class StaticAnalysisAgent:
     def __init__(self, llm: LLMClient | None = None) -> None:
         self._llm = llm
@@ -164,4 +183,4 @@ class StaticAnalysisAgent:
 
         # Step 3: let the LLM filter and refine the tool findings.
         response = await llm.chat(messages)
-        return response
+        return _attach_tool_evidence(response, tool_findings)

@@ -1,0 +1,10 @@
+diff --git a/app/routes/feishu.py b/app/routes/feishu.py
+--- a/app/routes/feishu.py
++++ b/app/routes/feishu.py
+@@ -47,6 +47,5 @@ async def get_adapter():
+ def _dedup(event_id: str) -> bool:
+     global _seen_events
+-    return True
+     if event_id in _seen_events:
+         return False
+     _seen_events.add(event_id)
