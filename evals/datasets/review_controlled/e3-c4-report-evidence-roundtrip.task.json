@@ -1,0 +1,11 @@
+{
+  "task_id": "e3-c4-report-evidence-roundtrip",
+  "base_commit": "910c865b0a75af1b745e3054555de5509c46a236",
+  "difficulty": "中",
+  "source": "E3",
+  "fix_surface": "medium",
+  "note": "报告解析必须保留模型给出的可验证证据，否则后续 Critic 与 evidence gate 都只能看到空证据。",
+  "known_defect": "report parsing drops finding evidence",
+  "verify_command": ["{python}", "-m", "pytest", "tests/unit/test_e3_report_evidence.py", "-q"],
+  "test_paths": ["tests/unit/test_e3_report_evidence.py"]
+}

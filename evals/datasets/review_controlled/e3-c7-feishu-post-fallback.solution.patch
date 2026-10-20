@@ -1,0 +1,11 @@
+diff --git a/app/channels/feishu_event.py b/app/channels/feishu_event.py
+--- a/app/channels/feishu_event.py
++++ b/app/channels/feishu_event.py
+@@ -49,5 +49,6 @@ def _extract_text(msg_type: str, raw: Any) -> str:
+                 out: list[str] = []
+                 _flatten_post(payload[key], out)
+                 joined = " ".join(p.strip() for p in out if p.strip())
+-                return joined
++                if joined:
++                    return joined
+         return ""

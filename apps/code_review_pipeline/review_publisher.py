@@ -59,6 +59,16 @@ def build_review_body(
         line = item.get("line")
         where = f"{loc}:{line}" if line else loc
         lines.append(f"- **{sev}** `{where}` {item.get('title', '')}".rstrip())
+        description = str(item.get("description", "") or "").strip()
+        suggestion = str(item.get("suggestion", "") or "").strip()
+        evidence = item.get("evidence", ()) or ()
+        if description:
+            lines.append(f"  - {description}")
+        if suggestion:
+            lines.append(f"  - **建议**: {suggestion}")
+        if evidence:
+            rendered = "; ".join(str(value)[:300] for value in evidence[:2])
+            lines.append(f"  - **证据**: {rendered}")
     lines.append("")
     lines.append(marker_for(task_id))
     return "\n".join(lines)
@@ -88,6 +98,7 @@ async def publish_review(
     *,
     dry_run: bool = False,
     findings: tuple[dict[str, Any], ...] = (),
+    expected_review_run_id: str | None = None,
 ) -> PublishOutcome:
     """按 主判据 → 兜底 marker → 实际 POST 的顺序写回。"""
     from apps.code_review_pipeline.routing.github_client import GitHubRepo
@@ -110,14 +121,29 @@ async def publish_review(
         """
         from apps.code_review_pipeline.task_audit import record_lifecycle
 
-        await record_lifecycle(task_id, repo_name, "complete", reason=reason)
-        store.transition_task(identity, "complete")
+        try:
+            await record_lifecycle(task_id, repo_name, "complete", reason=reason)
+        except Exception:
+            # Audit is derived evidence. A failed audit append must not strand a
+            # task in posting after GitHub has already accepted the review.
+            logger.exception("review complete audit append failed task=%s", task_id)
+        store.transition_task(
+            identity,
+            "complete",
+            expected_review_run_id=expected_review_run_id,
+        )
 
     # store 的方法是**同步**的（沿用既有 psycopg 同步客户端的约定），只有 GitHub
     # 那一侧 await。两边不一致会让调用点漏 await 或者 await 一个非协程——
     # 后者是 TypeError，报错位置还离真正的原因很远。
     recorded = store.get_posted_review_id(identity)
     if recorded:
+        if not dry_run and store.get_task_state(identity) == "posting":
+            try:
+                await _complete("already_posted_repair")
+            except Exception:
+                if store.get_task_state(identity) != "done":
+                    raise
         return PublishOutcome(status="already_posted", review_id=str(recorded))
 
     existing = await github.list_reviews(repo, pr_number)

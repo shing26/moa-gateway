@@ -28,7 +28,7 @@ from apps.code_review_pipeline.storage.review_store import (
     build_review_store,
 )
 from apps.code_review_pipeline.task_queue import TaskMessage, TaskQueue
-from apps.code_review_pipeline.task_state import TaskState
+from apps.code_review_pipeline.task_state import InvalidTaskTransition, TaskState
 
 logger = logging.getLogger("moa.worker")
 
@@ -104,20 +104,32 @@ class TaskWorker:
             outcome = await self._processor(msg)
         except Exception:
             logger.exception("task failed: %s", identity)
-            self._mark_failed(identity)
-            await self._queue.ack(msg.message_id)
-            return 1
+            if self._mark_failed(identity):
+                await self._queue.ack(msg.message_id)
+                return 1
+            # The failure state was not persisted. Leave the message pending so
+            # XAUTOCLAIM can retry after the next worker has a healthy store.
+            return 0
 
         await self._apply_outcome(msg, outcome)
         # ack 放在状态落库**之后**——这是底座的核心契约。
         await self._queue.ack(msg.message_id)
         return 1
 
-    def _mark_failed(self, identity: tuple[str, int, str]) -> None:
+    def _mark_failed(self, identity: tuple[str, int, str]) -> bool:
         try:
             self._store.transition_task(identity, "fail")
+            return True
+        except InvalidTaskTransition:
+            current = self._store.get_task_state(identity)
+            return current in {
+                TaskState.FAILED.value,
+                TaskState.DONE.value,
+                TaskState.REJECTED.value,
+            }
         except Exception:
             logger.exception("could not mark task failed: %s", identity)
+            return False
 
     async def _apply_outcome(self, msg: TaskMessage, outcome: str) -> None:
         """把 processor 的返回值映射成状态动作。
@@ -131,13 +143,22 @@ class TaskWorker:
             TaskState.DONE.value: "complete",
             TaskState.FAILED.value: "fail",
         }.get(outcome, "request_approval")
-        try:
+        current = self._store.get_task_state(identity)
+        should_transition = not (
+            outcome == TaskState.WAITING_APPROVAL.value
+            and current != TaskState.RUNNING.value
+        )
+        if should_transition:
+            # This call is deliberately allowed to propagate. ACKing after a
+            # failed state write would remove the only recovery handle from PEL.
             self._store.transition_task(identity, action)
+        try:
             from apps.code_review_pipeline.task_audit import record_lifecycle
 
             await record_lifecycle(msg.task_key, msg.repo, action, outcome=outcome)
         except Exception:
-            logger.exception("could not persist outcome %s for %s", outcome, identity)
+            # The state transition above is authoritative; audit is secondary.
+            logger.exception("could not audit outcome %s for %s", outcome, identity)
 
     async def run_forever(self, *, interval_s: float = 1.0) -> None:
         while True:
@@ -167,13 +188,18 @@ async def review_processor(msg: TaskMessage) -> str:
     from app.models.events import MoAEvent
     from apps.code_review_pipeline.agents.code_review_pipeline import CodeReviewPipeline
 
+    store = build_review_store()
+    review_run_id = uuid.uuid4().hex
+    store.start_review_run(msg.identity, review_run_id)
+
     payload = {
         "action": "synchronize",
         "repository": {"full_name": msg.repo},
         "pull_request": {"number": msg.pr_number, "head": {"sha": msg.head_sha}},
     }
+    trace_id = f"cr_{msg.task_key}"
     event = MoAEvent(
-        trace_id=msg.task_key,
+        trace_id=trace_id,
         event=None,
         session_id=msg.repo,
         text="",
@@ -188,12 +214,17 @@ async def review_processor(msg: TaskMessage) -> str:
 
     await record_agent_rows(msg.task_key, msg.repo, result)
 
-    # 审查结论落进任务行：findings 数与"是否需要人工"是 D4 审批页与写回判据的
-    # 数据来源。此处失败不该让整个任务失败（结论只是附加信息），故吞掉异常。
-    try:
-        build_review_store().save(record_from_result(result))
-    except Exception:
-        logger.warning("could not persist review findings for %s", msg.task_key)
+    # 审查结论必须先落库，再允许发卡片或进入审批。持久化失败时若继续发卡片，
+    # 用户在飞书里看到的 finding_uid 在数据库中并不存在，后续反馈与写回都会
+    # 永久失败；因此这里让异常向上抛，由 worker 把任务标成 failed。
+    store.save_review(
+        record_from_result(result, review_run_id=review_run_id),
+        result.persisted_findings,
+    )
+    # Always notify from the persisted snapshot. The input lineage may contain a
+    # candidate and a published row with the same finding_uid; sending the raw
+    # list would create duplicate buttons that address one database row.
+    stored_findings = store.list_findings(result.trace_id)
 
     # 飞书摘要也搬到这里（D5）。此前它在 webhook 里同步发送——而 webhook 早已改成
     # 只入队就返回，那时已经没有结论可发了。漏掉这一步的表现是"通知静默消失"，
@@ -204,17 +235,58 @@ async def review_processor(msg: TaskMessage) -> str:
         )
         from apps.code_review_pipeline.reporting import build_notification, count_by_severity
 
-        counts = count_by_severity(result)
-        await FeishuReviewNotifier.from_env().send_summary(
-            build_notification(result, counts)
-        )
+        notifier = FeishuReviewNotifier.from_env()
+        from app.config import settings
+
+        if settings.code_review_finding_feedback_enabled:
+            if not getattr(notifier, "is_configured", False):
+                raise RuntimeError(
+                    "finding feedback is enabled but CODE_REVIEW_FEISHU_CHANNEL "
+                    "is not configured"
+                )
+            sent = await notifier.send_finding_cards(
+                trace_id=result.trace_id,
+                repo=result.pr.repo,
+                pr_number=result.pr.pr_number,
+                head_sha=result.pr.head_sha,
+                review_run_id=review_run_id,
+                findings=stored_findings,
+            )
+            expected = notifier.expected_finding_card_count(stored_findings)
+            if sent != expected:
+                raise RuntimeError(
+                    f"feishu finding cards incomplete: sent={sent} expected={expected}"
+                )
+        else:
+            counts = count_by_severity(result)
+            await notifier.send_summary(build_notification(result, counts))
     except Exception as exc:
-        logger.warning("feishu notification failed: %s", exc)
+        # Delivery failure is visible as failed and can be explicitly requeued.
+        # Do not enter waiting_approval: no interactive cards reached the user.
+        logger.exception("feishu notification failed: %s", exc)
+        raise
+
+    if store.get_task_state(msg.identity) == TaskState.RUNNING.value:
+        try:
+            store.transition_task(
+                msg.identity,
+                "request_approval",
+                expected_review_run_id=review_run_id,
+            )
+        except InvalidTaskTransition:
+            current = store.get_task_state(msg.identity)
+            if current not in {
+                TaskState.WAITING_APPROVAL.value,
+                TaskState.POSTING.value,
+                TaskState.DONE.value,
+                TaskState.REJECTED.value,
+            }:
+                raise
 
     return TaskState.WAITING_APPROVAL.value
 
 
-def record_from_result(result: Any) -> Any:
+def record_from_result(result: Any, *, review_run_id: str = "") -> Any:
     """审查结论 -> 任务行（唯一的 ``ReviewRecord`` 生产者）。
 
     此前这个函数住在 webhook 路由里，而真正的调用者是 worker——路由改成异步派发
@@ -246,7 +318,9 @@ def record_from_result(result: Any) -> Any:
             "html_url": result.pr.html_url,
             "diff_url": result.pr.diff_url,
             "changed_files_count": len(result.pr.changed_files),
+            "critic_metrics": result.critic_metrics,
         },
+        review_run_id=review_run_id,
     )
 
 

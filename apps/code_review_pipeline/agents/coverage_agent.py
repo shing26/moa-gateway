@@ -333,10 +333,11 @@ def _ensure_tool_evidence(
     first_evidence = findings[0].get("evidence")
     if not isinstance(first_evidence, list):
         first_evidence = []
-    first_evidence.append(output)
+    first_evidence.append(f"command:{output}")
     findings[0]["evidence"] = first_evidence
 
     data["findings"] = findings
+    data["tool_evidence"] = [f"command:{output}"]
     needs_review = parse_failed or bool(data.get("need_human_review", False))
     if not _test_run_passed(output):
         data["recommendation"] = "insufficient"

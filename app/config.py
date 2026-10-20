@@ -238,6 +238,15 @@ class Settings:
         self.code_review_publish_dry_run: bool = _parse_bool(
             os.getenv("CODE_REVIEW_PUBLISH_DRY_RUN"), True
         )
+        # Review L1 / feedback are demo defaults, but both have explicit kill
+        # switches so an operator can return to the R0 pipeline without a code
+        # change.
+        self.code_review_critic_enabled: bool = _parse_bool(
+            os.getenv("CODE_REVIEW_CRITIC_ENABLED"), True
+        )
+        self.code_review_finding_feedback_enabled: bool = _parse_bool(
+            os.getenv("CODE_REVIEW_FINDING_FEEDBACK_ENABLED"), True
+        )
 
         # ── 合并通道（ADR-021）────────────────────────────────────────────
         # 默认关：合并是有外部后果的写操作，必须显式开启才生效。

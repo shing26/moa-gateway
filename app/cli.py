@@ -222,13 +222,8 @@ def cmd_demo_status(args: argparse.Namespace) -> int:
 def _summary_from_audit(task_key: str) -> str:
     """从审计链里还原一条人读得懂的结论摘要。
 
-    为什么绕审计取：**逐条 finding 目前没有持久化**——``code_review_findings`` 这张
-    表建了但全仓库没有任何写入方（只有 schema.sql 与一条外键注释提到它）。所以拿不
-    到每条 finding 的 file/line。审计里存的是每个 agent 的**严重度计数**，那是被
-    真正落盘、并且有哈希链保护的部分，就用它。
-
-    这是一个已知的欠账而不是权宜：要让 PR 评论里有逐条定位，得先把 findings 写进
-    ``code_review_findings``。本轮不补——它属于"结论存储"，不在可靠执行底座范围内。
+    审计链保留每个 agent 的严重度计数，即使审查结论行尚未写入，也能给 CLI
+    一个可解释的摘要。逐条 finding 的定位与反馈由 review store 单独持久化。
     """
     from app.audit.recorder import entries_for_trace
     from app.config import settings
@@ -250,6 +245,25 @@ def _summary_from_audit(task_key: str) -> str:
     return f"moa code review: `{task_key}`\n\n发现：{breakdown}。"
 
 
+def _finding_dicts_for_task(store: Any, task_key: str) -> tuple[dict[str, Any], ...]:
+    trace_id = task_key if task_key.startswith("cr_") else f"cr_{task_key}"
+    rows = store.list_findings(trace_id)
+    return tuple(
+        {
+            "finding_uid": item.finding_uid,
+            "severity": item.severity,
+            "file": item.file,
+            "line": item.line,
+            "title": item.title,
+            "description": item.description,
+            "suggestion": item.suggestion,
+            "evidence": list(item.evidence),
+        }
+        for item in rows
+        if getattr(item, "status", "") == "published"
+    )
+
+
 def cmd_demo_approve(args: argparse.Namespace) -> int:
     identity = _identity_from_task_key(args.task_key)
 
@@ -260,21 +274,26 @@ def cmd_demo_approve(args: argparse.Namespace) -> int:
         from apps.code_review_pipeline.storage.review_store import build_review_store
 
         store = build_review_store()
+        review_trace_id = args.task_key if args.task_key.startswith("cr_") else f"cr_{args.task_key}"
         if args.reject:
             return await reject_task(
-                store, identity, args.task_key,
+                store, identity, review_trace_id,
                 operator=args.operator, reason=args.reject,
             )
         github = build_github_client()
         try:
+            findings = _finding_dicts_for_task(store, args.task_key)
             # --real 才真发；默认与 settings 一致（dry-run）。dry-run 走的是**完全
             # 相同**的判定路径（主判据 -> marker 兜底），只在最后一步停下。
             dry_run = not args.real and settings.code_review_publish_dry_run
             outcome = await approve_task(
-                store, github, identity, args.task_key,
+                store, github, identity, review_trace_id,
                 operator=args.operator,
                 summary=_summary_from_audit(args.task_key),
                 dry_run=dry_run,
+                findings=findings,
+                require_feedback=bool(findings)
+                and settings.code_review_finding_feedback_enabled,
             )
         finally:
             close = getattr(github, "aclose", None)

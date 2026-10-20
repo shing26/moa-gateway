@@ -153,6 +153,7 @@ def test_record_route_projection_fills_identity_fields() -> None:
         test_coverage = _Section()
         report = _Section()
         overall_need_human_review = False
+        critic_metrics: dict[str, Any] = {}
 
     record = record_from_result(_Result())
     assert record.repo == "shing26/moa-gateway"
