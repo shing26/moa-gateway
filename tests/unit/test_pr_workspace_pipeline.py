@@ -151,12 +151,12 @@ def _coverage_final(messages: list[dict]) -> str:
     )
 
 
-def _event() -> MoAEvent:
+def _event(text: str = "") -> MoAEvent:
     return MoAEvent(
         trace_id="cr_o/r#7@sha-abc",
         event=None,
         session_id="o/r",
-        text="",
+        text=text,
         context={
             "action": "synchronize",
             "repository": {"full_name": "o/r"},
@@ -197,7 +197,7 @@ async def test_pipeline_passes_workspace_and_cleans_it(tmp_path: Path) -> None:
     pipeline._test = coverage  # noqa: SLF001
     pipeline._report = ReportRecordingAgent()  # noqa: SLF001
 
-    pr, result = await pipeline.run(_event())
+    pr, result = await pipeline.run(_event("please review"))
 
     assert pr.head_sha == "sha-abc"
     assert len(provisioner.prepared_for) == 1
@@ -205,6 +205,9 @@ async def test_pipeline_passes_workspace_and_cleans_it(tmp_path: Path) -> None:
     slot = coverage.envelopes[0].agent_local_slot
     assert slot["workspace_path"] == str(workspace.path)
     assert slot["verify_command"] == ["python", "-m", "pytest", "-q"]
+    assert '"diff"' in coverage.envelopes[0].user_raw_input
+    assert "+def divide" in coverage.envelopes[0].user_raw_input
+    assert "please review" in coverage.envelopes[0].user_raw_input
     assert result.test_coverage.recommendation == "adequate"
 
 

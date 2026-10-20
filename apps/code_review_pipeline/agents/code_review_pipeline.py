@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -25,6 +26,9 @@ from apps.code_review_pipeline.workspace import (
 )
 
 logger = logging.getLogger("moa.code_review.pipeline")
+
+_MODEL_DIFF_LIMIT = 12_000
+_MODEL_PATCH_LIMIT = 4_000
 
 
 class CodeReviewPipeline:
@@ -223,16 +227,39 @@ def _envelope_from_event(
     return AgentEnvelope(
         trace_id=event.trace_id,
         session_id=event.session_id,
-        user_raw_input=event.text or diff_payload.get("pr_title", ""),
+        # The code-review pipeline is driven by a GitHub event, not by a chat
+        # utterance. Keep the diff available even when a caller supplies a
+        # short instruction, but bound the model-facing copy so a large PR
+        # cannot silently consume the whole context window.
+        user_raw_input=_build_model_review_input(diff_payload, event.text or ""),
         global_summary=event.text or "",
         agent_local_slot=slot,
         history=(),
     )
 
 
+def _build_model_review_input(diff_payload: dict[str, Any], user_text: str) -> str:
+    changed_files = []
+    for item in diff_payload.get("changed_files", [])[:50]:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        patch = str(row.get("patch") or "")
+        if len(patch) > _MODEL_PATCH_LIMIT:
+            row["patch"] = patch[:_MODEL_PATCH_LIMIT] + "\n…（patch 已截断）"
+        changed_files.append(row)
+    payload: dict[str, Any] = {
+        "pr_title": diff_payload.get("pr_title", ""),
+        "diff": str(diff_payload.get("diff") or "")[:_MODEL_DIFF_LIMIT],
+        "changed_files": changed_files,
+    }
+    if user_text.strip():
+        payload["user_text"] = user_text
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _safe_json(text: str) -> dict[str, Any]:
     try:
-        import json
         return json.loads(text) if text else {}
     except Exception:
         return {"raw": text}
