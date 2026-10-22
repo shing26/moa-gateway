@@ -28,7 +28,7 @@ import logging
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.config import settings
 from app.models.errors import ErrorCode
@@ -66,6 +66,8 @@ class CollabRunRequest(BaseModel):
     user_id: str = ""
     channel: str = ""
     target: str = ""
+    workspace_path: str = ""
+    verify_command: list[str] = Field(default_factory=list)
 
 
 class CollabApproveRequest(BaseModel):
@@ -108,6 +110,13 @@ async def run_collab(body: CollabRunRequest, request: Request) -> JSONResponse:
             channel=body.channel.strip(),
             target=body.target.strip(),
             user_id=body.user_id.strip(),
+            workspace_path=body.workspace_path.strip(),
+            verify_command=body.verify_command,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            {"error": ErrorCode.VALIDATION_ERROR.value, "message": str(exc)},
+            status_code=400,
         )
     except Exception:
         logger.exception("collab run failed task=%s", task[:80])

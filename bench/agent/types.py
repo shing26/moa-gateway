@@ -87,6 +87,9 @@ class Usage:
     completion_tokens: int = 0
     cost_usd: float = 0.0
     llm_latency_ms: float = 0.0
+    #: 每次真实 LLM 请求的稳定摘要（messages + tool schemas），用于复核实验
+    #: 时确认输入上下文没有在静默变化。
+    prompt_hashes: tuple[str, ...] = ()
 
     @property
     def total_tokens(self) -> int:
@@ -96,6 +99,7 @@ class Usage:
     def add_call(self, metrics: Mapping[str, Any] | None) -> "Usage":
         """并入一次 LLM 调用的用量。``llm_calls`` 每次 +1，与 metrics 是否为空无关。"""
         values = metrics or {}
+        prompt_hash = str(values.get("prompt_hash", "") or "")
         return Usage(
             llm_calls=self.llm_calls + 1,
             prompt_tokens=self.prompt_tokens + int(values.get("prompt_tokens", 0) or 0),
@@ -104,6 +108,9 @@ class Usage:
             cost_usd=self.cost_usd + float(values.get("cost_usd", 0.0) or 0.0),
             llm_latency_ms=self.llm_latency_ms
             + float(values.get("llm_latency_ms", 0.0) or 0.0),
+            prompt_hashes=(
+                self.prompt_hashes + (prompt_hash,) if prompt_hash else self.prompt_hashes
+            ),
         )
 
     def __add__(self, other: "Usage") -> "Usage":
@@ -116,6 +123,7 @@ class Usage:
             completion_tokens=self.completion_tokens + other.completion_tokens,
             cost_usd=self.cost_usd + other.cost_usd,
             llm_latency_ms=self.llm_latency_ms + other.llm_latency_ms,
+            prompt_hashes=self.prompt_hashes + other.prompt_hashes,
         )
 
 

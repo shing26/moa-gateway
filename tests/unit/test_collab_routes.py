@@ -98,6 +98,27 @@ def test_run_returns_the_full_result_shape(monkeypatch) -> None:
     assert fake.ran[0]["channel"] == "web"
 
 
+def test_run_passes_explicit_workspace_configuration(monkeypatch) -> None:
+    from app.config import settings
+
+    fake = _FakeOrchestrator()
+    monkeypatch.setattr(settings, "collab_enabled", True, raising=False)
+    monkeypatch.setattr(collab_route, "_orchestrator", fake)
+    with app_client(app) as client:
+        res = client.post(
+            "/api/v1/collab",
+            json={
+                "task": "读取项目并验证",
+                "workspace_path": "D:/HermesData/moa-gateway",
+                "verify_command": ["python", "-m", "pytest", "-q"],
+            },
+        )
+
+    assert res.status_code == 200
+    assert fake.ran[0]["workspace_path"] == "D:/HermesData/moa-gateway"
+    assert fake.ran[0]["verify_command"] == ["python", "-m", "pytest", "-q"]
+
+
 def test_pending_lookup_404_for_unknown_trace(monkeypatch) -> None:
     from app.config import settings
 

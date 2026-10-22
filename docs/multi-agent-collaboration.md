@@ -7,7 +7,7 @@
 
 R6（多级 supervisor）从立项起一直被冻结。ADR-022 把它解冻，形态收敛成一件事：
 
-**Supervisor 拆任务 → 按子任务 handoff 给专家并发执行 → Critic 反思 → 有界重跑 → 汇总过同一条守卫链。**
+**Supervisor 拆任务 → 按依赖波次 handoff 给专家并发执行 → Critic 反思 → 有界重跑 → 汇总过同一条守卫链。**
 
 专家不是新写的 Agent，就是 `AGENT_REGISTRY` 里已有的 `coder` / `general` / `review`。
 协作链路提供的是 FSM 管道**没有的能力**：分工与反思。治理原语则一条没新写——
@@ -16,7 +16,7 @@ R6（多级 supervisor）从立项起一直被冻结。ADR-022 把它解冻，�
 
 差异化不在"我们有多 Agent"，而在**多 Agent 仍然在治理之下**：每个专家的输出要过
 评估器，整份协作结果要过 guard 三级合并，命中 REVIEW 就进人工审批，Critic 打回
-只重跑被打回的子任务，轮次耗尽也不把没通过的输出说成成功。
+重跑被打回的子任务及其下游，轮次耗尽也不把没通过的输出说成成功。
 
 ## 图结构
 
@@ -24,12 +24,14 @@ R6（多级 supervisor）从立项起一直被冻结。ADR-022 把它解冻，�
 flowchart TD
     START([START]) --> plan[plan<br/>Supervisor 拆任务]
     plan --> dispatch[dispatch<br/>决定本轮派谁]
-    dispatch -->|Send 按子任务 fan-out| ex1[execute_expert 子任务0]
+    dispatch -->|Send 只派依赖已完成的 ready 子任务| ex1[execute_expert 子任务0]
     dispatch -->|Send| ex2[execute_expert 子任务1]
     dispatch -->|Send| ex3[execute_expert 子任务N]
-    ex1 --> critic[critic<br/>结构化裁决]
-    ex2 --> critic
-    ex3 --> critic
+    ex1 --> dispatch
+    ex2 --> dispatch
+    ex3 --> dispatch
+    dispatch -->|没有未完成子任务| critic[critic<br/>结构化裁决]
+    dispatch -->|存在未完成项但无 ready 项| failed([failed<br/>循环依赖])
     critic -->|revise<br/>round+1 有界| dispatch
     critic -->|approve| summarize[summarize<br/>汇总专家输出]
     critic -->|子任务重试耗尽| hitl[prepare_hitl]
@@ -52,14 +54,18 @@ flowchart TD
 三个值得单独说的点：
 
 * **handoff 是 `Send`，不是节点里的函数调用。** `dispatch` 只决定派谁，具体派发由
-   条件边返回 `[Send("execute_expert", {...}) for st in pending]` 完成。多个
-   `execute_expert` 在同一 superstep 并发执行，各自的写入靠 reducer 合并
+   条件边返回 `[Send("execute_expert", {...}) for st in ready]` 完成。同一依赖层的
+   多个 `execute_expert` 在同一 superstep 并发执行，各自的写入靠 reducer 合并
    （`outputs` 按子任务序号覆盖、成本与工具计数累加、`node_path` 追加）。
-   `Send` 的第二个参数是该节点的**完整输入**，所以 trace/session/round 必须一起带过去。
+   每个 worker 完成后回到 `dispatch`，只在前置产物已写入 checkpoint 后派下一层。
+   `Send` 的第二个参数是该节点的**完整输入**，所以 trace/session/round、工作区配置
+   和 `collab_dependency_outputs` 必须一起带过去。
 * **反思回边是有界的。** `COLLAB_MAX_ROUNDS`（默认 2）限制执行轮数，
    `COLLAB_MAX_SUBTASKS`（默认 4）限制子任务数。到上限仍不通过时
    `critique_unresolved=True`：照常交付，但文本前置「critic 未通过」标注，
    并把 `need_human_review` 置真——HITL 开着则直接转人工。
+* **打回会失效目标及其全部下游。** Critic 点名的子任务和所有传递依赖它的下游
+   都会把 `required_round` 推进到新轮次；无关兄弟分支保留旧产物，不跟着全链重跑。
 * **HITL 拆成两个节点。** `interrupt()` 被中断的节点在 resume 时会从第一行重放，
   所以"记下挂起原因"（`prepare_hitl`）和"等人"（`await_human`）必须分开，
   否则每次 resume 都会重写一遍，`pending_review` 也永远落不进 checkpoint。
@@ -106,6 +112,9 @@ uv run python -m app.cli collab "..."
 
 # 活体：规划与评审换成已配置的 LLM，专家是 registry 里的真 Agent（会花钱）
 uv run python scripts/run_collaboration.py --live "..."
+
+# 可重复的本地真模型 smoke（Ollama qwen2.5:3b）
+COLLAB_LIVE_SMOKE=1 uv run pytest tests/live/test_collaboration_live_smoke.py -q -s
 ```
 
 HTTP（需鉴权，`/api/` 前缀本来就在受保护侧）：
@@ -113,6 +122,12 @@ HTTP（需鉴权，`/api/` 前缀本来就在受保护侧）：
 ```bash
 curl -X POST localhost:8000/api/v1/collab -H 'X-Gateway-Token: $TOKEN' \
      -d '{"task":"...","session_id":"web:demo"}'
+
+# 显式给专家一个工作区与固定验证命令（路径必须落在 COLLAB_WORKSPACE_ROOT 内）
+curl -X POST localhost:8000/api/v1/collab -H 'X-Gateway-Token: $TOKEN' \
+     -H 'Content-Type: application/json' \
+     -d '{"task":"读取项目并运行验证","workspace_path":"demo-project",
+          "verify_command":["python","-m","pytest","-q"]}'
 
 curl localhost:8000/api/v1/collab/pending/<trace_id> -H 'X-Gateway-Token: $TOKEN'
 curl -X POST localhost:8000/api/v1/collab/approve -H 'X-Gateway-Token: $TOKEN' \
@@ -122,6 +137,25 @@ curl -X POST localhost:8000/api/v1/collab/approve -H 'X-Gateway-Token: $TOKEN' \
 `COLLAB_ENABLED=0`（默认）时三个端点返回 503，`scripts/run_collaboration.py`
 的 mock 模式与 CLI **不受该开关影响**——它们是开发期工具，不是运行时入口。
 
+## 可验证实验台入口
+
+协作链路本身回答“它怎么执行”；实验台回答“这次执行留下了什么证据、能否受控复跑”。
+两者共用同一张协作图，但实验台通过 `CollaborationExperimentAdapter` 把结果映射为
+`Experiment → Trial → Run Record`：
+
+```powershell
+$verify = @("python", "-m", "pytest", "-q") | ConvertTo-Json -Compress
+.\.venv\Scripts\python.exe bench/run_experiment.py collab `
+  --task "读取 README.md 并总结" `
+  --mode mock `
+  --workspace . `
+  --verify-command-json $verify `
+  --out .bench-experiments/collab-check
+```
+
+完整 CLI、Run Record schema、受控复跑与适配器边界见
+[multi-agent-experiment-bench.md](multi-agent-experiment-bench.md)。
+
 ## 配置
 
 | 变量 | 默认 | 说明 |
@@ -130,6 +164,7 @@ curl -X POST localhost:8000/api/v1/collab/approve -H 'X-Gateway-Token: $TOKEN' \
 | `COLLAB_LLM` | `mock` | `mock` = 规则式离线；`litellm` = 用已配置的 LLM |
 | `COLLAB_MAX_ROUNDS` | `2` | 执行轮数上限，到上限仍不通过则标记未决 |
 | `COLLAB_MAX_SUBTASKS` | `4` | 单次协作的子任务数上限 |
+| `COLLAB_WORKSPACE_ROOT` | 空 | 工作区工具的宿主边界；空值拒绝任何 `workspace_path` |
 
 ## 离线确定性
 
@@ -158,15 +193,14 @@ approve，"Critic 打回"这条链路就永远看不见；它的评审台词是�
 
 这些是**没做**，不是忘了：
 
-* **`depends_on` 只记录不调度。** Supervisor 产出依赖边并原样进入审计，但当前图把
-  所有 pending 子任务一次性 fan-out，不按拓扑排序。要支持"B 等 A"需要引入分层
-  调度，那是独立议题。
 * **协作不进意图路由。** 本轮刻意不碰 `INTENT_AGENT_MAP` / `_AGENT_KEYS` 自检与
   路由测试面。它是显式入口，不是请求主路径的一站。
 * **checkpointer 是 `InMemorySaver`。** 可注入（`CollabOrchestrator(checkpointer=...)`），
   接 Redis/Postgres 是部署期决策，未写。
 * **专家池固定为三人。** 新增专家要同时改 `EXPERT_KEYS` 与 `AGENT_REGISTRY`，
   协作链路自己不含 Agent 实现。
+* **并发写没有文件级仲裁。** 同一依赖层的两个专家都能拿到 `write_file`；若它们写同一路径，
+  后写覆盖先写。当前实验台要求任务规划避免这种冲突，merge/锁不在本轮。
 * **没有 task-LLM 降级转换。** 协作不走 ReAct 那条降级路径（专家池里没有 `task`），
   所以 `_task_degradation_issues` 在这个图里没有输入可用。
 

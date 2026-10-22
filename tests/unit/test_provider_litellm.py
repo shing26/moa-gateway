@@ -118,6 +118,54 @@ async def test_cost_is_recorded_from_response(monkeypatch: pytest.MonkeyPatch) -
     assert client.last_metrics["llm_latency_ms"] >= 0
 
 
+@pytest.mark.asyncio
+async def test_usage_totals_accumulate_across_calls_and_can_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_acompletion = AsyncMock(return_value=_make_response())
+    _patch_litellm(monkeypatch, mock_acompletion, cost=0.012345)
+    client = LLMClient(LLMConfig(model="gpt-4o-mini"))
+
+    await client.chat([{"role": "user", "content": "one"}])
+    await client.chat([{"role": "user", "content": "two"}])
+
+    assert client.usage_totals["llm_calls"] == 2
+    assert client.usage_totals["prompt_tokens"] == 20
+    assert client.usage_totals["completion_tokens"] == 10
+    assert client.usage_totals["cost_usd"] == pytest.approx(0.02469)
+    assert len(client.usage_totals["prompt_hashes"]) == 2
+    assert client.usage_totals["prompt_hashes"][0] != client.usage_totals["prompt_hashes"][1]
+
+    client.reset_usage()
+    assert client.usage_totals["llm_calls"] == 0
+    assert client.usage_totals["prompt_tokens"] == 0
+    assert client.usage_totals["prompt_hashes"] == []
+
+
+@pytest.mark.asyncio
+async def test_prompt_hash_tracks_messages_and_tool_schemas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_acompletion = AsyncMock(return_value=_make_response())
+    _patch_litellm(monkeypatch, mock_acompletion)
+    client = LLMClient(LLMConfig(model="model-a"))
+    tools = [{"type": "function", "function": {"name": "read_file"}}]
+
+    await client.chat([{"role": "user", "content": "one"}])
+    first = client.last_metrics["prompt_hash"]
+    await client.chat([{"role": "user", "content": "two"}])
+    second = client.last_metrics["prompt_hash"]
+    await client.chat_with_tools(
+        [{"role": "user", "content": "two"}],
+        tools,
+    )
+    with_tools = client.last_metrics["prompt_hash"]
+
+    assert first != second
+    assert second != with_tools
+    assert client.usage_totals["prompt_hashes"] == [first, second, with_tools]
+
+
 def test_from_env_tolerates_empty_values(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_MAX_TOKENS", "")
     monkeypatch.setenv("LLM_TIMEOUT", "")

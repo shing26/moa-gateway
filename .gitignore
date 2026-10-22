@@ -23,6 +23,7 @@ cloudflared.exe
 .zcode/
 # bench 实验台的工作区与 RunResult 落盘目录（手动跑 bench/run_task.py 时产生）
 .bench-work/
+.bench-experiments/
 __pycache__/
 
 logs/

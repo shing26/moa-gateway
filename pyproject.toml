@@ -39,6 +39,7 @@ pythonpath = ["."]
 markers = [
   "postgres: 需要真实 PostgreSQL 的集成用例（compose 起 postgres；连不上则 skip）",
   "redis: 需要真实 Redis 的集成用例（compose 起 redis；连不上则 skip）",
+  "live: 需要真实模型的显式手工 smoke；默认 CI 不设置运行开关",
 ]
 
 [tool.ruff]
