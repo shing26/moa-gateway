@@ -66,7 +66,7 @@
 
 ### M2：统一批量入口
 
-状态：待完成
+状态：已完成
 
 交付：
 
@@ -83,6 +83,14 @@
 - 中止后再次运行只执行缺失单元；
 - 重复执行同一批次不会覆盖已有 Run Record；
 - 旧 `run_curve` 能力由新入口覆盖或被明确标记为兼容层。
+
+落地物：
+
+- `bench/experiment/batch.py`
+- `bench/run_batch.py`
+- `tests/unit/test_experiment_batch.py`
+- Experiment 缺失 Trial 恢复与批次级统一报告
+- `run_curve.py` 明确标记为兼容分析入口
 
 ### M3：工作区写隔离
 

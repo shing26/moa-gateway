@@ -58,6 +58,38 @@ Experiment 时，哈希进入配置身份，因此不会静默覆盖旧实验结
 
 ## CLI
 
+权威批量入口是 `bench/run_batch.py`。默认 mock 模式不访问网络，只验证矩阵展开、
+Experiment/Trial 落盘、完成跳过、中断恢复和报告：
+
+```powershell
+.\.venv\Scripts\python.exe bench/run_batch.py batch `
+  --phase pilot `
+  --tasks 0896629 60c64ed `
+  --arms L0 L1 L2 L3 `
+  --mode mock `
+  --batch-id pilot-mock `
+  --out .bench-experiments
+```
+
+批次产物：
+
+```text
+.bench-experiments/
+├── <experiment-id>/
+│   ├── experiment.json
+│   └── trials/trial-*.json
+└── _batches/<batch-id>/
+    ├── batch.json
+    ├── report.json
+    └── report.md
+```
+
+`batch.json` 固定协议哈希与预期矩阵，记录每个单元的 `experiment_id`、完成状态、
+Trial 数和 `resume_cursor`。重复执行同一 `batch-id` 时，已完成且有完整证据的单元
+直接跳过；被中断的 Experiment 从缺失 Trial 继续；已有 Run Record 永不覆盖。
+
+单一 Experiment 入口仍可直接使用：
+
 离线 mock 闭环：
 
 ```powershell
@@ -96,6 +128,9 @@ bench L0-L3 适配器：
   --trials 1 `
   --out .bench-experiments/bench-check
 ```
+
+`bench/run_curve.py` 仅保留为旧 RunResult 曲线与 B3 规划的兼容分析入口，不再承担
+协议矩阵的权威执行职责。
 
 ## Run Record
 

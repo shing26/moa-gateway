@@ -1,4 +1,8 @@
-"""一条命令跑完一整轮剂量曲线：B1 主实验 → B3 放宽复跑 → 聚合报告（票 09）。
+"""兼容分析入口：旧 B1/B3 剂量曲线仍可复现，但不再是协议矩阵的权威执行入口。
+
+新的可恢复批次从 ``bench/run_batch.py`` 进入；本入口保留给既有 RunResult 曲线、
+B3 规划逻辑和历史报告复算。它绕过新的 Experiment/Run Record 批次清单，因此不得
+用新批次的口径解释它的输出。
 
     .venv\\Scripts\\python.exe bench\\run_curve.py --tasks 988fccb a746b81 --repeats 3
 

@@ -485,6 +485,7 @@ def build_report(
     *,
     tier: BudgetTier = B1_TIER,
     tasks: Iterable[str] | None = None,
+    arms: Iterable[str] | None = None,
 ) -> DoseReport:
     """把一批 run 聚成 ``tier`` 档的剂量曲线报告。
 
@@ -495,16 +496,24 @@ def build_report(
     selected = [row for row in all_rows if row.budget_tier == tier]
 
     present_arms = {row.arm for row in selected}
-    # 规范档位即使一个 run 都没有也要出现在表里——缺了就是缺口，不是"这档不存在"。
-    arms = tuple(sorted(present_arms | set(ARM_ORDER), key=_arm_rank))
+    if arms is None:
+        # 完整曲线里，规范档位即使一个 run 都没有也要出现。
+        wanted_arms = present_arms | set(ARM_ORDER)
+    else:
+        wanted_arms = set(arms)
+    arm_columns = tuple(sorted(wanted_arms, key=_arm_rank))
     if tasks is not None:
         wanted = sorted({str(task) for task in tasks})
     else:
         wanted = sorted({row.task_id for row in selected})
     task_ids = tuple(wanted)
 
-    cells = tuple(_cell(selected, task_id, arm) for task_id in task_ids for arm in arms)
-    columns = tuple(_column(selected, arm) for arm in arms)
+    cells = tuple(
+        _cell(selected, task_id, arm)
+        for task_id in task_ids
+        for arm in arm_columns
+    )
+    columns = tuple(_column(selected, arm) for arm in arm_columns)
     marginals = tuple(
         MarginalStep(
             arm=columns[index].arm,
@@ -523,7 +532,7 @@ def build_report(
     )
     return DoseReport(
         tier=tier,
-        arms=arms,
+        arms=arm_columns,
         tasks=task_ids,
         cells=cells,
         columns=columns,

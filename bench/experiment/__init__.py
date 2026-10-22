@@ -24,9 +24,26 @@ from bench.experiment.types import (
     compare_run_records,
     fingerprint_workspace,
 )
+from bench.experiment.batch import (
+    BATCH_SCHEMA_VERSION,
+    BatchCell,
+    BatchManifest,
+    BatchOutcome,
+    BatchReport,
+    BatchRunner,
+    BatchStore,
+    build_batch_report,
+)
 
 __all__ = [
+    "BATCH_SCHEMA_VERSION",
     "BenchExperimentAdapter",
+    "BatchCell",
+    "BatchManifest",
+    "BatchOutcome",
+    "BatchReport",
+    "BatchRunner",
+    "BatchStore",
     "CollaborationExperimentAdapter",
     "DEFAULT_PROTOCOL_PATH",
     "ExperimentManifest",
@@ -40,6 +57,7 @@ __all__ = [
     "TrialEvidence",
     "TrialExecutor",
     "WorkspaceSnapshot",
+    "build_batch_report",
     "compare_run_records",
     "fingerprint_workspace",
     "load_protocol",

@@ -83,8 +83,100 @@ class ExperimentRunner:
             spec=spec,
         )
         self._store.write_manifest(manifest)
+        return await self._execute_pending(spec, executor, manifest)
 
-        for trial_index in range(spec.trials):
+    async def resume(
+        self, spec: ExperimentSpec, executor: TrialExecutor
+    ) -> ExperimentOutcome:
+        """从已落盘的 Experiment 继续缺失 Trial；绝不覆盖已有 Run Record。"""
+        if not spec.experiment_id:
+            raise ValueError("resume 需要显式 experiment_id")
+        manifest_path = self._store.manifest_path(spec.experiment_id)
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Experiment manifest 不存在: {manifest_path}")
+        manifest = self._store.load_manifest(spec.experiment_id)
+        if manifest.config_hash != spec.config_hash:
+            raise ValueError(
+                "Experiment 配置与已有 manifest 不一致，拒绝恢复: "
+                f"{manifest.config_hash} != {spec.config_hash}"
+            )
+        if manifest.spec.trials != spec.trials:
+            raise ValueError(
+                "Experiment Trial 数与已有 manifest 不一致，拒绝恢复: "
+                f"{manifest.spec.trials} != {spec.trials}"
+            )
+        records = list(self._store.load_experiment_records(spec.experiment_id))
+        for index, record in enumerate(records):
+            if record.trial_index != index:
+                raise ValueError(
+                    f"Run Record Trial 序号不连续: 位置 {index} 是 {record.trial_index}"
+                )
+            if record.config_hash != spec.config_hash:
+                raise ValueError(
+                    f"Run Record 配置哈希不一致，拒绝恢复: {record.trial_id}"
+                )
+
+        # 进程可能在 Run Record 已落盘、Experiment manifest 尚未更新时中断。
+        # 只恢复连续尾部，不跨过缺口猜哪条记录算完成。
+        next_index = len(records)
+        while next_index < spec.trials:
+            path = self._store.trial_path(spec.experiment_id, next_index)
+            if not path.exists():
+                break
+            record = self._store.load_record(path)
+            if record.trial_index != next_index:
+                raise ValueError(f"Run Record Trial 序号不连续: {path}")
+            if record.config_hash != spec.config_hash:
+                raise ValueError(f"Run Record 配置哈希不一致，拒绝恢复: {path}")
+            records.append(record)
+            next_index += 1
+
+        status_counts: Counter[str] = Counter(record.status for record in records)
+        manifest = replace(
+            manifest,
+            updated_at=_now(),
+            trial_count=len(records),
+            status_counts=dict(sorted(status_counts.items())),
+            trial_ids=tuple(item.trial_id for item in records),
+            trial_paths=tuple(
+                item.path.relative_to(
+                    self._store.experiment_dir(spec.experiment_id)
+                ).as_posix()
+                for item in records
+                if item.path is not None
+            ),
+        )
+        self._store.write_manifest(manifest)
+        return await self._execute_pending(spec, executor, manifest)
+
+    async def run_or_resume(
+        self, spec: ExperimentSpec, executor: TrialExecutor
+    ) -> ExperimentOutcome:
+        if spec.experiment_id and self._store.manifest_path(spec.experiment_id).exists():
+            return await self.resume(spec, executor)
+        return await self.run(spec, executor)
+
+    async def _execute_pending(
+        self,
+        spec: ExperimentSpec,
+        executor: TrialExecutor,
+        manifest: ExperimentManifest,
+    ) -> ExperimentOutcome:
+        records = list(
+            self._store.load_experiment_records(spec.experiment_id)
+            if manifest.trial_count
+            else ()
+        )
+        status_counts: Counter[str] = Counter(record.status for record in records)
+        trial_paths = [
+            record.path.relative_to(
+                self._store.experiment_dir(spec.experiment_id)
+            ).as_posix()
+            for record in records
+            if record.path is not None
+        ]
+
+        for trial_index in range(manifest.trial_count, spec.trials):
             started = time.monotonic()
             try:
                 evidence = await executor.execute(spec, trial_index)
@@ -99,10 +191,10 @@ class ExperimentRunner:
             if not evidence.status:
                 evidence = replace(evidence, status="error", error="Trial 未返回状态")
 
-            trial_id = f"{experiment_id}-trial-{trial_index:03d}"
+            trial_id = f"{spec.experiment_id}-trial-{trial_index:03d}"
             record = RunRecord(
                 schema_version=SCHEMA_VERSION,
-                experiment_id=experiment_id,
+                experiment_id=spec.experiment_id,
                 trial_id=trial_id,
                 trial_index=trial_index,
                 created_at=_now(),
@@ -132,7 +224,11 @@ class ExperimentRunner:
             record = replace(record, path=path)
             records.append(record)
             status_counts[record.status] += 1
-            trial_paths.append(path.relative_to(self._store.experiment_dir(experiment_id)).as_posix())
+            trial_paths.append(
+                path.relative_to(
+                    self._store.experiment_dir(spec.experiment_id)
+                ).as_posix()
+            )
 
             manifest = replace(
                 manifest,
@@ -144,6 +240,7 @@ class ExperimentRunner:
             )
             self._store.write_manifest(manifest)
 
+        manifest_path = self._store.manifest_path(spec.experiment_id)
         manifest = replace(manifest, path=manifest_path)
         return ExperimentOutcome(
             manifest=manifest,

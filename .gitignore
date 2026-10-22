@@ -24,6 +24,7 @@ cloudflared.exe
 # bench 实验台的工作区与 RunResult 落盘目录（手动跑 bench/run_task.py 时产生）
 .bench-work/
 .bench-experiments/
+.scratch/m2-batch-proof/
 __pycache__/
 
 logs/
