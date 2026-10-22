@@ -58,6 +58,10 @@ class _ScriptLLM:
             "completion_tokens": 5,
         }
         turn = self._script(messages)
+        if isinstance(turn, ChatResult):
+            if turn.finish_reason == "length":
+                self.last_metrics["completion_tokens"] = 1024
+            return turn
         if turn.tool:
             call = {
                 "id": f"call-{len(self.seen)}",
@@ -110,6 +114,65 @@ def _critic_json(approved: bool, instructions: str = "") -> str:
     if not approved:
         payload["instructions"] = instructions
     return "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
+
+
+@pytest.mark.asyncio
+async def test_planner_retries_after_a_truncated_first_output(
+    tmp_path: Path,
+) -> None:
+    tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
+    worker = _Worker(["完成"])
+    planner_calls = {"count": 0}
+
+    def script(messages: list[dict[str, Any]]) -> Any:
+        route = _route(messages)
+        if route == "planner":
+            planner_calls["count"] += 1
+            if planner_calls["count"] == 1:
+                return ChatResult(
+                    messages=[*messages],
+                    content="",
+                    tool_calls=[],
+                    finish_reason="length",
+                    reasoning_chars=3620,
+                )
+            return ScriptedTurn(final=_plan_json("一步"))
+        if route == "critic":
+            return ScriptedTurn(final=_critic_json(True))
+        return worker.turn(messages)
+
+    agent = build_l2(llm=_ScriptLLM(script), workspace=tmp_path, tools=tools)
+    run = await agent.run(workspace=tmp_path, goal="让验证通过", budget=Budget(5.0, 30))
+
+    assert run.status == "completed"
+    assert planner_calls["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_exhausted_planner_attempts_keep_truncation_evidence(
+    tmp_path: Path,
+) -> None:
+    tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
+    planner_calls = {"count": 0}
+
+    def script(messages: list[dict[str, Any]]) -> ChatResult:
+        planner_calls["count"] += 1
+        return ChatResult(
+            messages=[*messages],
+            content="",
+            tool_calls=[],
+            finish_reason="length",
+            reasoning_chars=3620,
+        )
+
+    agent = build_l2(llm=_ScriptLLM(script), workspace=tmp_path, tools=tools)
+    run = await agent.run(workspace=tmp_path, goal="让验证通过", budget=Budget(5.0, 30))
+
+    assert run.status == "error"
+    assert planner_calls["count"] == 3
+    assert "finish_reason=length" in run.error
+    assert "completion_tokens=1024" in run.error
+    assert "reasoning_chars=3620" in run.error
 
 
 class _Worker:
@@ -226,6 +289,10 @@ async def test_next_subtask_sees_the_previous_result(tmp_path: Path) -> None:
     run = await agent.run(workspace=tmp_path, goal="让验证通过", budget=Budget(5.0, 30))
 
     assert run.status == "completed"
+    assert [item["instruction"] for item in run.plan] == [
+        "产出 ALPHA",
+        "在 ALPHA 之上产出 BETA",
+    ]
     second = next(prompt for prompt in worker.prompts if "你负责的子任务 1：" in prompt)
     assert "前面子任务已经产出的结果" in second
     # 第一条子任务的产出被明文带进了第二条的交接内容。

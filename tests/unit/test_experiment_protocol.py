@@ -33,11 +33,12 @@ def test_default_protocol_freezes_the_first_batch() -> None:
 
     assert protocol.schema_version == PROTOCOL_SCHEMA_VERSION
     assert protocol.protocol_id == "multi-agent-first-batch"
-    assert protocol.version == "1"
+    assert protocol.version == "3"
     assert tuple((task.task_id, task.origin) for task in protocol.tasks) == EXPECTED_TASKS
     assert tuple(arm.name for arm in protocol.arms) == arm_names()
     assert protocol.model.provider == "nvidia"
-    assert protocol.model.model == "nvidia/nemotron-3-super-120b-a12b"
+    assert protocol.model.model == "nvidia/nemotron-3.5-lightning-30b-a3b"
+    assert protocol.model.max_tokens >= 4096
     assert protocol.budget.axis == "tokens"
     assert protocol.budget.b1.max_steps >= 40
     assert protocol.budget.b1.max_tokens >= 400_000
@@ -88,7 +89,7 @@ def test_protocol_hash_is_stable_and_covers_semantic_changes() -> None:
 def test_protocol_builds_cell_specs_with_hash_bound_identity() -> None:
     protocol = load_protocol()
     spec = protocol.experiment_spec("0896629", "L3", batch_id="batch-unit")
-    changed = replace(protocol, version="2").experiment_spec(
+    changed = replace(protocol, version="999").experiment_spec(
         "0896629", "L3", batch_id="batch-unit"
     )
 
@@ -135,5 +136,5 @@ def test_protocol_rejects_incomplete_or_unknown_contract_fields(
 
 
 def test_default_protocol_path_is_stable() -> None:
-    assert DEFAULT_PROTOCOL_PATH.name == "multi-agent-first-batch-v1.json"
+    assert DEFAULT_PROTOCOL_PATH.name == "multi-agent-first-batch-v3.json"
     assert DEFAULT_PROTOCOL_PATH.exists()

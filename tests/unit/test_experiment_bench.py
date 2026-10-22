@@ -286,6 +286,10 @@ async def test_bench_adapter_maps_harness_verdict_and_steps(tmp_path) -> None:
                     index=0,
                     action="call_tool",
                     tool="run_tests",
+                        arguments={
+                            "path": "tests/test_x.py",
+                            "content": "secret body " * 1000,
+                        },
                     outcome="failed",
                     observation="failed",
                 ),
@@ -298,11 +302,40 @@ async def test_bench_adapter_maps_harness_verdict_and_steps(tmp_path) -> None:
                 cost_usd=0.02,
                 llm_latency_ms=80.0,
                 prompt_hashes=("prompt-a", "prompt-b"),
+                finish_reasons=("length", "stop"),
+                reasoning_chars=1234,
             ),
             model="model-x",
             temperature=0.0,
             review_rounds=1,
             subtask_count=2,
+                plan=(
+                    {
+                        "index": 0,
+                        "instruction": "修复失败断言",
+                        "context": "失败输出指向 tests/test_x.py",
+                        "depends_on": [],
+                    },
+                ),
+            workspace_writes=(
+                {
+                    "write_id": "round-1/subtask-0",
+                    "writer": "round-1/subtask-0",
+                    "changes": [{"path": "left.txt"}],
+                },
+            ),
+            workspace_conflicts=(
+                {
+                    "path": "shared.txt",
+                    "reason": "concurrent_divergent_write",
+                },
+            ),
+            workspace_merges=(
+                {
+                    "path": "left.txt",
+                    "write_ids": ["round-1/subtask-0"],
+                },
+            ),
         ),
         outcome="pass",
         patch="diff --git a/x b/x\n",
@@ -327,3 +360,16 @@ async def test_bench_adapter_maps_harness_verdict_and_steps(tmp_path) -> None:
     assert evidence.prompt_hashes == ("prompt-a", "prompt-b")
     assert evidence.evidence["arm"] == "L3"
     assert evidence.evidence["patch_touched_tests"] is False
+    assert evidence.evidence["finish_reasons"] == ["length", "stop"]
+    assert evidence.evidence["reasoning_chars"] == 1234
+    assert evidence.plan[0]["instruction"] == "修复失败断言"
+    assert evidence.evidence["steps"][0]["tool"] == "run_tests"
+    assert evidence.evidence["steps"][0]["arguments"]["path"] == "tests/test_x.py"
+    assert "secret body" not in json.dumps(
+        evidence.evidence["steps"][0]["arguments"],
+        ensure_ascii=False,
+    )
+    assert evidence.evidence["steps"][0]["arguments"]["content"]["chars"] == 12000
+    assert evidence.evidence["workspace_writes"][0]["writer"] == "round-1/subtask-0"
+    assert evidence.evidence["workspace_conflicts"][0]["path"] == "shared.txt"
+    assert evidence.evidence["workspace_merges"][0]["path"] == "left.txt"

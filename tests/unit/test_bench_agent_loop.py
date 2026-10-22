@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,14 @@ class _AlwaysFailingLLM(ScriptedLLM):
     async def chat_with_tools(self, messages, tools, **kwargs):  # type: ignore[override]
         self._calls.append(1)
         raise RuntimeError("boom")
+
+
+class _TruncatedLLM(ScriptedLLM):
+    """输出额度耗尽：有 reasoning、有 token 账本，但最终 content 为空。"""
+
+    async def chat_with_tools(self, messages, tools, **kwargs):  # type: ignore[override]
+        result = await super().chat_with_tools(messages, tools, **kwargs)
+        return replace(result, finish_reason="length", reasoning_chars=3620)
 
 
 @pytest.mark.asyncio
@@ -86,6 +95,29 @@ async def test_llm_failure_is_error(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert "boom" in run.error
     # 重试是有限的：尝试次数就是常量本身，不是无限重试。
     assert len(llm._calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_length_finish_is_error_with_output_budget_evidence(
+    tmp_path: Path,
+) -> None:
+    tools = build_toolset(workspace=tmp_path, verify_command=FAILING_VERIFY)
+    llm = _TruncatedLLM(
+        [ScriptedTurn(final="", completion_tokens=1024)],
+        model="reasoning-model",
+    )
+
+    run = await LLMBackedAgent(llm, tools).run(
+        workspace=tmp_path,
+        goal="目标",
+        budget=Budget(1.0, 5),
+    )
+
+    assert run.status == "error"
+    assert "finish_reason=length" in run.error
+    assert "completion_tokens=1024" in run.error
+    assert "reasoning_chars=3620" in run.error
+    assert run.steps == ()
 
 
 @pytest.mark.asyncio

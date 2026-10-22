@@ -41,7 +41,7 @@ Experiment
 
 ## 实验协议
 
-首批实验由 [multi-agent-first-batch-v1.json](../bench/protocols/multi-agent-first-batch-v1.json)
+首批实验由 [multi-agent-first-batch-v3.json](../bench/protocols/multi-agent-first-batch-v3.json)
 冻结。协议是以下内容的唯一事实源：
 
 - 8 个任务及其 E1/E3 来源；
@@ -51,6 +51,17 @@ Experiment
 - pilot、baseline、formal 三阶段的重复次数；
 - 基础设施错误的有限重试、不可重试结局与 pass-rate 排除规则；
 - 只作方向性报告、不生成统计显著声明的边界。
+
+v1 曾固定 `nvidia/nemotron-3-super-120b-a12b`，但该模型在当前账号的 chat
+endpoint 返回 404；v2 改用已验证可调用且支持工具调用的
+`nvidia/nemotron-3.5-lightning-30b-a3b`。v2 试点又暴露了该推理模型的单次输出
+上限问题：`max_tokens=1024` 时 `finish_reason=length`、`content` 为空，三个
+planner attempt 的 completion token 全部耗尽在 reasoning；诊断实测 4096 时同一
+prompt 返回 `stop` 和可解析计划。因此 v3 将单次输出上限固定为 4096。v1/v2 的
+失败批次与 v3 不共享 `protocol_hash`，不会混合解释。
+
+Run Record 的 `evidence.finish_reasons` 与 `evidence.reasoning_chars` 会保留每次
+调用的停止原因和 reasoning 规模；不落思维链正文。
 
 `config_hash` 对协议身份做规范化 JSON 哈希。字段顺序不影响哈希；任务集、arm、模型、
 预算、重复次数、重试、排除或报告口径的语义变化都会产生新哈希。协议单元映射到

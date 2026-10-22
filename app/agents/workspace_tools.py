@@ -158,7 +158,15 @@ def build_toolset(
     """
     limits = limits or ToolLimits()
     root = workspace.resolve()
-    registry = ToolRegistry()
+    def bind_workspace(target: Path) -> ToolRegistry:
+        return build_toolset(
+            workspace=target,
+            verify_command=verify_command,
+            limits=limits,
+            names=names,
+        )
+
+    registry = ToolRegistry(bind_workspace)
     allowed = set(names) if names is not None else None
 
     def register(tool: AgentTool) -> None:

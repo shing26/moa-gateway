@@ -22,6 +22,8 @@
    合并或强制覆盖。
 6. 冲突作为 `workspace_conflicts` 进入 Run Record；合并结果作为 `workspace_merges`
    落盘。失败的专家写集保留为 `accepted=false` 证据，但不参与合并。
+7. bench L3 使用同一写隔离原语，并先按 `depends_on` 计算 ready 波次；只有上一波
+   完成并合并后才为下一波创建副本，避免后继 worker 读到旧基线。
 
 ## 替代方案
 

@@ -19,7 +19,7 @@ PROTOCOL_SCHEMA_VERSION = 1
 DEFAULT_PROTOCOL_PATH = (
     Path(__file__).resolve().parents[1]
     / "protocols"
-    / "multi-agent-first-batch-v1.json"
+    / "multi-agent-first-batch-v3.json"
 )
 
 Phase = Literal["pilot", "baseline", "formal"]

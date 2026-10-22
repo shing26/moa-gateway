@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import asdict
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,32 @@ def _usage_metrics(usage: dict[str, Any] | None) -> RunMetrics:
         cost_usd=float(data.get("cost_usd", 0.0) or 0.0),
         llm_latency_ms=float(data.get("llm_latency_ms", 0.0) or 0.0),
     )
+
+
+def _argument_evidence(arguments: dict[str, Any]) -> dict[str, Any]:
+    """保留可复核参数形状，但不把整份写入正文塞进 Run Record。"""
+    result: dict[str, Any] = {}
+    for key, value in arguments.items():
+        if isinstance(value, str) and (
+            key == "content" or len(value) > _EVIDENCE_TEXT_LIMIT
+        ):
+            result[key] = {
+                "chars": len(value),
+                "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+                "truncated": True,
+            }
+        elif isinstance(value, str):
+            result[key] = value[:_EVIDENCE_TEXT_LIMIT]
+        else:
+            result[key] = value
+    return result
+
+
+def _step_evidence(step: Any) -> dict[str, Any]:
+    payload = asdict(step)
+    payload["arguments"] = _argument_evidence(dict(step.arguments))
+    payload["observation"] = str(step.observation or "")[:_EVIDENCE_TEXT_LIMIT]
+    return payload
 
 
 class CollaborationExperimentAdapter:
@@ -133,6 +160,7 @@ class BenchExperimentAdapter:
         )
         return TrialEvidence(
             status=str(result.outcome),
+            plan=tuple(dict(item) for item in agent_run.plan),
             node_path=tuple(
                 f"step:{step.index}:{step.tool or step.action}"
                 for step in agent_run.steps
@@ -168,6 +196,31 @@ class BenchExperimentAdapter:
                 "patch_hash": hashlib.sha256(patch.encode("utf-8")).hexdigest(),
                 "review_rounds": int(agent_run.review_rounds),
                 "subtask_count": int(agent_run.subtask_count),
+                "finish_reasons": list(
+                    getattr(usage, "finish_reasons", ()) or ()
+                ),
+                "reasoning_chars": int(
+                    getattr(usage, "reasoning_chars", 0) or 0
+                ),
+                "workspace_writes": [
+                    dict(item)
+                    for item in (
+                        getattr(agent_run, "workspace_writes", ()) or ()
+                    )
+                ],
+                "workspace_conflicts": [
+                    dict(item)
+                    for item in (
+                        getattr(agent_run, "workspace_conflicts", ()) or ()
+                    )
+                ],
+                "workspace_merges": [
+                    dict(item)
+                    for item in (
+                        getattr(agent_run, "workspace_merges", ()) or ()
+                    )
+                ],
+                "steps": [_step_evidence(step) for step in agent_run.steps],
             },
             workspace=workspace,
             error=str(agent_run.error),

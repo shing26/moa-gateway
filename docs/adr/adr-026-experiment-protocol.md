@@ -22,6 +22,9 @@ ADR-025 固定了 `Experiment → Trial → Run Record`，但没有固定“哪�
 5. 只有 `error` 可做有限基础设施重试；`fail` 与 `budget_exhausted` 是实验结果，
    不能靠重试抹掉。重试后仍为 `error` 的记录保留可见，但不进入 pass-rate 分母。
 6. 在 formal 阶段每个非缺格达到 3 个有效样本前，只输出方向性观察；协议不授权统计显著声明。
+7. 推理模型的单次输出上限属于实验语义。v2 在 `max_tokens=1024` 下实测
+   `finish_reason=length`、最终 `content` 为空；v3 固定为 4096，并新建协议身份，
+   不回写 v2 结果。
 
 ## 替代方案
 

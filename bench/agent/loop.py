@@ -130,6 +130,10 @@ class LoopSession:
         self.served_calls = 0
         #: 最后一次调用模型说的那句收工话——``finish`` 步的观察。
         self.finish_content = ""
+        #: 最后一次调用的 provider 停止原因与 reasoning 长度。它们不能只留在
+        #: ``last_metrics`` 里：下一次调用会覆盖，复盘空输出时就没有边界证据了。
+        self.finish_reason = ""
+        self.reasoning_chars = 0
         #: 最近一次 ``error`` 的原文。
         self.error = ""
         self._last_index = 0
@@ -209,7 +213,20 @@ class LoopSession:
 
             # ① 终局：模型不再要求调工具。**先于预算判定**，理由见模块 docstring。
             if not result.tool_calls:
+                self.finish_reason = str(getattr(result, "finish_reason", "") or "")
+                self.reasoning_chars = int(
+                    getattr(result, "reasoning_chars", 0) or 0
+                )
                 self.finish_content = str(result.content or "")
+                if self.finish_reason == "length":
+                    self.error = (
+                        "LLM 输出被单次 completion 上限截断: "
+                        f"finish_reason={self.finish_reason}, "
+                        f"completion_tokens={int((metrics or {}).get('completion_tokens', 0) or 0)}, "
+                        f"reasoning_chars={self.reasoning_chars}, "
+                        f"content_chars={len(self.finish_content)}"
+                    )
+                    return "error"
                 # 把模型这句"我为什么停"也留进历史：续跑（L1 的回边）时后一段必须
                 # 看得见前一段说了什么，否则 Critic 的指令进来时上下文是断的。
                 self._messages = [

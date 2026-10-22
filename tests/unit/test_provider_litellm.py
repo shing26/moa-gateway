@@ -65,6 +65,33 @@ async def test_chat_with_tools_forwards_tools(monkeypatch: pytest.MonkeyPatch) -
 
 
 @pytest.mark.asyncio
+async def test_chat_with_tools_preserves_finish_reason_and_reasoning_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = SimpleNamespace(
+        content="",
+        tool_calls=None,
+        reasoning_content="1234567890",
+    )
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason="length")],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=1024),
+    )
+    mock_acompletion = AsyncMock(return_value=response)
+    _patch_litellm(monkeypatch, mock_acompletion)
+    client = LLMClient(LLMConfig(model="model-a"))
+
+    result = await client.chat_with_tools(
+        [{"role": "user", "content": "plan"}], []
+    )
+
+    assert result.finish_reason == "length"
+    assert result.reasoning_chars == 10
+    assert client.last_metrics["finish_reason"] == "length"
+    assert client.last_metrics["reasoning_chars"] == 10
+
+
+@pytest.mark.asyncio
 async def test_fallback_model_is_used_after_primary_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     mock_acompletion = AsyncMock(
         side_effect=[Exception("primary down"), _make_response(content="fallback ok")]

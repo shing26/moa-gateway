@@ -59,7 +59,9 @@
 
 落地物：
 
-- `bench/protocols/multi-agent-first-batch-v1.json`
+- `bench/protocols/multi-agent-first-batch-v1.json`（历史）
+- `bench/protocols/multi-agent-first-batch-v2.json`（历史：1024 输出上限）
+- `bench/protocols/multi-agent-first-batch-v3.json`（当前：4096 输出上限）
 - `bench/experiment/protocol.py`
 - `tests/unit/test_experiment_protocol.py`
 - ADR-026
@@ -115,13 +117,14 @@
 - `app/orchestration/workspace_isolation.py`
 - `tests/unit/test_workspace_isolation.py`
 - 协作 L3 并行写同文件/不同文件回归用例
+- bench L3 依赖波次、独立副本、同路径冲突与不同路径合并回归用例
 - Run Record evidence 增加 `workspace_writes`、`workspace_conflicts` 与
   `workspace_merges`
 - ADR-027
 
 ### M4：工程试点
 
-状态：待完成
+状态：已完成
 
 交付：
 
@@ -134,6 +137,15 @@
 - 8 runs 全部能映射到 Run Record；
 - `error` 与 `fail` / `budget_exhausted` 分开；
 - 任一 run 可从记录追回模型、prompt、工具轨迹和判决。
+
+落地物：
+
+- `m4-pilot-live-r4`：8 / 8 单元完成，0 缺口；
+- 4 个 L2/L3 Run Record 均含实际计划，L3 另含工作区写集与合并证据；
+- `docs/multi-agent-pilot-report.md`
+
+说明：`m4-pilot-live-r3` 因 L2/L3 未记录实际计划和步骤轨迹而作废，由 r4 取代，
+不作为能力证据。
 
 ### M5：单次全量基线
 

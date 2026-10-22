@@ -181,7 +181,7 @@ async def test_existing_batch_rejects_a_different_protocol_hash(tmp_path) -> Non
         executor_factory=lambda spec: executor,
     )
 
-    changed = replace(protocol, version="2")
+    changed = replace(protocol, version="999")
     changed_runner = BatchRunner(ExperimentStore(tmp_path / "experiments"), changed)
     with pytest.raises(ValueError, match="protocol_hash"):
         await changed_runner.run(

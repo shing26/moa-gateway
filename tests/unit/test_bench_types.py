@@ -15,6 +15,8 @@ def test_usage_add_merges_every_counter() -> None:
         cost_usd=0.25,
         llm_latency_ms=12.0,
         prompt_hashes=("prompt-a",),
+        finish_reasons=("length",),
+        reasoning_chars=100,
     )
     right = Usage(
         llm_calls=2,
@@ -23,6 +25,8 @@ def test_usage_add_merges_every_counter() -> None:
         cost_usd=0.5,
         llm_latency_ms=24.0,
         prompt_hashes=("prompt-b",),
+        finish_reasons=("stop",),
+        reasoning_chars=50,
     )
 
     merged = left + right
@@ -34,6 +38,8 @@ def test_usage_add_merges_every_counter() -> None:
         cost_usd=pytest.approx(0.75),
         llm_latency_ms=36.0,
         prompt_hashes=("prompt-a", "prompt-b"),
+        finish_reasons=("length", "stop"),
+        reasoning_chars=150,
     )
 
 
@@ -43,11 +49,15 @@ def test_usage_add_call_records_prompt_hash() -> None:
             "prompt_tokens": 10,
             "completion_tokens": 5,
             "prompt_hash": "prompt-a",
+            "finish_reason": "length",
+            "reasoning_chars": 80,
         }
     )
 
     assert usage.llm_calls == 1
     assert usage.prompt_hashes == ("prompt-a",)
+    assert usage.finish_reasons == ("length",)
+    assert usage.reasoning_chars == 80
 
 
 def test_budget_remaining_is_clamped_to_zero() -> None:

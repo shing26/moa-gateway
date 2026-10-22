@@ -102,6 +102,11 @@ class ChatResult:
     messages: list[dict[str, Any]]
     content: str
     tool_calls: list[dict[str, Any]]
+    #: Provider 的停止原因。``length`` 表示输出额度耗尽；对推理模型来说它可能
+    #: 意味着 token 全花在 reasoning 上，最终 ``content`` 为空。
+    finish_reason: str = ""
+    #: reasoning 只保留长度，不把可能很长的思维链带进 Run Record。
+    reasoning_chars: int = 0
 
 
 def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
@@ -233,10 +238,15 @@ class LLMClient:
         updated_messages.append(assistant_message)
         tool_calls = assistant_message.get("tool_calls") or []
         content = "" if tool_calls else (assistant_message.get("content") or "")
+        reasoning = _get_attr(message, "reasoning_content", None) or _get_attr(
+            message, "reasoning", None
+        )
         return ChatResult(
             messages=updated_messages,
             content=content,
             tool_calls=tool_calls,
+            finish_reason=str(_get_attr(choice, "finish_reason", "") or ""),
+            reasoning_chars=len(str(reasoning or "")),
         )
 
     async def _acompletion(
@@ -352,8 +362,13 @@ class LLMClient:
         prompt_hash: str,
     ) -> None:
         usage = _get_attr(response, "usage", None)
+        choice = _get_attr(response, "choices", [None])[0]
+        message = _get_attr(choice, "message", None)
         prompt_tokens = int(_get_attr(usage, "prompt_tokens", 0) or 0)
         completion_tokens = int(_get_attr(usage, "completion_tokens", 0) or 0)
+        reasoning = _get_attr(message, "reasoning_content", None) or _get_attr(
+            message, "reasoning", None
+        )
         cost_usd = 0.0
         litellm_module = _get_litellm()
         try:
@@ -377,6 +392,8 @@ class LLMClient:
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "prompt_hash": prompt_hash,
+            "finish_reason": str(_get_attr(choice, "finish_reason", "") or ""),
+            "reasoning_chars": len(str(reasoning or "")),
         }
         self._usage_totals["llm_calls"] += 1
         self._usage_totals["prompt_tokens"] += prompt_tokens
