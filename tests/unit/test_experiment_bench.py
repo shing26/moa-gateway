@@ -215,6 +215,20 @@ async def test_collaboration_adapter_maps_cumulative_usage(tmp_path) -> None:
                 tool_calls=1,
                 node_path=("plan", "dispatch", "critic:1", "deliver"),
                 guard_action="allow",
+                workspace_writes=(
+                    {
+                        "write_id": "round-0/subtask-0",
+                        "writer": "round-0/subtask-0",
+                        "changes": [{"path": "a.py"}],
+                    },
+                ),
+                workspace_conflicts=(
+                    {
+                        "path": "a.py",
+                        "reason": "concurrent_divergent_write",
+                    },
+                ),
+                workspace_merges=(),
             )
 
     class FakeUsage:
@@ -249,6 +263,11 @@ async def test_collaboration_adapter_maps_cumulative_usage(tmp_path) -> None:
     assert evidence.prompt_hashes == ("prompt-a", "prompt-b", "prompt-c")
     assert evidence.plan[0]["agent"] == "coder"
     assert evidence.evidence["guard_action"] == "allow"
+    assert evidence.evidence["workspace_writes"][0]["writer"] == "round-0/subtask-0"
+    assert (
+        evidence.evidence["workspace_conflicts"][0]["reason"]
+        == "concurrent_divergent_write"
+    )
     assert evidence.workspace.before_hash
 
 

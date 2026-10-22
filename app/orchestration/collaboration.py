@@ -64,6 +64,12 @@ from app.middleware.request_logger import bind_trace
 from app.models.events import new_trace_id
 from app.models.errors import ErrorCode
 from app.outbound.adapter import ResponseAdapter
+from app.orchestration.workspace_isolation import (
+    collect_workspace_write_set,
+    create_isolated_workspace,
+    merge_workspace_write_sets,
+    summarize_write_sets,
+)
 from app.pipeline import (
     FAILURE_ESCALATION_TEXT,
     _merge_guard,
@@ -220,6 +226,9 @@ class CollabResult:
     node_path: tuple[str, ...]
     guard_action: str = ""
     error_code: str = ""
+    workspace_writes: tuple[dict[str, Any], ...] = ()
+    workspace_conflicts: tuple[dict[str, Any], ...] = ()
+    workspace_merges: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -643,6 +652,13 @@ class CollabState(TypedDict, total=False):
     tool_calls: Annotated[int, _add]
     tool_errors: Annotated[int, _add]
     tool_arg_rejections: Annotated[int, _add]
+    # 每个并发专家先在自己的工作区副本里执行；写集回图后由单个 dispatch
+    # 节点检测冲突并确定性合并。正文只在 checkpoint 内存活，Run Record
+    # 只保留写入者、路径与哈希摘要。
+    workspace_write_sets: Annotated[list[dict[str, Any]], operator.add]
+    workspace_conflicts: Annotated[list[dict[str, Any]], operator.add]
+    workspace_merges: Annotated[list[dict[str, Any]], operator.add]
+    applied_write_ids: list[str]
     # 已落审计的子任务数（每个子任务一条条目，见 _node_execute_expert）。
     audited_subtasks: Annotated[int, _add]
     # LangGraph 的 operator.add reducer：执行轨迹免费拿到，不用另接 tracer。
@@ -993,6 +1009,32 @@ class CollabOrchestrator:
             raise ValueError(f"工作区不存在或不是目录: {resolved}")
         return {"workspace_path": str(resolved), "verify_command": command}
 
+    def _merge_pending_workspace_writes(
+        self, state: CollabState
+    ) -> dict[str, Any]:
+        workspace_path = str(state.get("workspace_path", "") or "")
+        write_sets = list(state.get("workspace_write_sets") or ())
+        settled = tuple(state.get("applied_write_ids") or ())
+        if not workspace_path or not write_sets:
+            return {}
+        merged = merge_workspace_write_sets(
+            workspace_path,
+            write_sets,
+            settled_write_ids=settled,
+        )
+        updates: dict[str, Any] = {
+            "applied_write_ids": sorted(
+                set(settled) | set(merged.settled_write_ids)
+            )
+        }
+        if merged.applied:
+            updates["workspace_merges"] = [dict(item) for item in merged.applied]
+        if merged.conflicts:
+            updates["workspace_conflicts"] = [
+                dict(item) for item in merged.conflicts
+            ]
+        return updates
+
     async def _node_dispatch(self, state: CollabState) -> dict[str, Any]:
         """决定本轮派哪些子任务。
 
@@ -1001,8 +1043,13 @@ class CollabOrchestrator:
         不会被误认为新轮次已经完成。
         """
         plan = _assignments(state.get("plan"))
+        workspace_updates = self._merge_pending_workspace_writes(state)
         if int(state.get("failure_envelopes", 0) or 0) > 0:
-            return {"pending": (), "node_path": ["dispatch"]}
+            return {
+                "pending": (),
+                "node_path": ["dispatch"],
+                **workspace_updates,
+            }
 
         required = {
             int(index): int(value)
@@ -1039,10 +1086,12 @@ class CollabOrchestrator:
                 "raw_output": text,
                 "need_human_review": True,
                 "node_path": ["dispatch"],
+                **workspace_updates,
             }
         return {
             "pending": tuple(item.to_dict() for item in pending),
             "node_path": ["dispatch"],
+            **workspace_updates,
         }
 
     def _fan_out(self, state: CollabState) -> Any:
@@ -1114,6 +1163,15 @@ class CollabOrchestrator:
         if subtask is None:
             return {"node_path": ["execute_expert:?"]}
         label = f"execute_expert:{subtask.index}"
+        writer_id = (
+            f"round-{int(state.get('round', 0) or 0)}"
+            f"/subtask-{subtask.index}"
+        )
+        isolated = (
+            create_isolated_workspace(str(state["workspace_path"]))
+            if state.get("workspace_path")
+            else None
+        )
         slot: dict[str, Any] = {
             "intent": COLLAB_INTENT,
             "resource": COLLAB_INTENT,
@@ -1128,8 +1186,8 @@ class CollabOrchestrator:
                 state.get("dependency_outputs") or {}
             ),
         }
-        if state.get("workspace_path"):
-            slot["workspace_path"] = str(state["workspace_path"])
+        if isolated is not None:
+            slot["workspace_path"] = str(isolated.root)
             slot["verify_command"] = list(state.get("verify_command") or ())
         envelope = AgentEnvelope(
             trace_id=state["trace_id"],
@@ -1147,6 +1205,7 @@ class CollabOrchestrator:
         output = ""
         attempts = 0
         metrics: dict[str, Any] = {}
+        write_accepted = False
 
         expert = self._expert(subtask.agent)
         if expert is None:
@@ -1160,6 +1219,8 @@ class CollabOrchestrator:
                 output, attempts, _ = await execute_with_retry(expert, envelope)
                 metrics = dict(envelope.agent_local_slot.get("llm_metrics") or {})
             except asyncio.CancelledError:
+                if isolated is not None:
+                    isolated.cleanup()
                 raise
             except Exception as exc:  # noqa: BLE001 - 单个子任务失败不该炸掉整轮
                 attempts = int(getattr(exc, "attempts", 1) or 1)
@@ -1182,6 +1243,23 @@ class CollabOrchestrator:
                     output = self._escalate_expert_failure(
                         updates, subtask.index, failure_reason
                     )
+                else:
+                    write_accepted = True
+
+        if isolated is not None:
+            try:
+                write_set = collect_workspace_write_set(
+                    source=isolated.source,
+                    isolated_root=isolated.root,
+                    writer_id=writer_id,
+                    task=subtask.instruction,
+                    round_index=int(state.get("round", 0) or 0),
+                    accepted=write_accepted,
+                )
+                if write_set["changes"]:
+                    updates["workspace_write_sets"] = [write_set]
+            finally:
+                isolated.cleanup()
 
         cost_usd = float(metrics.get("cost_usd", 0.0) or 0.0)
         tool_calls = int(slot.get("tool_calls_total", 0) or 0)
@@ -1601,6 +1679,15 @@ class CollabOrchestrator:
                 "tool_calls": int(state.get("tool_calls", 0) or 0),
                 "tool_errors": int(state.get("tool_errors", 0) or 0),
                 "tool_arg_rejections": int(state.get("tool_arg_rejections", 0) or 0),
+                "collab_workspace_write_sets": len(
+                    state.get("workspace_write_sets") or ()
+                ),
+                "collab_workspace_conflicts": len(
+                    state.get("workspace_conflicts") or ()
+                ),
+                "collab_workspace_merges": len(
+                    state.get("workspace_merges") or ()
+                ),
             },
         )
         try:
@@ -1643,6 +1730,19 @@ class CollabOrchestrator:
             node_path=tuple(state.get("node_path") or ()),
             guard_action=state.get("guard_action", ""),
             error_code=state.get("error_code", ""),
+            workspace_writes=tuple(
+                summarize_write_sets(state.get("workspace_write_sets") or ())
+            ),
+            workspace_conflicts=tuple(
+                dict(item)
+                for item in (state.get("workspace_conflicts") or ())
+                if isinstance(item, dict)
+            ),
+            workspace_merges=tuple(
+                dict(item)
+                for item in (state.get("workspace_merges") or ())
+                if isinstance(item, dict)
+            ),
         )
 
     async def run(

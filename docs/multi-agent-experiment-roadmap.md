@@ -94,7 +94,7 @@
 
 ### M3：工作区写隔离
 
-状态：待完成
+状态：已完成
 
 交付：
 
@@ -109,6 +109,15 @@
 - 两个专家写不同文件时两份变更都保留；
 - L3 回归用例覆盖上述两条；
 - Run Record 记录写入者、目标路径、冲突和合并结果。
+
+落地物：
+
+- `app/orchestration/workspace_isolation.py`
+- `tests/unit/test_workspace_isolation.py`
+- 协作 L3 并行写同文件/不同文件回归用例
+- Run Record evidence 增加 `workspace_writes`、`workspace_conflicts` 与
+  `workspace_merges`
+- ADR-027
 
 ### M4：工程试点
 

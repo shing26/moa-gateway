@@ -848,6 +848,120 @@ async def test_two_envelope_subtasks_together_does_not_break_the_graph() -> None
     assert result.error_code == "agent_failed"
 
 
+# ── 工作区写隔离 ─────────────────────────────────────────────────────────
+
+
+class _FileWritingExpert:
+    def __init__(self, files: dict[str, str], *, sleep_s: float = 0.0) -> None:
+        self._files = files
+        self._sleep_s = sleep_s
+
+    async def execute(self, envelope):
+        from pathlib import Path
+
+        slot = dict(envelope.agent_local_slot or {})
+        workspace = Path(slot["workspace_path"])
+        if self._sleep_s:
+            await asyncio.sleep(self._sleep_s)
+        for relative, content in self._files.items():
+            target = workspace / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8", newline="\n")
+        return f"wrote {sorted(self._files)}"
+
+
+@pytest.mark.asyncio
+async def test_parallel_experts_with_same_path_conflict_leave_original_untouched(
+    tmp_path,
+) -> None:
+    (tmp_path / "shared.txt").write_text("base\n", encoding="utf-8")
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(
+            lambda task: [
+                {
+                    "index": 0,
+                    "instruction": "写左边",
+                    "agent": "coder",
+                    "depends_on": [],
+                },
+                {
+                    "index": 1,
+                    "instruction": "写右边",
+                    "agent": "general",
+                    "depends_on": [],
+                },
+            ]
+        ),
+        experts={
+            "coder": _FileWritingExpert(
+                {"shared.txt": "left\n", "left.txt": "left\n"}, sleep_s=0.03
+            ),
+            "general": _FileWritingExpert(
+                {"shared.txt": "right\n", "right.txt": "right\n"}
+            ),
+        },
+        settings_obj=_cfg(),
+        workspace_root=tmp_path,
+    )
+
+    result = await orch.run(
+        task="并行写工作区",
+        trace_id="t-write-conflict",
+        workspace_path=str(tmp_path),
+    )
+
+    assert (tmp_path / "shared.txt").read_text(encoding="utf-8") == "base\n"
+    assert (tmp_path / "left.txt").read_text(encoding="utf-8") == "left\n"
+    assert (tmp_path / "right.txt").read_text(encoding="utf-8") == "right\n"
+    assert result.status == "ok"
+    assert len(result.workspace_conflicts) == 1
+    assert result.workspace_conflicts[0]["path"] == "shared.txt"
+    assert {item["writer"] for item in result.workspace_writes} == {
+        "round-0/subtask-0",
+        "round-0/subtask-1",
+    }
+    assert len(result.workspace_merges) == 2
+
+
+@pytest.mark.asyncio
+async def test_parallel_experts_writing_different_files_keep_both(tmp_path) -> None:
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(
+            lambda task: [
+                {
+                    "index": 0,
+                    "instruction": "写甲",
+                    "agent": "coder",
+                    "depends_on": [],
+                },
+                {
+                    "index": 1,
+                    "instruction": "写乙",
+                    "agent": "general",
+                    "depends_on": [],
+                },
+            ]
+        ),
+        experts={
+            "coder": _FileWritingExpert({"a.txt": "a\n"}),
+            "general": _FileWritingExpert({"b.txt": "b\n"}),
+        },
+        settings_obj=_cfg(),
+        workspace_root=tmp_path,
+    )
+
+    result = await orch.run(
+        task="并行写不同文件",
+        trace_id="t-write-independent",
+        workspace_path=str(tmp_path),
+    )
+
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "a\n"
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "b\n"
+    assert result.workspace_conflicts == ()
+    assert len(result.workspace_merges) == 2
+
+
 # ── 依赖感知调度 ─────────────────────────────────────────────────────────
 
 

@@ -86,6 +86,15 @@ class CollaborationExperimentAdapter:
                 "need_human_review": bool(result.need_human_review),
                 "guard_action": str(result.guard_action),
                 "error_code": str(result.error_code),
+                "workspace_writes": [
+                    dict(item) for item in result.workspace_writes
+                ],
+                "workspace_conflicts": [
+                    dict(item) for item in result.workspace_conflicts
+                ],
+                "workspace_merges": [
+                    dict(item) for item in result.workspace_merges
+                ],
                 "critic": [
                     item.to_dict() for item in result.critique_history
                 ],
