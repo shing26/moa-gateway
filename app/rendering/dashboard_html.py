@@ -28,6 +28,7 @@ from app.services.llm_status import llm_snapshot
 
 PAGES = [
     ("overview", "概览", "系统状态、运行配置与最近流量"),
+    ("experiments", "实验台", "多智能体批次、Run Record 与可复核证据"),
     ("knowledge", "知识库", "文档上传、分块与检索库管理"),
     ("sessions", "会话", "活跃会话、模式与记忆管理"),
     ("test", "测试台", "向本机网关发送测试请求"),
@@ -49,6 +50,11 @@ NAV_ICONS = {
         'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
         '<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5z"/>'
         '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/></svg>'
+    ),
+    "experiments": (
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
+        'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        '<path d="M4 19V9"/><path d="M10 19V5"/><path d="M16 19v-7"/><path d="M22 19H2"/></svg>'
     ),
     "sessions": (
         '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" '
@@ -94,6 +100,7 @@ HTML_SHELL = """<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>{{title}} · Agent Gateway</title>
+<link rel="icon" href="data:,">
 <link rel="stylesheet" href="/dashboard/static/tokens.css">
 <link rel="stylesheet" href="/dashboard/static/dashboard.css">
 </head>
