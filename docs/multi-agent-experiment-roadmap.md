@@ -41,7 +41,7 @@
 
 ### M1：冻结实验协议
 
-状态：待完成
+状态：已完成
 
 交付：
 
@@ -56,6 +56,13 @@
 - 协议可由机器读取，不靠 CLI 参数口头重复；
 - 相同协议重复启动时 `config_hash` 一致；
 - 任何协议变化都会产生新的 Experiment，而不是覆盖旧结果。
+
+落地物：
+
+- `bench/protocols/multi-agent-first-batch-v1.json`
+- `bench/experiment/protocol.py`
+- `tests/unit/test_experiment_protocol.py`
+- ADR-026
 
 ### M2：统一批量入口
 

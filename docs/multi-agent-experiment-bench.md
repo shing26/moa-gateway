@@ -1,6 +1,8 @@
 # 多智能体实验台（Experiment Bench）
 
-> 状态：首版已实现。决策记录见 [ADR-025](adr/adr-025-multi-agent-experiment-run-record.md)。
+> 状态：首版与机器可读实验协议已实现。决策记录见
+> [ADR-025](adr/adr-025-multi-agent-experiment-run-record.md) 与
+> [ADR-026](adr/adr-026-experiment-protocol.md)。
 
 ## 目的
 
@@ -36,6 +38,23 @@ Experiment
 
 `experiment.json` 是 manifest；`trial-*.json` 创建后拒绝覆盖。重复使用已有
 `experiment-id` 会直接失败。
+
+## 实验协议
+
+首批实验由 [multi-agent-first-batch-v1.json](../bench/protocols/multi-agent-first-batch-v1.json)
+冻结。协议是以下内容的唯一事实源：
+
+- 8 个任务及其 E1/E3 来源；
+- L0-L3 四个 arm 及版本；
+- provider、模型、采样参数与单次输出上限；
+- B1/B3 的预算轴、步数与 token 上限；
+- pilot、baseline、formal 三阶段的重复次数；
+- 基础设施错误的有限重试、不可重试结局与 pass-rate 排除规则；
+- 只作方向性报告、不生成统计显著声明的边界。
+
+`config_hash` 对协议身份做规范化 JSON 哈希。字段顺序不影响哈希；任务集、arm、模型、
+预算、重复次数、重试、排除或报告口径的语义变化都会产生新哈希。协议单元映射到
+Experiment 时，哈希进入配置身份，因此不会静默覆盖旧实验结果。
 
 ## CLI
 

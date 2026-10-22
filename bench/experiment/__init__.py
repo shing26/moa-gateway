@@ -4,6 +4,12 @@ from bench.experiment.adapters import (
     BenchExperimentAdapter,
     CollaborationExperimentAdapter,
 )
+from bench.experiment.protocol import (
+    DEFAULT_PROTOCOL_PATH,
+    ExperimentProtocol,
+    load_protocol,
+    protocol_from_dict,
+)
 from bench.experiment.runner import ExperimentRunner
 from bench.experiment.store import ExperimentStore
 from bench.experiment.types import (
@@ -22,8 +28,10 @@ from bench.experiment.types import (
 __all__ = [
     "BenchExperimentAdapter",
     "CollaborationExperimentAdapter",
+    "DEFAULT_PROTOCOL_PATH",
     "ExperimentManifest",
     "ExperimentOutcome",
+    "ExperimentProtocol",
     "ExperimentRunner",
     "ExperimentSpec",
     "ExperimentStore",
@@ -34,4 +42,6 @@ __all__ = [
     "WorkspaceSnapshot",
     "compare_run_records",
     "fingerprint_workspace",
+    "load_protocol",
+    "protocol_from_dict",
 ]
