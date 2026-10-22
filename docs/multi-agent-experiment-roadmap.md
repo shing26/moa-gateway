@@ -24,8 +24,8 @@
 - 已有 L0-L3 四个 arm、B1/B3 预算策略和聚合报告。
 - 已有 `Experiment → Trial → Run Record`、不可变落盘和受控复跑。
 - `bench/run_curve.py` 与 `bench/run_experiment.py` 尚未统一成单一权威批量入口。
-- 协作图仍是进程内 checkpointer；并发专家写同一路径时没有仲裁。
-- UI、跨模型自动跑分和统计显著性尚未实现。
+- 协作图已有 SQLite 持久化 checkpointer；并发专家写同一路径由隔离写集与显式冲突处理。
+- 只读结果 UI 已实现；跨模型自动跑分和统计显著性仍未实现。
 
 ## 里程碑
 
@@ -204,7 +204,7 @@
 
 ### M8：并发 Trial 与持久化恢复
 
-状态：待完成
+状态：已完成
 
 交付：
 
@@ -219,6 +219,16 @@
 - 进程重启后批次可继续且不覆盖旧记录；
 - HITL 挂起在进程重启后仍可恢复或明确失效；
 - 并发与串行结果在相同配置下走同一证据契约。
+
+落地物：
+
+- `BatchRunner` 在未完成 Experiment 间并发调度，全局信号量限制在途 Trial；
+- `max_concurrency` 与 `rate_limit_per_minute` 写入 Batch Manifest，恢复时拒绝漂移；
+- 取消会保留已写 Run Record，并把未完成单元与批次恢复为 `paused/pending`；
+- SQLite `AsyncSqliteSaver` 通过 `COLLAB_CHECKPOINT_PATH` 持久化 HITL；
+- `apending_payload()` / `afinish()` / `aclose()` 异步生命周期与 lifespan 关闭；
+- 并发闸门、速率门、并发/串行证据契约、独立子进程 HITL 恢复测试；
+- ADR-028。
 
 ### M9：跨模型与统计扩展
 
@@ -256,7 +266,8 @@
 
 ## 执行顺序
 
-M1 → M2 → M3 → M4 → M5 → M6 → M7 → M8 → M9 → M10。
+M1 → M2 → M3 → M4 → M5 → M7（代码收口）→ M8 → M6 → M7（正式数据验收）→ M9 → M10。
 
 M7 必须读取稳定的 Run Record 和聚合报告，不得先于 M2/M3 固化错误语义。
 M9 不得用当前 8 个任务的单次结果替代预注册实验。
+并发与持久化恢复属于正式实验的执行契约，因此 M8 必须在 M6 大规模 live 批次前冻结。

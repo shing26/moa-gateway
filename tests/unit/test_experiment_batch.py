@@ -58,6 +58,28 @@ class FakeExecutor:
         )
 
 
+class ConcurrencyProbeExecutor:
+    def __init__(self, *, delay_s: float = 0.02) -> None:
+        self.delay_s = delay_s
+        self.active = 0
+        self.max_active = 0
+        self.starts: list[float] = []
+
+    async def execute(self, spec, trial_index: int):
+        loop = asyncio.get_running_loop()
+        self.starts.append(loop.time())
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(self.delay_s)
+        finally:
+            self.active -= 1
+        return TrialEvidence(
+            status="pass",
+            final_text=f"{spec.config['task_id']}:{spec.config['arm']}",
+        )
+
+
 def _two_task_protocol():
     protocol = load_protocol()
     return replace(protocol, tasks=protocol.tasks[:2])
@@ -171,6 +193,109 @@ async def test_cell_error_is_retained_and_batch_continues(tmp_path) -> None:
     assert "executor wiring failed" in outcome.manifest.cells[1].error
     assert outcome.manifest.resume_cursor == outcome.manifest.cells[1].cell_id
     assert executor.calls == [("0896629", "L0", 0)]
+
+
+@pytest.mark.asyncio
+async def test_batch_runs_cells_concurrently_up_to_global_limit(tmp_path) -> None:
+    protocol = replace(load_protocol(), tasks=load_protocol().tasks[:1])
+    executor = ConcurrencyProbeExecutor(delay_s=0.03)
+
+    outcome = await BatchRunner(
+        ExperimentStore(tmp_path / "experiments"), protocol
+    ).run(
+        phase="baseline",
+        batch_id="batch-concurrent",
+        max_concurrency=2,
+        executor_factory=lambda spec: executor,
+    )
+
+    assert outcome.manifest.status == "completed"
+    assert outcome.manifest.max_concurrency == 2
+    assert executor.max_active == 2
+    assert len(executor.starts) == 4
+
+
+@pytest.mark.asyncio
+async def test_batch_enforces_trial_start_rate_limit(tmp_path) -> None:
+    protocol = replace(
+        load_protocol(),
+        tasks=load_protocol().tasks[:1],
+        repeats=replace(load_protocol().repeats, baseline=1),
+    )
+    executor = ConcurrencyProbeExecutor(delay_s=0.0)
+
+    await BatchRunner(ExperimentStore(tmp_path / "experiments"), protocol).run(
+        phase="baseline",
+        arm_names=("L0", "L1", "L2"),
+        batch_id="batch-paced",
+        max_concurrency=3,
+        rate_limit_per_minute=6000,
+        executor_factory=lambda spec: executor,
+    )
+
+    gaps = [
+        later - earlier
+        for earlier, later in zip(executor.starts, executor.starts[1:])
+    ]
+    assert len(gaps) == 2
+    assert all(gap >= 0.008 for gap in gaps)
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_changed_concurrency_contract(tmp_path) -> None:
+    protocol = replace(load_protocol(), tasks=load_protocol().tasks[:1])
+    runner = BatchRunner(ExperimentStore(tmp_path / "experiments"), protocol)
+    await runner.run(
+        phase="baseline",
+        arm_names=("L0",),
+        batch_id="batch-limit-frozen",
+        max_concurrency=1,
+        executor_factory=lambda spec: FakeExecutor(),
+    )
+
+    with pytest.raises(ValueError, match="并发上限"):
+        await runner.run(
+            phase="baseline",
+            arm_names=("L0",),
+            batch_id="batch-limit-frozen",
+            max_concurrency=2,
+            executor_factory=lambda spec: FakeExecutor(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_and_serial_runs_keep_the_same_evidence_contract(
+    tmp_path,
+) -> None:
+    protocol = replace(load_protocol(), tasks=load_protocol().tasks[:1])
+    serial_store = ExperimentStore(tmp_path / "serial")
+    concurrent_store = ExperimentStore(tmp_path / "concurrent")
+
+    serial = await BatchRunner(serial_store, protocol).run(
+        phase="baseline",
+        arm_names=("L0",),
+        batch_id="batch-contract",
+        max_concurrency=1,
+        executor_factory=lambda spec: FakeExecutor(),
+    )
+    concurrent = await BatchRunner(concurrent_store, protocol).run(
+        phase="baseline",
+        arm_names=("L0",),
+        batch_id="batch-contract",
+        max_concurrency=2,
+        executor_factory=lambda spec: FakeExecutor(),
+    )
+
+    serial_record = serial_store.load_experiment_records(
+        serial.manifest.cells[0].experiment_id
+    )[0]
+    concurrent_record = concurrent_store.load_experiment_records(
+        concurrent.manifest.cells[0].experiment_id
+    )[0]
+    assert serial_record.config_hash == concurrent_record.config_hash
+    assert serial_record.status == concurrent_record.status
+    assert serial_record.evidence == concurrent_record.evidence
+    assert serial_record.metrics == concurrent_record.metrics
 
 
 @pytest.mark.asyncio
@@ -349,12 +474,15 @@ def test_batch_cli_runs_a_full_mock_subset_and_writes_reports(
             str(tmp_path / "experiments"),
             "--batch-id",
             "batch-cli",
+            "--max-concurrency",
+            "2",
         ]
     )
 
     assert code == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["status"] == "completed"
+    assert summary["max_concurrency"] == 2
     assert summary["cell_count"] == 4
     assert summary["completed_runs"] == 4
     batch_dir = BatchStore(tmp_path / "experiments").batch_dir("batch-cli")

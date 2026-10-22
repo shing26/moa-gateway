@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.main import app
@@ -23,6 +25,7 @@ class _FakeOrchestrator:
     def __init__(self) -> None:
         self.ran: list[dict] = []
         self.resumed: list[tuple[str, str]] = []
+        self.closed = False
 
     async def run(self, **kwargs):
         self.ran.append(kwargs)
@@ -32,8 +35,11 @@ class _FakeOrchestrator:
         self.resumed.append((thread_id, decision))
         return _result(status="approved")
 
-    def pending_payload(self, thread_id: str):
+    async def apending_payload(self, thread_id: str):
         return {"kind": "collab_hitl", "trace_id": thread_id} if thread_id == "t-pending" else None
+
+    async def aclose(self):
+        self.closed = True
 
 
 def _result(status: str):
@@ -180,3 +186,13 @@ def test_auth_headers_are_accepted() -> None:
     headers = auth_headers()
     assert headers["X-Gateway-Token"]
     assert headers["Authorization"].startswith("Basic ")
+
+
+def test_close_collab_releases_the_persistent_checkpointer(monkeypatch) -> None:
+    fake = _FakeOrchestrator()
+    monkeypatch.setattr(collab_route, "_orchestrator", fake)
+
+    asyncio.run(collab_route.close_collab())
+
+    assert fake.closed is True
+    assert collab_route._orchestrator is None

@@ -101,6 +101,11 @@ flowchart TD
 审批回路是 `POST /api/v1/collab/approve`。**飞书卡片回调不服务协作**：那条回路
 驱动 FSM，对协作会话只会得到"审批已失效"，那会是一个撒谎的答案。
 
+默认 checkpointer 是 SQLite（`COLLAB_CHECKPOINT_PATH=data/collab-checkpoints.sqlite3`），
+因此进程重启后仍可读取挂起负载并继续 `resume`。临时调试可显式设为 `:memory:`；
+HTTP 读取使用异步 `apending_payload()`，流式脚本使用 `afinish()`，应用退出时统一
+关闭连接。
+
 ## 怎么跑
 
 ```bash
@@ -165,6 +170,7 @@ $verify = @("python", "-m", "pytest", "-q") | ConvertTo-Json -Compress
 | `COLLAB_MAX_ROUNDS` | `2` | 执行轮数上限，到上限仍不通过则标记未决 |
 | `COLLAB_MAX_SUBTASKS` | `4` | 单次协作的子任务数上限 |
 | `COLLAB_WORKSPACE_ROOT` | 空 | 工作区工具的宿主边界；空值拒绝任何 `workspace_path` |
+| `COLLAB_CHECKPOINT_PATH` | `data/collab-checkpoints.sqlite3` | HITL checkpoint 落盘路径；`:memory:` 为临时模式 |
 
 ## 离线确定性
 
@@ -195,12 +201,12 @@ approve，"Critic 打回"这条链路就永远看不见；它的评审台词是�
 
 * **协作不进意图路由。** 本轮刻意不碰 `INTENT_AGENT_MAP` / `_AGENT_KEYS` 自检与
   路由测试面。它是显式入口，不是请求主路径的一站。
-* **checkpointer 是 `InMemorySaver`。** 可注入（`CollabOrchestrator(checkpointer=...)`），
-  接 Redis/Postgres 是部署期决策，未写。
+* **默认持久化是单机 SQLite。** 可注入其它 checkpointer，但 Redis/Postgres
+  多节点共享仍是部署期扩展，不在本轮伪称已实现。
 * **专家池固定为三人。** 新增专家要同时改 `EXPERT_KEYS` 与 `AGENT_REGISTRY`，
   协作链路自己不含 Agent 实现。
-* **并发写没有文件级仲裁。** 同一依赖层的两个专家都能拿到 `write_file`；若它们写同一路径，
-  后写覆盖先写。当前实验台要求任务规划避免这种冲突，merge/锁不在本轮。
+* **并发写采用隔离副本与显式冲突证据。** 同一依赖层的专家不直接写共享工作区；
+  同路径不同内容会保留原文件并记录冲突，不再静默后写覆盖先写（ADR-027）。
 * **没有 task-LLM 降级转换。** 协作不走 ReAct 那条降级路径（专家池里没有 `task`），
   所以 `_task_degradation_issues` 在这个图里没有输入可用。
 

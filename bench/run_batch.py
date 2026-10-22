@@ -147,6 +147,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     batch.add_argument("--batch-id", default="")
     batch.add_argument("--mode", choices=("mock", "live"), default="mock")
     batch.add_argument("--out", default=str(DEFAULT_OUT))
+    batch.add_argument("--max-concurrency", type=int, default=1)
+    batch.add_argument("--rate-limit-per-minute", type=int, default=0)
     b3 = sub.add_parser("b3", help="从完整 B1 批次派生失败档位的 B3 放宽复跑")
     b3.add_argument("--protocol", default=str(DEFAULT_PROTOCOL_PATH))
     b3.add_argument("--source-batch", required=True)
@@ -158,6 +160,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     b3.add_argument("--batch-id", default="")
     b3.add_argument("--mode", choices=("mock", "live"), default="mock")
     b3.add_argument("--out", default=str(DEFAULT_OUT))
+    b3.add_argument("--max-concurrency", type=int, default=None)
+    b3.add_argument("--rate-limit-per-minute", type=int, default=None)
     return parser.parse_args(argv)
 
 
@@ -176,6 +180,8 @@ async def _run(args: argparse.Namespace) -> int:
         batch_id=args.batch_id,
         task_ids=tuple(args.tasks) if args.tasks else None,
         arm_names=tuple(args.arms) if args.arms else None,
+        max_concurrency=args.max_concurrency,
+        rate_limit_per_minute=args.rate_limit_per_minute,
         executor_factory=factory,
     )
     payload: dict[str, Any] = outcome.report.to_dict()
@@ -200,6 +206,8 @@ async def _run_b3(args: argparse.Namespace) -> int:
         source_batch_id=args.source_batch,
         phase=args.phase,
         batch_id=args.batch_id,
+        max_concurrency=args.max_concurrency,
+        rate_limit_per_minute=args.rate_limit_per_minute,
         executor_factory=factory,
     )
     payload: dict[str, Any] = outcome.report.to_dict()

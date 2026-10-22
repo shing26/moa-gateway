@@ -192,6 +192,10 @@ class Settings:
         # 工作区工具的宿主边界。空值 = 协作入口不允许传 workspace_path；
         # 只有显式配置一个根目录后，请求才能把该目录内的子目录交给专家。
         self.collab_workspace_root: str = os.getenv("COLLAB_WORKSPACE_ROOT", "")
+        # HITL 挂起必须跨进程恢复；:memory: 仅用于显式临时运行。
+        self.collab_checkpoint_path: str = os.getenv(
+            "COLLAB_CHECKPOINT_PATH", "data/collab-checkpoints.sqlite3"
+        )
 
         # ── Embedding ─────────────────────────────────────────────────────
         # 未配置则整条语义检索关闭，走 BD-01 关键词回退。仅在配置了

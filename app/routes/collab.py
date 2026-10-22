@@ -60,6 +60,15 @@ def _collab():
     return _orchestrator
 
 
+async def close_collab() -> None:
+    global _orchestrator
+    current = _orchestrator
+    _orchestrator = None
+    close = getattr(current, "aclose", None)
+    if callable(close):
+        await close()
+
+
 class CollabRunRequest(BaseModel):
     task: str = ""
     session_id: str = ""
@@ -149,7 +158,7 @@ async def collab_pending(trace_id: str) -> JSONResponse:
     orchestrator = _collab()
     if orchestrator is None:
         return _unavailable()
-    payload = orchestrator.pending_payload(trace_id)
+    payload = await orchestrator.apending_payload(trace_id)
     if payload is None:
         return JSONResponse(
             {"error": ErrorCode.HITL_REQUEST_NOT_FOUND.value, "message": "没有挂起中的协作"},

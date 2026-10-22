@@ -18,7 +18,7 @@ from app.middleware.auth import AuthMiddleware, insecure_mode_enabled
 from app.middleware.flags import FeatureFlagMiddleware
 from app.config import settings
 from app.routes.chat import router as chat_router
-from app.routes.collab import router as collab_router
+from app.routes.collab import close_collab, router as collab_router
 from app.routes.dashboard import router as dashboard_router
 from app.routes.experiments import router as experiments_router
 from app.routes.feishu import router as feishu_router
@@ -72,6 +72,7 @@ async def lifespan(_: FastAPI):
         await es_writer.aclose()
     await obsidian_sync.close()
     await vector_client.close()
+    await close_collab()
     engine.session_store.clear_all()
     _flag_client.invalidate()
 

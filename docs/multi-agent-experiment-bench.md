@@ -12,7 +12,8 @@
 2. 这次执行是否留下了足以复核的机器可读证据；
 3. 同一任务、配置与工作区快照受控复跑时，可观察行为是否偏离。
 
-首版不提供 UI、统计显著性检验或自动跨模型排名。验收面是**真实执行链路 + Run Record**。
+实验台已提供只读结果 UI；统计显著性检验或自动跨模型排名仍不在当前协议授权范围。
+验收面首先是**真实执行链路 + Run Record**。
 
 ## 数据模型
 
@@ -98,6 +99,22 @@ Experiment/Trial 落盘、完成跳过、中断恢复和报告：
 `batch.json` 固定协议哈希与预期矩阵，记录每个单元的 `experiment_id`、完成状态、
 Trial 数和 `resume_cursor`。重复执行同一 `batch-id` 时，已完成且有完整证据的单元
 直接跳过；被中断的 Experiment 从缺失 Trial 继续；已有 Run Record 永不覆盖。
+
+正式批次可显式设置全局 Trial 并发和启动速率：
+
+```powershell
+.\.venv\Scripts\python.exe bench/run_batch.py batch `
+  --phase formal `
+  --mode live `
+  --max-concurrency 4 `
+  --rate-limit-per-minute 60 `
+  --batch-id m6-formal-b1-live-r1 `
+  --out .bench-experiments
+```
+
+并发度与启动速率写入 Batch Manifest，恢复同一批次时必须保持一致。每个
+Experiment 使用独立执行器与工作区；单 Experiment 内的重复 Trial 仍串行，避免模型
+会话和用量账本串线。
 
 ### B3 放宽复跑
 
@@ -227,7 +244,8 @@ Trial 数不一致会显式产生 `trial_count` divergence，不会静默截断�
 
 ## 首版边界
 
-- 每次执行串行；并发 Trial 不在首版。
+- 默认并发仍为 1；显式传 `--max-concurrency` 后才并发执行不同 Experiment。
+- 协作 HITL checkpoint 默认落 SQLite；跨节点共享 checkpointer 不在当前实现。
 - 本地 JSON 是唯一权威证据，稳定但无中心查询服务。
 - 单 Trial 故障会记为 `status=error` 并继续后续 Trial；CLI 对存在 `error` 的实验返回非零。
 - 不承诺逐 token 重放；多轮模型的 Critic prompt 本身可能随输出自然变化。

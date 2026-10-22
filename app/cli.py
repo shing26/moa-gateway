@@ -375,16 +375,24 @@ def cmd_collab(args: argparse.Namespace) -> int:
         ScriptedExpert,
     )
 
-    if args.live:
-        orchestrator = CollabOrchestrator.from_deps()
-    else:
-        orchestrator = CollabOrchestrator(
-            collaboration_llm=MockCollaborationLLM(),
-            experts={key: ScriptedExpert() for key in ("coder", "general", "review")},
-        )
-
     async def run():
-        return await orchestrator.run(task=args.task, session_id="collab-cli")
+        if args.live:
+            orchestrator = CollabOrchestrator.from_deps()
+        else:
+            from langgraph.checkpoint.memory import InMemorySaver
+
+            orchestrator = CollabOrchestrator(
+                collaboration_llm=MockCollaborationLLM(),
+                experts={
+                    key: ScriptedExpert()
+                    for key in ("coder", "general", "review")
+                },
+                checkpointer=InMemorySaver(),
+            )
+        try:
+            return await orchestrator.run(task=args.task, session_id="collab-cli")
+        finally:
+            await orchestrator.aclose()
 
     result = asyncio.run(run())
     print(f"trace_id : {result.trace_id}")

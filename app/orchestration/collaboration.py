@@ -70,6 +70,10 @@ from app.orchestration.workspace_isolation import (
     merge_workspace_write_sets,
     summarize_write_sets,
 )
+from app.orchestration.checkpointing import (
+    OwnedCheckpointer,
+    open_sqlite_checkpointer,
+)
 from app.pipeline import (
     FAILURE_ESCALATION_TEXT,
     _merge_guard,
@@ -768,7 +772,20 @@ class CollabOrchestrator:
         self._workspace_root = (
             Path(str(configured_root)).resolve() if str(configured_root or "").strip() else None
         )
-        self._checkpointer = checkpointer or InMemorySaver()
+        self._owned_checkpointer: OwnedCheckpointer | None = None
+        if checkpointer is not None:
+            self._checkpointer = checkpointer
+        else:
+            checkpoint_path = str(
+                getattr(cfg, "collab_checkpoint_path", "") or ""
+            ).strip()
+            if checkpoint_path and checkpoint_path != ":memory:":
+                self._owned_checkpointer = open_sqlite_checkpointer(
+                    checkpoint_path
+                )
+                self._checkpointer = self._owned_checkpointer.saver
+            else:
+                self._checkpointer = InMemorySaver()
         self._graph = self._build()
 
     # ── construction ───────────────────────────────────────────────────────
@@ -1834,6 +1851,14 @@ class CollabOrchestrator:
             state["__interrupt__"] = snapshot.interrupts
         return self._to_result(state)
 
+    async def afinish(self, trace_id: str) -> CollabResult:
+        """异步读取终态，兼容 AsyncSqliteSaver 的持久化 checkpoint。"""
+        snapshot = await self._graph.aget_state(self._config(trace_id))
+        state = dict(snapshot.values or {})
+        if getattr(snapshot, "interrupts", ()) and "__interrupt__" not in state:
+            state["__interrupt__"] = snapshot.interrupts
+        return self._to_result(state)
+
     async def resume(self, thread_id: str, decision: str) -> CollabResult:
         """放行一次挂起——HITL 的 ``Command(resume=...)`` 那一半。"""
         state = await self._graph.ainvoke(
@@ -1850,8 +1875,24 @@ class CollabOrchestrator:
         value = interrupts[0].value
         return dict(value) if isinstance(value, dict) else {"value": value}
 
+    async def apending_payload(
+        self, thread_id: str
+    ) -> dict[str, Any] | None:
+        """异步读取挂起负载，兼容 AsyncSqliteSaver。"""
+        snapshot = await self._graph.aget_state(self._config(thread_id))
+        interrupts = getattr(snapshot, "interrupts", ()) or ()
+        if not interrupts:
+            return None
+        value = interrupts[0].value
+        return dict(value) if isinstance(value, dict) else {"value": value}
+
     def describe(self) -> dict[str, str]:
         return {"pipeline": "collaboration"}
+
+    async def aclose(self) -> None:
+        if self._owned_checkpointer is not None:
+            await self._owned_checkpointer.aclose()
+            self._owned_checkpointer = None
 
 
 __all__ = [

@@ -21,7 +21,7 @@ from bench.experiment.store import ExperimentStore
 from bench.experiment.types import ExperimentSpec, TrialExecutor
 from bench.report import DoseReport, RunRow, build_report, render_markdown
 
-BATCH_SCHEMA_VERSION = 2
+BATCH_SCHEMA_VERSION = 3
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _B3_TRIGGERS = frozenset({"fail", "budget_exhausted"})
 
@@ -117,6 +117,8 @@ class BatchManifest:
     status: str
     resume_cursor: str
     cells: tuple[BatchCell, ...]
+    max_concurrency: int = 1
+    rate_limit_per_minute: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -133,6 +135,8 @@ class BatchManifest:
             "status": self.status,
             "resume_cursor": self.resume_cursor,
             "cells": [cell.to_dict() for cell in self.cells],
+            "max_concurrency": self.max_concurrency,
+            "rate_limit_per_minute": self.rate_limit_per_minute,
         }
 
     @classmethod
@@ -148,14 +152,22 @@ class BatchManifest:
         if len(cells) != len(raw_cells):
             raise TypeError("batch.cells 的每一项都必须是对象")
         schema_version = _integer(payload, "schema_version")
-        if schema_version not in (1, BATCH_SCHEMA_VERSION):
+        if schema_version not in (1, 2, BATCH_SCHEMA_VERSION):
             raise ValueError(
                 f"不支持的 batch.schema_version: {schema_version}"
-                f"（支持 1 与 {BATCH_SCHEMA_VERSION}）"
+                f"（支持 1、2 与 {BATCH_SCHEMA_VERSION}）"
             )
         budget_tier = str(payload.get("budget_tier", B1_TIER) or B1_TIER)
         if budget_tier not in (B1_TIER, B3_TIER):
             raise ValueError(f"batch.budget_tier 非法: {budget_tier!r}")
+        max_concurrency = int(payload.get("max_concurrency", 1) or 1)
+        rate_limit_per_minute = int(
+            payload.get("rate_limit_per_minute", 0) or 0
+        )
+        if max_concurrency < 1:
+            raise ValueError("batch.max_concurrency 必须 >= 1")
+        if rate_limit_per_minute < 0:
+            raise ValueError("batch.rate_limit_per_minute 不能为负数")
         return cls(
             schema_version=schema_version,
             batch_id=_text(payload, "batch_id"),
@@ -170,6 +182,8 @@ class BatchManifest:
             status=_text(payload, "status"),
             resume_cursor=str(payload.get("resume_cursor", "") or ""),
             cells=cells,
+            max_concurrency=max_concurrency,
+            rate_limit_per_minute=rate_limit_per_minute,
         )
 
 
@@ -266,6 +280,8 @@ class BatchReport:
             "source_batch_id": self.manifest.source_batch_id,
             "status": self.manifest.status,
             "resume_cursor": self.manifest.resume_cursor,
+            "max_concurrency": self.manifest.max_concurrency,
+            "rate_limit_per_minute": self.manifest.rate_limit_per_minute,
             "cell_count": len(self.manifest.cells),
             "completed_cells": sum(
                 1 for cell in self.manifest.cells if cell.complete
@@ -287,6 +303,11 @@ class BatchReport:
             f"- 协议哈希：`{self.manifest.protocol_hash}`",
             f"- 阶段：`{self.manifest.phase}`",
             f"- 预算档：`{self.manifest.budget_tier}`",
+            f"- 并发上限：`{self.manifest.max_concurrency}`",
+            (
+                "- Trial 启动速率："
+                f"`{self.manifest.rate_limit_per_minute or 'unlimited'}`"
+            ),
             f"- 状态：`{self.manifest.status}`",
             (
                 f"- 单元：{sum(1 for cell in self.manifest.cells if cell.complete)}"
@@ -331,6 +352,46 @@ class BatchOutcome:
     report_markdown_path: Path
 
 
+class _TrialStartPacer:
+    def __init__(self, rate_limit_per_minute: int) -> None:
+        self._interval_s = (
+            60.0 / rate_limit_per_minute if rate_limit_per_minute > 0 else 0.0
+        )
+        self._lock = asyncio.Lock()
+        self._next_start = 0.0
+
+    async def wait(self) -> None:
+        if self._interval_s <= 0:
+            return
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            scheduled = max(now, self._next_start)
+            self._next_start = scheduled + self._interval_s
+        delay = scheduled - now
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+
+class _LimitedTrialExecutor:
+    def __init__(
+        self,
+        executor: TrialExecutor,
+        gate: asyncio.Semaphore,
+        pacer: _TrialStartPacer,
+    ) -> None:
+        self._executor = executor
+        self._gate = gate
+        self._pacer = pacer
+
+    async def execute(
+        self, spec: ExperimentSpec, trial_index: int
+    ) -> Any:
+        async with self._gate:
+            await self._pacer.wait()
+            return await self._executor.execute(spec, trial_index)
+
+
 class BatchRunner:
     def __init__(
         self,
@@ -353,9 +414,15 @@ class BatchRunner:
         source_batch_id: str = "",
         baseline_by_cell: BaselineByCell | None = None,
         cell_keys: set[tuple[str, str]] | None = None,
+        max_concurrency: int = 1,
+        rate_limit_per_minute: int = 0,
     ) -> BatchOutcome:
         if budget_tier not in (B1_TIER, B3_TIER):
             raise ValueError(f"未知预算档位: {budget_tier!r}")
+        if max_concurrency < 1:
+            raise ValueError("max_concurrency 必须 >= 1")
+        if rate_limit_per_minute < 0:
+            raise ValueError("rate_limit_per_minute 不能为负数")
         selected_tasks = self._select_tasks(task_ids)
         selected_arms = self._select_arms(arm_names)
         batch_id = batch_id.strip() or _new_batch_id()
@@ -377,6 +444,8 @@ class BatchRunner:
                 expected_cells=cells,
                 budget_tier=budget_tier,
                 source_batch_id=source_batch_id,
+                max_concurrency=max_concurrency,
+                rate_limit_per_minute=rate_limit_per_minute,
             )
         else:
             created = _now()
@@ -394,6 +463,8 @@ class BatchRunner:
                 status="running",
                 resume_cursor=cells[0].cell_id,
                 cells=cells,
+                max_concurrency=max_concurrency,
+                rate_limit_per_minute=rate_limit_per_minute,
             )
             self._batches.write(manifest)
 
@@ -406,6 +477,8 @@ class BatchRunner:
         self._batches.write(manifest)
 
         for index, cell in enumerate(manifest.cells):
+            if cell.status != "completed":
+                continue
             spec = self._protocol.experiment_spec(
                 cell.task_id,
                 cell.arm,
@@ -420,30 +493,53 @@ class BatchRunner:
             )
             if spec.experiment_id != cell.experiment_id:
                 raise ValueError("批次单元与协议映射出的 Experiment ID 不一致")
-            if cell.status == "completed":
-                if not self._evidence_complete(spec):
-                    cell = replace(
-                        cell,
-                        status="error",
-                        error="Batch 标记完成，但 Experiment/Run Record 证据不完整",
-                    )
-                    manifest = self._replace_cell(manifest, index, cell)
-                    self._batches.write(manifest)
-                continue
+            if not self._evidence_complete(spec):
+                cell = replace(
+                    cell,
+                    status="error",
+                    error="Batch 标记完成，但 Experiment/Run Record 证据不完整",
+                )
+                manifest = self._replace_cell(manifest, index, cell)
+                self._batches.write(manifest)
 
-            running_cell = replace(cell, status="running", error="")
-            manifest = self._replace_cell(manifest, index, running_cell)
-            manifest = replace(
-                manifest,
-                updated_at=_now(),
-                resume_cursor=running_cell.cell_id,
+        gate = asyncio.Semaphore(max_concurrency)
+        pacer = _TrialStartPacer(rate_limit_per_minute)
+        manifest_lock = asyncio.Lock()
+
+        async def run_cell(index: int, initial_cell: BatchCell) -> None:
+            nonlocal manifest
+            spec = self._protocol.experiment_spec(
+                initial_cell.task_id,
+                initial_cell.arm,
+                phase=phase,
+                batch_id=batch_id,
+                budget_tier=budget_tier,
+                source_batch_id=source_batch_id,
+                baseline_cost_usd=(baseline_by_cell or {})
+                .get((initial_cell.task_id, initial_cell.arm), (0.0, 0))[0],
+                baseline_tokens=(baseline_by_cell or {})
+                .get((initial_cell.task_id, initial_cell.arm), (0.0, 0))[1],
             )
-            self._batches.write(manifest)
+            if spec.experiment_id != initial_cell.experiment_id:
+                raise ValueError("批次单元与协议映射出的 Experiment ID 不一致")
+
+            running_cell = replace(initial_cell, status="running", error="")
+            async with manifest_lock:
+                manifest = self._replace_cell(manifest, index, running_cell)
+                manifest = replace(
+                    manifest,
+                    updated_at=_now(),
+                    resume_cursor=running_cell.cell_id,
+                )
+                self._batches.write(manifest)
 
             try:
                 executor = executor_factory(spec)
-                outcome = await ExperimentRunner(self._experiments).run_or_resume(
-                    spec, executor
+                outcome = await ExperimentRunner(
+                    self._experiments
+                ).run_or_resume(
+                    spec,
+                    _LimitedTrialExecutor(executor, gate, pacer),
                 )
             except asyncio.CancelledError:
                 paused = replace(
@@ -451,14 +547,15 @@ class BatchRunner:
                     status="pending",
                     error="CancelledError: batch interrupted",
                 )
-                manifest = self._replace_cell(manifest, index, paused)
-                manifest = replace(
-                    manifest,
-                    updated_at=_now(),
-                    status="paused",
-                    resume_cursor=paused.cell_id,
-                )
-                self._batches.write(manifest)
+                async with manifest_lock:
+                    manifest = self._replace_cell(manifest, index, paused)
+                    manifest = replace(
+                        manifest,
+                        updated_at=_now(),
+                        status="paused",
+                        resume_cursor=paused.cell_id,
+                    )
+                    self._batches.write(manifest)
                 raise
             except Exception as exc:  # noqa: BLE001 - 单单元故障不能吞掉后续单元
                 failed = replace(
@@ -466,7 +563,8 @@ class BatchRunner:
                     status="error",
                     error=f"{type(exc).__name__}: {exc}",
                 )
-                manifest = self._replace_cell(manifest, index, failed)
+                async with manifest_lock:
+                    manifest = self._replace_cell(manifest, index, failed)
             else:
                 complete = replace(
                     running_cell,
@@ -475,14 +573,41 @@ class BatchRunner:
                     status_counts=dict(outcome.manifest.status_counts),
                     error="",
                 )
-                manifest = self._replace_cell(manifest, index, complete)
+                async with manifest_lock:
+                    manifest = self._replace_cell(manifest, index, complete)
 
-            manifest = replace(
-                manifest,
-                updated_at=_now(),
-                resume_cursor=self._resume_cursor(manifest.cells),
-            )
-            self._batches.write(manifest)
+            async with manifest_lock:
+                manifest = replace(
+                    manifest,
+                    updated_at=_now(),
+                    resume_cursor=self._resume_cursor(manifest.cells),
+                )
+                self._batches.write(manifest)
+
+        cells_to_run = [
+            (index, cell)
+            for index, cell in enumerate(manifest.cells)
+            if cell.status != "completed"
+        ]
+        tasks = [
+            asyncio.create_task(run_cell(index, cell))
+            for index, cell in cells_to_run
+        ]
+        try:
+            await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            async with manifest_lock:
+                manifest = replace(
+                    manifest,
+                    updated_at=_now(),
+                    status="paused",
+                    resume_cursor=self._resume_cursor(manifest.cells),
+                )
+                self._batches.write(manifest)
+            raise
 
         all_complete = all(cell.complete for cell in manifest.cells)
         status = (
@@ -516,6 +641,8 @@ class BatchRunner:
         executor_factory: ExecutorFactory,
         phase: Phase = "formal",
         batch_id: str = "",
+        max_concurrency: int | None = None,
+        rate_limit_per_minute: int | None = None,
     ) -> BatchOutcome:
         """从完整 B1 批次派生 B3：只复跑 fail / budget_exhausted 单元。"""
         source = self._batches.load(source_batch_id)
@@ -571,6 +698,16 @@ class BatchRunner:
             baseline_by_cell=baselines,
             cell_keys=set(selected),
             executor_factory=executor_factory,
+            max_concurrency=(
+                source.max_concurrency
+                if max_concurrency is None
+                else max_concurrency
+            ),
+            rate_limit_per_minute=(
+                source.rate_limit_per_minute
+                if rate_limit_per_minute is None
+                else rate_limit_per_minute
+            ),
         )
 
     def _select_tasks(self, task_ids: tuple[str, ...] | None) -> tuple[str, ...]:
@@ -649,6 +786,8 @@ class BatchRunner:
         expected_cells: tuple[BatchCell, ...],
         budget_tier: str,
         source_batch_id: str,
+        max_concurrency: int,
+        rate_limit_per_minute: int,
     ) -> BatchManifest:
         manifest = self._batches.load(batch_id)
         if manifest.protocol_hash != self._protocol.config_hash:
@@ -669,6 +808,16 @@ class BatchRunner:
             raise ValueError(
                 "Batch B3 来源不一致，拒绝恢复: "
                 f"{manifest.source_batch_id!r} != {source_batch_id.strip()!r}"
+            )
+        if manifest.max_concurrency != max_concurrency:
+            raise ValueError(
+                "Batch 并发上限不一致，拒绝恢复: "
+                f"{manifest.max_concurrency} != {max_concurrency}"
+            )
+        if manifest.rate_limit_per_minute != rate_limit_per_minute:
+            raise ValueError(
+                "Batch Trial 启动速率不一致，拒绝恢复: "
+                f"{manifest.rate_limit_per_minute} != {rate_limit_per_minute}"
             )
         expected_signature = [
             (
