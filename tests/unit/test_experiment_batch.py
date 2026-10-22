@@ -49,7 +49,12 @@ class FakeExecutor:
                 prompt_tokens=100 + trial_index,
                 completion_tokens=20,
             ),
-            evidence={"synthetic": True},
+            evidence={
+                "synthetic": True,
+                "budget_tier": spec.config.get("budget_tier", "B1"),
+                "baseline_cost_usd": spec.config.get("baseline_cost_usd", 0.0),
+                "baseline_tokens": spec.config.get("baseline_tokens", 0),
+            },
         )
 
 
@@ -228,6 +233,102 @@ async def test_batch_report_uses_run_records_and_keeps_errors_out_of_pass_rate(
     assert report.dose.arms == ("L0",)
 
 
+@pytest.mark.asyncio
+async def test_b3_only_reruns_fail_and_budget_exhausted_cells_with_baseline(
+    tmp_path,
+) -> None:
+    protocol = replace(
+        load_protocol(),
+        tasks=load_protocol().tasks[:1],
+        repeats=replace(load_protocol().repeats, formal=2),
+    )
+    experiments = ExperimentStore(tmp_path / "experiments")
+    runner = BatchRunner(experiments, protocol)
+    source_executor = FakeExecutor(
+        {
+            ("0896629", "L0", 0): "pass",
+            ("0896629", "L0", 1): "pass",
+            ("0896629", "L1", 0): "fail",
+            ("0896629", "L1", 1): "pass",
+            ("0896629", "L2", 0): "error",
+            ("0896629", "L2", 1): "error",
+            ("0896629", "L3", 0): "budget_exhausted",
+            ("0896629", "L3", 1): "fail",
+        }
+    )
+
+    source = await runner.run(
+        phase="formal",
+        batch_id="source-b1",
+        executor_factory=lambda spec: source_executor,
+    )
+    assert source.manifest.budget_tier == "B1"
+    assert len(source_executor.calls) == 8
+
+    b3_executor = FakeExecutor()
+    outcome = await runner.run_b3(
+        source_batch_id="source-b1",
+        phase="formal",
+        batch_id="rerun-b3",
+        executor_factory=lambda spec: b3_executor,
+    )
+
+    assert outcome.manifest.budget_tier == "B3"
+    assert outcome.manifest.source_batch_id == "source-b1"
+    assert [cell.cell_id for cell in outcome.manifest.cells] == [
+        "0896629__L1",
+        "0896629__L3",
+    ]
+    assert [cell.expected_trials for cell in outcome.manifest.cells] == [2, 2]
+    assert b3_executor.calls == [
+        ("0896629", "L1", 0),
+        ("0896629", "L1", 1),
+        ("0896629", "L3", 0),
+        ("0896629", "L3", 1),
+    ]
+
+    l1_spec = protocol.experiment_spec(
+        "0896629",
+        "L1",
+        phase="formal",
+        batch_id="rerun-b3",
+        budget_tier="B3",
+        source_batch_id="source-b1",
+        baseline_cost_usd=0.0,
+        baseline_tokens=241,
+    )
+    manifest = experiments.load_manifest(l1_spec.experiment_id)
+    assert manifest.spec.config["budget_tier"] == "B3"
+    assert manifest.spec.config["baseline_tokens"] == 241
+    assert manifest.spec.config["budget"] == protocol.budget.b3.to_dict()
+
+    report = build_batch_report(outcome.manifest, experiments, protocol)
+    assert report.dose.tier == "B3"
+    assert report.to_dict()["budget_tier"] == "B3"
+    assert report.to_dict()["source_batch_id"] == "source-b1"
+    assert report.dose.total_runs == 4
+
+
+@pytest.mark.asyncio
+async def test_b3_refuses_to_run_when_source_has_no_eligible_cells(tmp_path) -> None:
+    protocol = replace(load_protocol(), tasks=load_protocol().tasks[:1])
+    runner = BatchRunner(ExperimentStore(tmp_path / "experiments"), protocol)
+    await runner.run(
+        phase="formal",
+        arm_names=("L0",),
+        batch_id="source-all-pass",
+        executor_factory=lambda spec: FakeExecutor(),
+    )
+
+    with pytest.raises(ValueError, match="没有 B3 候选"):
+        await runner.run_b3(
+            source_batch_id="source-all-pass",
+            phase="formal",
+            batch_id="rerun-b3",
+            executor_factory=lambda spec: FakeExecutor(),
+        )
+
+
 def test_batch_cli_runs_a_full_mock_subset_and_writes_reports(
     tmp_path, capsys
 ) -> None:
@@ -259,3 +360,43 @@ def test_batch_cli_runs_a_full_mock_subset_and_writes_reports(
     batch_dir = BatchStore(tmp_path / "experiments").batch_dir("batch-cli")
     assert (batch_dir / "report.json").exists()
     assert (batch_dir / "report.md").exists()
+
+
+def test_batch_cli_b3_selects_only_failed_cells_and_records_source(
+    tmp_path, capsys
+) -> None:
+    protocol = load_protocol()
+    experiments = ExperimentStore(tmp_path / "experiments")
+    source_executor = FakeExecutor({("0896629", "L1", 0): "fail"})
+    asyncio.run(
+        BatchRunner(experiments, protocol).run(
+            phase="formal",
+            batch_id="source-cli-b1",
+            executor_factory=lambda spec: source_executor,
+        )
+    )
+    capsys.readouterr()
+
+    code = batch_cli.main(
+        [
+            "b3",
+            "--source-batch",
+            "source-cli-b1",
+            "--phase",
+            "formal",
+            "--mode",
+            "mock",
+            "--out",
+            str(tmp_path / "experiments"),
+            "--batch-id",
+            "rerun-cli-b3",
+        ]
+    )
+
+    assert code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["budget_tier"] == "B3"
+    assert summary["source_batch_id"] == "source-cli-b1"
+    assert summary["cell_count"] == 1
+    assert summary["cells"][0]["cell_id"] == "0896629__L1"
+    assert summary["completed_runs"] == 3

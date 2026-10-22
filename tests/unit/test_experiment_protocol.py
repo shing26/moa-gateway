@@ -104,6 +104,35 @@ def test_protocol_builds_cell_specs_with_hash_bound_identity() -> None:
     assert spec.config_hash != changed.config_hash
 
 
+def test_b3_spec_has_distinct_identity_budget_and_baseline_transport() -> None:
+    protocol = load_protocol()
+    b1 = protocol.experiment_spec("0896629", "L3", batch_id="batch-unit")
+    b3 = protocol.experiment_spec(
+        "0896629",
+        "L3",
+        phase="formal",
+        batch_id="batch-unit",
+        budget_tier="B3",
+        source_batch_id="source-batch",
+        baseline_cost_usd=1.25,
+        baseline_tokens=1234,
+    )
+
+    # B1 的身份不能因新增 B3 能力而漂移；正在恢复的批次依赖这个稳定值。
+    assert b1.experiment_id == "exp-7b67546e621d44ac"
+    assert b1.config_hash == (
+        "8f886cd47f3113013c9bee2c41cdddb523c31902b474b510c4c74068c9a5b2b8"
+    )
+    assert b1.config["budget_tier"] == "B1"
+    assert b3.experiment_id != b1.experiment_id
+    assert b3.config_hash != b1.config_hash
+    assert b3.config["budget_tier"] == "B3"
+    assert b3.config["budget"] == protocol.budget.b3.to_dict()
+    assert b3.config["b3_source_batch_id"] == "source-batch"
+    assert b3.config["baseline_cost_usd"] == 1.25
+    assert b3.config["baseline_tokens"] == 1234
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [

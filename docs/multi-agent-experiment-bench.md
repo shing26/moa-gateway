@@ -99,6 +99,24 @@ Experiment/Trial 落盘、完成跳过、中断恢复和报告：
 Trial 数和 `resume_cursor`。重复执行同一 `batch-id` 时，已完成且有完整证据的单元
 直接跳过；被中断的 Experiment 从缺失 Trial 继续；已有 Run Record 永不覆盖。
 
+### B3 放宽复跑
+
+B3 不手工填写 `(task, arm)` 列表，也不重新跑已经通过的单元。它读取一个完整 B1
+批次的 Run Record，只选择出现过 `fail` 或 `budget_exhausted` 的单元；`error` 是
+基础设施噪音，不会触发能力复跑。
+
+```powershell
+.\.venv\Scripts\python.exe bench/run_batch.py b3 `
+  --source-batch m6-formal-b1-live-r1 `
+  --phase formal `
+  --mode live `
+  --batch-id m6-formal-b3-live-r1 `
+  --out .bench-experiments
+```
+
+B3 Experiment 有独立 ID 和 `B3` 预算档，并记录来源批次、B1 累计 cost/token 基线。
+来源批次协议不一致、仍有未完成单元，或没有任何可复跑档位时，命令拒绝启动。
+
 ## 工作区写隔离
 
 并行专家不直接写共享工作区。每个专家先获得源工作区的隔离副本，执行结束后只交回

@@ -56,6 +56,13 @@ class MockBatchExecutor:
                 "mock": True,
                 "task_id": task_id,
                 "arm": arm,
+                "budget_tier": str(spec.config.get("budget_tier", "B1")),
+                "baseline_cost_usd": float(
+                    spec.config.get("baseline_cost_usd", 0.0) or 0.0
+                ),
+                "baseline_tokens": int(
+                    spec.config.get("baseline_tokens", 0) or 0
+                ),
                 "warning": "不得作为真实模型能力结论",
             },
         )
@@ -115,6 +122,10 @@ def _live_executor(spec: ExperimentSpec, *, output_root: Path):
             arm=str(current.config["arm"]),
             budget=budget,
             budget_tier=str(current.config.get("budget_tier", "B1")),
+            baseline_cost_usd=float(
+                current.config.get("baseline_cost_usd", 0.0) or 0.0
+            ),
+            baseline_tokens=int(current.config.get("baseline_tokens", 0) or 0),
         )
         return result, workdir / task.task_id
 
@@ -136,6 +147,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     batch.add_argument("--batch-id", default="")
     batch.add_argument("--mode", choices=("mock", "live"), default="mock")
     batch.add_argument("--out", default=str(DEFAULT_OUT))
+    b3 = sub.add_parser("b3", help="从完整 B1 批次派生失败档位的 B3 放宽复跑")
+    b3.add_argument("--protocol", default=str(DEFAULT_PROTOCOL_PATH))
+    b3.add_argument("--source-batch", required=True)
+    b3.add_argument(
+        "--phase",
+        choices=("pilot", "baseline", "formal"),
+        default="formal",
+    )
+    b3.add_argument("--batch-id", default="")
+    b3.add_argument("--mode", choices=("mock", "live"), default="mock")
+    b3.add_argument("--out", default=str(DEFAULT_OUT))
     return parser.parse_args(argv)
 
 
@@ -164,9 +186,36 @@ async def _run(args: argparse.Namespace) -> int:
     return 0 if outcome.manifest.status == "completed" else 1
 
 
+async def _run_b3(args: argparse.Namespace) -> int:
+    protocol = load_protocol(args.protocol)
+    store = ExperimentStore(args.out)
+    output_root = Path(args.out).resolve()
+
+    if args.mode == "mock":
+        factory = lambda spec: MockBatchExecutor()
+    else:
+        factory = lambda spec: _live_executor(spec, output_root=output_root)
+
+    outcome = await BatchRunner(store, protocol).run_b3(
+        source_batch_id=args.source_batch,
+        phase=args.phase,
+        batch_id=args.batch_id,
+        executor_factory=factory,
+    )
+    payload: dict[str, Any] = outcome.report.to_dict()
+    payload["manifest"] = str(outcome.manifest_path)
+    payload["report_json"] = str(outcome.report_json_path)
+    payload["report_markdown"] = str(outcome.report_markdown_path)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0 if outcome.manifest.status == "completed" else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
-        return asyncio.run(_run(parse_args(argv)))
+        args = parse_args(argv)
+        if args.command == "b3":
+            return asyncio.run(_run_b3(args))
+        return asyncio.run(_run(args))
     except (TypeError, ValueError, FileNotFoundError, FileExistsError) as exc:
         print(
             json.dumps(

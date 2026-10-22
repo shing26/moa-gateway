@@ -8,22 +8,25 @@ import os
 import re
 import uuid
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from bench.agent.types import B1_TIER, B3_TIER
 from bench.experiment.protocol import ExperimentProtocol, Phase
 from bench.experiment.runner import ExperimentRunner
 from bench.experiment.store import ExperimentStore
 from bench.experiment.types import ExperimentSpec, TrialExecutor
 from bench.report import DoseReport, RunRow, build_report, render_markdown
 
-BATCH_SCHEMA_VERSION = 1
+BATCH_SCHEMA_VERSION = 2
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_B3_TRIGGERS = frozenset({"fail", "budget_exhausted"})
 
 ExecutorFactory = Callable[[ExperimentSpec], TrialExecutor]
+BaselineByCell = Mapping[tuple[str, str], tuple[float, int]]
 
 
 def _now() -> str:
@@ -107,6 +110,8 @@ class BatchManifest:
     protocol_version: str
     protocol_hash: str
     phase: str
+    budget_tier: str
+    source_batch_id: str
     created_at: str
     updated_at: str
     status: str
@@ -121,6 +126,8 @@ class BatchManifest:
             "protocol_version": self.protocol_version,
             "protocol_hash": self.protocol_hash,
             "phase": self.phase,
+            "budget_tier": self.budget_tier,
+            "source_batch_id": self.source_batch_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "status": self.status,
@@ -140,13 +147,24 @@ class BatchManifest:
         )
         if len(cells) != len(raw_cells):
             raise TypeError("batch.cells 的每一项都必须是对象")
+        schema_version = _integer(payload, "schema_version")
+        if schema_version not in (1, BATCH_SCHEMA_VERSION):
+            raise ValueError(
+                f"不支持的 batch.schema_version: {schema_version}"
+                f"（支持 1 与 {BATCH_SCHEMA_VERSION}）"
+            )
+        budget_tier = str(payload.get("budget_tier", B1_TIER) or B1_TIER)
+        if budget_tier not in (B1_TIER, B3_TIER):
+            raise ValueError(f"batch.budget_tier 非法: {budget_tier!r}")
         return cls(
-            schema_version=_integer(payload, "schema_version"),
+            schema_version=schema_version,
             batch_id=_text(payload, "batch_id"),
             protocol_id=_text(payload, "protocol_id"),
             protocol_version=_text(payload, "protocol_version"),
             protocol_hash=_text(payload, "protocol_hash"),
             phase=_text(payload, "phase"),
+            budget_tier=budget_tier,
+            source_batch_id=str(payload.get("source_batch_id", "") or ""),
             created_at=_text(payload, "created_at"),
             updated_at=_text(payload, "updated_at"),
             status=_text(payload, "status"),
@@ -244,6 +262,8 @@ class BatchReport:
             "protocol_version": self.manifest.protocol_version,
             "protocol_hash": self.manifest.protocol_hash,
             "phase": self.manifest.phase,
+            "budget_tier": self.manifest.budget_tier,
+            "source_batch_id": self.manifest.source_batch_id,
             "status": self.manifest.status,
             "resume_cursor": self.manifest.resume_cursor,
             "cell_count": len(self.manifest.cells),
@@ -266,6 +286,7 @@ class BatchReport:
             f"- 协议：`{self.manifest.protocol_id}` v{self.manifest.protocol_version}",
             f"- 协议哈希：`{self.manifest.protocol_hash}`",
             f"- 阶段：`{self.manifest.phase}`",
+            f"- 预算档：`{self.manifest.budget_tier}`",
             f"- 状态：`{self.manifest.status}`",
             (
                 f"- 单元：{sum(1 for cell in self.manifest.cells if cell.complete)}"
@@ -278,10 +299,16 @@ class BatchReport:
             "- 统计声明：**不授权**；样本不足时只作方向性观察。",
             "",
             "## 单元状态",
-            "",
-            "| 任务 | Arm | 状态 | Trials | 结局 |",
-            "| --- | --- | --- | --- | --- |",
         ]
+        if self.manifest.source_batch_id:
+            lines.insert(6, f"- B1 来源批次：`{self.manifest.source_batch_id}`")
+        lines.extend(
+            [
+                "",
+                "| 任务 | Arm | 状态 | Trials | 结局 |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
         for cell in self.manifest.cells:
             outcomes = ", ".join(
                 f"{key}={value}"
@@ -322,7 +349,13 @@ class BatchRunner:
         batch_id: str = "",
         task_ids: tuple[str, ...] | None = None,
         arm_names: tuple[str, ...] | None = None,
+        budget_tier: str = B1_TIER,
+        source_batch_id: str = "",
+        baseline_by_cell: BaselineByCell | None = None,
+        cell_keys: set[tuple[str, str]] | None = None,
     ) -> BatchOutcome:
+        if budget_tier not in (B1_TIER, B3_TIER):
+            raise ValueError(f"未知预算档位: {budget_tier!r}")
         selected_tasks = self._select_tasks(task_ids)
         selected_arms = self._select_arms(arm_names)
         batch_id = batch_id.strip() or _new_batch_id()
@@ -331,6 +364,10 @@ class BatchRunner:
             batch_id=batch_id,
             task_ids=selected_tasks,
             arm_names=selected_arms,
+            budget_tier=budget_tier,
+            source_batch_id=source_batch_id,
+            baseline_by_cell=baseline_by_cell or {},
+            cell_keys=cell_keys,
         )
         manifest_path = self._batches.manifest_path(batch_id)
         if manifest_path.exists():
@@ -338,6 +375,8 @@ class BatchRunner:
                 batch_id=batch_id,
                 phase=phase,
                 expected_cells=cells,
+                budget_tier=budget_tier,
+                source_batch_id=source_batch_id,
             )
         else:
             created = _now()
@@ -348,6 +387,8 @@ class BatchRunner:
                 protocol_version=self._protocol.version,
                 protocol_hash=self._protocol.config_hash,
                 phase=phase,
+                budget_tier=budget_tier,
+                source_batch_id=source_batch_id.strip(),
                 created_at=created,
                 updated_at=created,
                 status="running",
@@ -370,6 +411,12 @@ class BatchRunner:
                 cell.arm,
                 phase=phase,
                 batch_id=batch_id,
+                budget_tier=budget_tier,
+                source_batch_id=source_batch_id,
+                baseline_cost_usd=(baseline_by_cell or {})
+                .get((cell.task_id, cell.arm), (0.0, 0))[0],
+                baseline_tokens=(baseline_by_cell or {})
+                .get((cell.task_id, cell.arm), (0.0, 0))[1],
             )
             if spec.experiment_id != cell.experiment_id:
                 raise ValueError("批次单元与协议映射出的 Experiment ID 不一致")
@@ -462,6 +509,70 @@ class BatchRunner:
             report_markdown_path=report_markdown,
         )
 
+    async def run_b3(
+        self,
+        *,
+        source_batch_id: str,
+        executor_factory: ExecutorFactory,
+        phase: Phase = "formal",
+        batch_id: str = "",
+    ) -> BatchOutcome:
+        """从完整 B1 批次派生 B3：只复跑 fail / budget_exhausted 单元。"""
+        source = self._batches.load(source_batch_id)
+        if source.protocol_hash != self._protocol.config_hash:
+            raise ValueError(
+                "B1 来源批次的 protocol_hash 与当前协议不一致，拒绝生成 B3: "
+                f"{source.protocol_hash} != {self._protocol.config_hash}"
+            )
+        if source.budget_tier != B1_TIER:
+            raise ValueError("B3 来源批次必须是 B1")
+        incomplete = tuple(cell.cell_id for cell in source.cells if not cell.complete)
+        if incomplete:
+            raise ValueError(
+                "B1 来源批次仍有未完成单元，拒绝生成 B3: "
+                + ", ".join(incomplete)
+            )
+
+        selected: list[tuple[str, str]] = []
+        baselines: dict[tuple[str, str], tuple[float, int]] = {}
+        for cell in source.cells:
+            experiment = self._experiments.load_manifest(cell.experiment_id)
+            source_tier = str(
+                experiment.spec.config.get("budget_tier", B1_TIER) or B1_TIER
+            )
+            if source_tier != B1_TIER:
+                raise ValueError(
+                    f"来源单元不是 B1: {cell.cell_id} ({source_tier})"
+                )
+            records = self._experiments.load_experiment_records(cell.experiment_id)
+            if not records:
+                raise ValueError(f"来源单元没有 Run Record: {cell.cell_id}")
+            if not any(record.status in _B3_TRIGGERS for record in records):
+                continue
+            key = (cell.task_id, cell.arm)
+            selected.append(key)
+            baselines[key] = (
+                sum(float(record.metrics.cost_usd) for record in records),
+                sum(int(record.metrics.total_tokens) for record in records),
+            )
+
+        if not selected:
+            raise ValueError("B1 批次没有 B3 候选（无 fail / budget_exhausted）")
+
+        task_ids = tuple(dict.fromkeys(task_id for task_id, _ in selected))
+        arm_names = tuple(dict.fromkeys(arm for _, arm in selected))
+        return await self.run(
+            phase=phase,
+            batch_id=batch_id,
+            task_ids=task_ids,
+            arm_names=arm_names,
+            budget_tier=B3_TIER,
+            source_batch_id=source_batch_id,
+            baseline_by_cell=baselines,
+            cell_keys=set(selected),
+            executor_factory=executor_factory,
+        )
+
     def _select_tasks(self, task_ids: tuple[str, ...] | None) -> tuple[str, ...]:
         if task_ids is None:
             return tuple(task.task_id for task in self._protocol.tasks)
@@ -489,6 +600,10 @@ class BatchRunner:
         batch_id: str,
         task_ids: tuple[str, ...],
         arm_names: tuple[str, ...],
+        budget_tier: str,
+        source_batch_id: str,
+        baseline_by_cell: BaselineByCell,
+        cell_keys: set[tuple[str, str]] | None,
     ) -> tuple[BatchCell, ...]:
         cells: list[BatchCell] = []
         for task in self._protocol.tasks:
@@ -497,11 +612,20 @@ class BatchRunner:
             for arm in self._protocol.arms:
                 if arm.name not in arm_names:
                     continue
+                if cell_keys is not None and (task.task_id, arm.name) not in cell_keys:
+                    continue
+                baseline_cost, baseline_tokens = baseline_by_cell.get(
+                    (task.task_id, arm.name), (0.0, 0)
+                )
                 spec = self._protocol.experiment_spec(
                     task.task_id,
                     arm.name,
                     phase=phase,
                     batch_id=batch_id,
+                    budget_tier=budget_tier,
+                    source_batch_id=source_batch_id,
+                    baseline_cost_usd=baseline_cost,
+                    baseline_tokens=baseline_tokens,
                 )
                 cells.append(
                     BatchCell(
@@ -523,6 +647,8 @@ class BatchRunner:
         batch_id: str,
         phase: str,
         expected_cells: tuple[BatchCell, ...],
+        budget_tier: str,
+        source_batch_id: str,
     ) -> BatchManifest:
         manifest = self._batches.load(batch_id)
         if manifest.protocol_hash != self._protocol.config_hash:
@@ -533,6 +659,16 @@ class BatchRunner:
         if manifest.phase != phase:
             raise ValueError(
                 f"Batch 阶段不一致，拒绝恢复: {manifest.phase!r} != {phase!r}"
+            )
+        if manifest.budget_tier != budget_tier:
+            raise ValueError(
+                "Batch 预算档不一致，拒绝恢复: "
+                f"{manifest.budget_tier!r} != {budget_tier!r}"
+            )
+        if manifest.source_batch_id != source_batch_id.strip():
+            raise ValueError(
+                "Batch B3 来源不一致，拒绝恢复: "
+                f"{manifest.source_batch_id!r} != {source_batch_id.strip()!r}"
             )
         expected_signature = [
             (
@@ -608,6 +744,21 @@ def build_batch_report(
     for cell in manifest.cells:
         if cell.status != "completed":
             continue
+        experiment = experiment_store.load_manifest(cell.experiment_id)
+        tier = str(
+            experiment.spec.config.get("budget_tier", B1_TIER) or B1_TIER
+        )
+        if tier != manifest.budget_tier:
+            raise ValueError(
+                f"{cell.cell_id} 的 Experiment 预算档 {tier!r} "
+                f"与 Batch {manifest.budget_tier!r} 不一致"
+            )
+        baseline_cost = float(
+            experiment.spec.config.get("baseline_cost_usd", 0.0) or 0.0
+        )
+        baseline_tokens = int(
+            experiment.spec.config.get("baseline_tokens", 0) or 0
+        )
         for record in experiment_store.load_experiment_records(cell.experiment_id):
             rows.append(
                 RunRow(
@@ -617,15 +768,18 @@ def build_batch_report(
                     cost_usd=record.metrics.cost_usd,
                     prompt_tokens=record.metrics.prompt_tokens,
                     completion_tokens=record.metrics.completion_tokens,
-                    budget_tier="B1",
+                    budget_tier=tier,
                     model=str(record.model.get("model", "") or ""),
                     wall_clock_s=record.duration_ms / 1000,
                     source=str(record.path or ""),
                     task_origin=origins.get(cell.task_id, "E1"),  # type: ignore[arg-type]
+                    baseline_cost_usd=baseline_cost,
+                    baseline_tokens=baseline_tokens,
                 )
             )
     dose = build_report(
         rows,
+        tier=manifest.budget_tier,
         tasks=(cell.task_id for cell in manifest.cells),
         arms=tuple(dict.fromkeys(cell.arm for cell in manifest.cells)),
     )
@@ -640,6 +794,7 @@ __all__ = [
     "BatchReport",
     "BatchRunner",
     "BatchStore",
+    "BaselineByCell",
     "ExecutorFactory",
     "build_batch_report",
 ]

@@ -359,6 +359,9 @@ async def test_bench_adapter_maps_harness_verdict_and_steps(tmp_path) -> None:
     assert evidence.metrics.tool_errors == 1
     assert evidence.prompt_hashes == ("prompt-a", "prompt-b")
     assert evidence.evidence["arm"] == "L3"
+    assert evidence.evidence["budget_tier"] == "B1"
+    assert evidence.evidence["baseline_cost_usd"] == 0.0
+    assert evidence.evidence["baseline_tokens"] == 0
     assert evidence.evidence["patch_touched_tests"] is False
     assert evidence.evidence["finish_reasons"] == ["length", "stop"]
     assert evidence.evidence["reasoning_chars"] == 1234

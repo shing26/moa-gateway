@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from bench.agent.types import B1_TIER, B3_TIER
 from bench.arms import arm_names
 from bench.experiment.types import ExperimentSpec
 
@@ -453,49 +454,79 @@ class ExperimentProtocol:
         *,
         phase: Phase = "baseline",
         batch_id: str = "protocol-preview",
+        budget_tier: str = B1_TIER,
+        source_batch_id: str = "",
+        baseline_cost_usd: float = 0.0,
+        baseline_tokens: int = 0,
     ) -> ExperimentSpec:
         """把一个协议单元映射为独立 Experiment；repeat 是该 Experiment 的 Trial。"""
         task = self._task(task_id)
         arm = self._arm(arm_name)
         if not batch_id.strip():
             raise ValueError("batch_id 不能为空")
-        cell = _json_hash(
-            {
-                "protocol_hash": self.config_hash,
-                "batch_id": batch_id,
-                "phase": phase,
-                "task_id": task.task_id,
-                "arm": arm.name,
-            }
+        if budget_tier not in (B1_TIER, B3_TIER):
+            raise ValueError(
+                f"未知预算档位: {budget_tier!r}（只认 {B1_TIER} / {B3_TIER}）"
+            )
+        if budget_tier == B3_TIER and not source_batch_id.strip():
+            raise ValueError("B3 必须声明 source_batch_id")
+        if baseline_cost_usd < 0 or baseline_tokens < 0:
+            raise ValueError("B3 基线成本与 token 不能为负数")
+
+        identity: dict[str, Any] = {
+            "protocol_hash": self.config_hash,
+            "batch_id": batch_id,
+            "phase": phase,
+            "task_id": task.task_id,
+            "arm": arm.name,
+        }
+        if budget_tier == B3_TIER:
+            # B1 的历史身份必须稳定；B3 才把预算档加入 Experiment ID。
+            identity["budget_tier"] = budget_tier
+        cell = _json_hash(identity)
+        budget = (
+            self.budget.b3.to_dict()
+            if budget_tier == B3_TIER
+            else self.budget.b1.to_dict()
         )
-        budget = self.budget.b1.to_dict()
+        config: dict[str, Any] = {
+            "protocol_id": self.protocol_id,
+            "protocol_version": self.version,
+            "protocol_hash": self.config_hash,
+            "phase": phase,
+            "batch_id": batch_id,
+            "task_id": task.task_id,
+            "tasks_dir": "bench/tasks",
+            "arm": arm.name,
+            "arm_version": arm.version,
+            "budget_tier": B1_TIER,
+            "budget": budget,
+            "prompt_version": "bench-arm-prompts-v1",
+        }
+        metadata: dict[str, Any] = {
+            "entrypoint": "bench/experiment/protocol.py",
+            "task_origin": task.origin,
+            "retry": self.retry.to_dict(),
+            "exclusions": self.exclusions.to_dict(),
+            "reporting": self.reporting.to_dict(),
+        }
+        if budget_tier == B3_TIER:
+            config.update(
+                {
+                    "budget_tier": B3_TIER,
+                    "b3_source_batch_id": source_batch_id.strip(),
+                    "baseline_cost_usd": baseline_cost_usd,
+                    "baseline_tokens": baseline_tokens,
+                }
+            )
         return ExperimentSpec(
             experiment_id=f"exp-{cell[:16]}",
             task=f"bench:{task.task_id}",
             adapter=f"bench:{arm.name}",
             trials=self.repeats.for_phase(phase),
             model=self.model.experiment_record(),
-            config={
-                "protocol_id": self.protocol_id,
-                "protocol_version": self.version,
-                "protocol_hash": self.config_hash,
-                "phase": phase,
-                "batch_id": batch_id,
-                "task_id": task.task_id,
-                "tasks_dir": "bench/tasks",
-                "arm": arm.name,
-                "arm_version": arm.version,
-                "budget_tier": "B1",
-                "budget": budget,
-                "prompt_version": "bench-arm-prompts-v1",
-            },
-            metadata={
-                "entrypoint": "bench/experiment/protocol.py",
-                "task_origin": task.origin,
-                "retry": self.retry.to_dict(),
-                "exclusions": self.exclusions.to_dict(),
-                "reporting": self.reporting.to_dict(),
-            },
+            config=config,
+            metadata=metadata,
         )
 
     @classmethod

@@ -25,6 +25,9 @@ ADR-025 固定了 `Experiment → Trial → Run Record`，但没有固定“哪�
 7. 推理模型的单次输出上限属于实验语义。v2 在 `max_tokens=1024` 下实测
    `finish_reason=length`、最终 `content` 为空；v3 固定为 4096，并新建协议身份，
    不回写 v2 结果。
+8. B3 必须从完整 B1 批次派生：只选择 `fail` / `budget_exhausted` 单元，排除
+   `error`；B3 Experiment 记录来源批次与 B1 累计 cost/token 基线，并使用独立
+   Experiment ID。没有候选时不得伪造一条空的 B3“通过”结果。
 
 ## 替代方案
 
