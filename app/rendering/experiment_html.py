@@ -17,6 +17,10 @@ def _float(value: Any, digits: int = 0) -> str:
     return f"{float(value or 0):,.{digits}f}"
 
 
+def _cost(value: Any) -> str:
+    return "-" if value is None else f"${float(value):,.4f}"
+
+
 def _rate(value: Any) -> str:
     return "-" if value is None else f"{float(value) * 100:.0f}%"
 
@@ -86,6 +90,15 @@ def batch_page(payload: dict[str, Any]) -> str:
     dose = dict(report.get("report") or {})
     cells = list(payload.get("cells") or [])
     batch_id = str(manifest.get("batch_id", ""))
+    max_concurrency = int(manifest.get("max_concurrency", 1) or 1)
+    rate_limit = int(manifest.get("rate_limit_per_minute", 0) or 0)
+    rate_limit_label = f"{rate_limit:,}/min" if rate_limit else "不限速"
+    sample_target = int(
+        manifest.get("target_trials_per_cell")
+        or manifest.get("repeats")
+        or manifest.get("expected_trials_per_cell")
+        or 1
+    )
     report_cells = {
         (str(item.get("task_id", "")), str(item.get("arm", ""))): item
         for item in (dose.get("cells") or [])
@@ -111,10 +124,11 @@ def batch_page(payload: dict[str, Any]) -> str:
             f'<td class="mono">{esc(cell.get("task_id", ""))}</td>'
             f'<td>{esc(cell.get("arm", ""))}</td>'
             f'<td>{_status(cell.get("status", ""))}</td>'
-            f'<td class="mono">{_int(metrics.get("runs"))}</td>'
+            f'<td class="mono">{_int(metrics.get("runs"))} / {sample_target}</td>'
             f'<td>{_rate(metrics.get("pass_rate"))}</td>'
             f'<td class="mono">{_int(metrics.get("error"))}</td>'
             f'<td class="mono">{_int(metrics.get("budget_exhausted"))}</td>'
+            f'<td class="mono">{_cost(metrics.get("avg_cost_usd"))}</td>'
             f'<td class="mono">{_float(metrics.get("avg_tokens"))}</td>'
             f"<td>{run_links}</td>"
             "</tr>"
@@ -149,6 +163,10 @@ def batch_page(payload: dict[str, Any]) -> str:
       <strong class="stat-value">{_int(report.get("completed_runs"))} / {_int(report.get("expected_runs"))}</strong></div>
     <div class="stat-card"><span class="stat-label">缺失 / 缺口</span>
       <strong class="stat-value">{_int(report.get("missing_runs"))} / {len(gaps)}</strong></div>
+    <div class="stat-card"><span class="stat-label">并发上限</span>
+      <strong class="stat-value">{max_concurrency}</strong></div>
+    <div class="stat-card"><span class="stat-label">启动速率</span>
+      <strong class="stat-value">{esc(rate_limit_label)}</strong></div>
   </div>
   {source_line}
   <p class="muted">协议哈希 <span class="mono">{esc(manifest.get("protocol_hash", ""))}</span></p>
@@ -160,9 +178,9 @@ def batch_page(payload: dict[str, Any]) -> str:
   </div>
   <div class="table-wrap">
     <table class="data-table">
-      <thead><tr><th>任务</th><th>Arm</th><th>状态</th><th>Runs</th><th>通过率</th>
-      <th>Error</th><th>预算耗尽</th><th>平均 token</th><th>记录</th></tr></thead>
-      <tbody>{''.join(rows) or '<tr><td colspan="9" class="muted">暂无单元</td></tr>'}</tbody>
+      <thead><tr><th>任务</th><th>Arm</th><th>状态</th><th>样本量</th><th>通过率</th>
+      <th>Error</th><th>预算耗尽</th><th>平均成本</th><th>平均 token</th><th>记录</th></tr></thead>
+      <tbody>{''.join(rows) or '<tr><td colspan="10" class="muted">暂无单元</td></tr>'}</tbody>
     </table>
   </div>
 </section>

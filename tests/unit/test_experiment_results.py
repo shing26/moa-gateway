@@ -34,7 +34,7 @@ class ResultExecutor:
                 llm_calls=3,
                 prompt_tokens=120,
                 completion_tokens=30,
-                cost_usd=0.0,
+                cost_usd=0.02,
                 tool_calls=2,
             ),
             prompt_hashes=("prompt-a", "prompt-b", "prompt-c"),
@@ -129,6 +129,10 @@ def test_experiment_dashboard_is_read_only_and_links_run_records(
         assert "0896629" in detail.text
         assert f"/runs/{experiment_id}/0" in detail.text
         assert "统计声明未授权" in detail.text
+        assert "并发上限" in detail.text
+        assert "平均成本" in detail.text
+        assert "$0.0200" in detail.text
+        assert "样本量" in detail.text
 
         run = client.get(
             f"/dashboard/experiments/batch-ui/runs/{experiment_id}/0"
