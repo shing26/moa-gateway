@@ -6,10 +6,12 @@ import math
 import random
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
-from bench.experiment.protocol import ProtocolStatistics
 from bench.report.aggregate import RunRow
+
+if TYPE_CHECKING:
+    from bench.experiment.protocol import ProtocolStatistics
 
 _VALID_OUTCOMES = frozenset({"pass", "fail", "budget_exhausted"})
 
