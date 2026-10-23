@@ -229,7 +229,7 @@ async def test_batch_enforces_trial_start_rate_limit(tmp_path) -> None:
         arm_names=("L0", "L1", "L2"),
         batch_id="batch-paced",
         max_concurrency=3,
-        rate_limit_per_minute=6000,
+        rate_limit_per_minute=300,
         executor_factory=lambda spec: executor,
     )
 
@@ -238,7 +238,7 @@ async def test_batch_enforces_trial_start_rate_limit(tmp_path) -> None:
         for earlier, later in zip(executor.starts, executor.starts[1:])
     ]
     assert len(gaps) == 2
-    assert all(gap >= 0.008 for gap in gaps)
+    assert all(gap >= 0.15 for gap in gaps)
 
 
 @pytest.mark.asyncio
@@ -388,7 +388,9 @@ async def test_b3_only_reruns_fail_and_budget_exhausted_cells_with_baseline(
         executor_factory=lambda spec: source_executor,
     )
     assert source.manifest.budget_tier == "B1"
-    assert len(source_executor.calls) == 8
+    assert len(source_executor.calls) == 10
+    assert source_executor.calls.count(("0896629", "L2", 0)) == 2
+    assert source_executor.calls.count(("0896629", "L2", 1)) == 2
 
     b3_executor = FakeExecutor()
     outcome = await runner.run_b3(
@@ -488,6 +490,31 @@ def test_batch_cli_runs_a_full_mock_subset_and_writes_reports(
     batch_dir = BatchStore(tmp_path / "experiments").batch_dir("batch-cli")
     assert (batch_dir / "report.json").exists()
     assert (batch_dir / "report.md").exists()
+
+
+def test_live_retry_uses_a_fresh_attempt_workspace(tmp_path) -> None:
+    first = batch_cli._trial_attempt_workdir(
+        tmp_path,
+        batch_id="batch-live",
+        experiment_id="exp-live",
+        trial_index=0,
+        task_id="task-1",
+    )
+    first_workspace = first / "task-1"
+    first_workspace.mkdir(parents=True)
+    (first_workspace / "partial.txt").write_text("failed attempt", encoding="utf-8")
+
+    second = batch_cli._trial_attempt_workdir(
+        tmp_path,
+        batch_id="batch-live",
+        experiment_id="exp-live",
+        trial_index=0,
+        task_id="task-1",
+    )
+
+    assert first.name == "attempt-000"
+    assert second.name == "attempt-001"
+    assert not (second / "task-1").exists()
 
 
 def test_batch_cli_b3_selects_only_failed_cells_and_records_source(

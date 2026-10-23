@@ -68,6 +68,12 @@ Run Record 的 `evidence.finish_reasons` 与 `evidence.reasoning_chars` 会保�
 预算、重复次数、重试、排除或报告口径的语义变化都会产生新哈希。协议单元映射到
 Experiment 时，哈希进入配置身份，因此不会静默覆盖旧实验结果。
 
+执行器读取协议中的 `retry` 字段：只有 `retry_on` 声明的最终状态会做有限重试，
+当前协议只允许 `error`，`fail` 与 `budget_exhausted` 是实验结果，不重试。重试后的
+一个 Trial 仍只产生一条 Run Record；各 attempt 的状态、错误、usage、工作区快照和
+完整 evidence 保存在 `evidence.retry_attempts`，总 metrics 汇总全部 attempt。
+每次 live attempt 使用独立目录，避免失败 attempt 的半成品污染下一次执行。
+
 ## CLI
 
 权威批量入口是 `bench/run_batch.py`。默认 mock 模式不访问网络，只验证矩阵展开、

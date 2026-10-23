@@ -121,6 +121,151 @@ async def test_trial_exception_is_recorded_and_does_not_hide_later_trials(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_runner_retries_errors_and_preserves_attempt_usage(tmp_path) -> None:
+    class FlakyExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, spec: ExperimentSpec, trial_index: int) -> TrialEvidence:
+            self.calls += 1
+            if self.calls == 1:
+                return TrialEvidence(
+                    status="error",
+                    error="429 Too Many Requests",
+                    metrics=RunMetrics(
+                        llm_calls=1,
+                        prompt_tokens=100,
+                        completion_tokens=20,
+                    ),
+                    evidence={"finish_reasons": ["error"]},
+                )
+            return TrialEvidence(
+                status="pass",
+                metrics=RunMetrics(
+                    llm_calls=2,
+                    prompt_tokens=200,
+                    completion_tokens=30,
+                ),
+                evidence={"finish_reasons": ["stop", "stop"]},
+            )
+
+    retry = {
+        "max_error_retries": 1,
+        "retry_on": ["error"],
+        "do_not_retry_on": ["fail", "budget_exhausted"],
+    }
+    outcome = await ExperimentRunner(ExperimentStore(tmp_path / "records")).run(
+        ExperimentSpec(
+            experiment_id="exp-retry",
+            task="重试基础设施错误",
+            adapter="fake",
+            trials=1,
+            metadata={"retry": retry},
+        ),
+        FlakyExecutor(),
+    )
+
+    assert len(outcome.records) == 1
+    record = outcome.records[0]
+    assert record.status == "pass"
+    assert record.metrics.llm_calls == 3
+    assert record.metrics.prompt_tokens == 300
+    assert record.metrics.completion_tokens == 50
+    assert record.prompt_hashes == ()
+    assert record.evidence["finish_reasons"] == ["stop", "stop"]
+    assert [
+        (attempt["status"], attempt["error"])
+        for attempt in record.evidence["retry_attempts"]
+    ] == [
+        ("error", "429 Too Many Requests"),
+        ("pass", ""),
+    ]
+    assert record.evidence["retry_attempts"][0]["metrics"]["prompt_tokens"] == 100
+    assert record.evidence["retry_attempts"][0]["evidence"] == {
+        "finish_reasons": ["error"]
+    }
+    assert outcome.manifest.trial_count == 1
+
+
+@pytest.mark.asyncio
+async def test_runner_keeps_the_final_error_after_retry_budget_is_exhausted(
+    tmp_path,
+) -> None:
+    class ErrorExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, spec: ExperimentSpec, trial_index: int) -> TrialEvidence:
+            self.calls += 1
+            return TrialEvidence(
+                status="error",
+                error=f"provider outage {self.calls}",
+                evidence={"attempt": self.calls},
+            )
+
+    retry = {
+        "max_error_retries": 1,
+        "retry_on": ["error"],
+        "do_not_retry_on": ["fail", "budget_exhausted"],
+    }
+    executor = ErrorExecutor()
+    outcome = await ExperimentRunner(ExperimentStore(tmp_path / "records")).run(
+        ExperimentSpec(
+            experiment_id="exp-retry-exhausted",
+            task="有限重试",
+            adapter="fake",
+            trials=1,
+            metadata={"retry": retry},
+        ),
+        executor,
+    )
+
+    assert executor.calls == 2
+    record = outcome.records[0]
+    assert record.status == "error"
+    assert record.error == "provider outage 2"
+    assert [item["error"] for item in record.evidence["retry_attempts"]] == [
+        "provider outage 1",
+        "provider outage 2",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["fail", "budget_exhausted"])
+async def test_runner_does_not_retry_experimental_outcomes(
+    tmp_path, status: str
+) -> None:
+    class CountingExecutor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, spec: ExperimentSpec, trial_index: int) -> TrialEvidence:
+            self.calls += 1
+            return TrialEvidence(status=status)
+
+    executor = CountingExecutor()
+    retry = {
+        "max_error_retries": 1,
+        "retry_on": ["error"],
+        "do_not_retry_on": ["fail", "budget_exhausted"],
+    }
+    outcome = await ExperimentRunner(ExperimentStore(tmp_path / status)).run(
+        ExperimentSpec(
+            experiment_id=f"exp-{status}",
+            task="不重试实验结局",
+            adapter="fake",
+            trials=1,
+            metadata={"retry": retry},
+        ),
+        executor,
+    )
+
+    assert executor.calls == 1
+    assert outcome.records[0].status == status
+    assert "retry_attempts" not in outcome.records[0].evidence
+
+
+@pytest.mark.asyncio
 async def test_runner_refuses_to_overwrite_existing_experiment(tmp_path) -> None:
     class FakeExecutor:
         async def execute(self, spec: ExperimentSpec, trial_index: int) -> TrialEvidence:

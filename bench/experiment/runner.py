@@ -48,6 +48,39 @@ def _bounded(value: str) -> str:
     return text[:_TEXT_LIMIT] + "\n…（Run Record 已截断）"
 
 
+def _retry_policy(spec: ExperimentSpec) -> tuple[int, frozenset[str]]:
+    payload = spec.metadata.get("retry") or {}
+    if not isinstance(payload, dict):
+        raise TypeError("Experiment.metadata.retry 必须是对象")
+    retries = int(payload.get("max_error_retries", 0) or 0)
+    if retries < 0:
+        raise ValueError("Experiment.metadata.retry.max_error_retries 不能为负数")
+    retry_on = frozenset(str(item) for item in (payload.get("retry_on") or ()))
+    do_not_retry_on = frozenset(
+        str(item) for item in (payload.get("do_not_retry_on") or ())
+    )
+    overlap = retry_on & do_not_retry_on
+    if overlap:
+        raise ValueError(
+            "Experiment.metadata.retry.retry_on 与 do_not_retry_on 重叠: "
+            f"{sorted(overlap)}"
+        )
+    return retries, retry_on
+
+
+def _sum_metrics(items: list[RunMetrics]) -> RunMetrics:
+    return RunMetrics(
+        llm_calls=sum(item.llm_calls for item in items),
+        prompt_tokens=sum(item.prompt_tokens for item in items),
+        completion_tokens=sum(item.completion_tokens for item in items),
+        cost_usd=sum(item.cost_usd for item in items),
+        llm_latency_ms=sum(item.llm_latency_ms for item in items),
+        tool_calls=sum(item.tool_calls for item in items),
+        tool_errors=sum(item.tool_errors for item in items),
+        tool_arg_rejections=sum(item.tool_arg_rejections for item in items),
+    )
+
+
 class ExperimentRunner:
     def __init__(
         self,
@@ -177,19 +210,60 @@ class ExperimentRunner:
         ]
 
         for trial_index in range(manifest.trial_count, spec.trials):
-            started = time.monotonic()
-            try:
-                evidence = await executor.execute(spec, trial_index)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # noqa: BLE001 - 单 Trial 故障必须留证后继续
-                evidence = TrialEvidence(
-                    status="error",
-                    error=f"{type(exc).__name__}: {exc}",
-                    workspace=self._fingerprint(spec.workspace_ref),
+            retry_limit, retry_on = _retry_policy(spec)
+            attempts: list[TrialEvidence] = []
+            attempt_durations: list[float] = []
+            for attempt_index in range(retry_limit + 1):
+                started = time.monotonic()
+                try:
+                    evidence = await executor.execute(spec, trial_index)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - 单 Trial 故障必须留证后继续
+                    evidence = TrialEvidence(
+                        status="error",
+                        error=f"{type(exc).__name__}: {exc}",
+                        workspace=self._fingerprint(spec.workspace_ref),
+                    )
+                if not evidence.status:
+                    evidence = replace(
+                        evidence,
+                        status="error",
+                        error="Trial 未返回状态",
+                    )
+                attempt_durations.append(
+                    round((time.monotonic() - started) * 1000, 1)
                 )
-            if not evidence.status:
-                evidence = replace(evidence, status="error", error="Trial 未返回状态")
+                attempts.append(evidence)
+                if evidence.status not in retry_on or attempt_index >= retry_limit:
+                    break
+
+            evidence = attempts[-1]
+            if len(attempts) > 1:
+                evidence = replace(
+                    evidence,
+                    metrics=_sum_metrics([item.metrics for item in attempts]),
+                    prompt_hashes=tuple(
+                        prompt_hash
+                        for item in attempts
+                        for prompt_hash in item.prompt_hashes
+                    ),
+                    evidence={
+                        **evidence.evidence,
+                        "retry_attempts": [
+                            {
+                                "attempt_index": index,
+                                "status": item.status,
+                                "error": item.error,
+                                "duration_ms": attempt_durations[index],
+                                "metrics": item.metrics.to_dict(),
+                                "evidence": item.evidence,
+                                "workspace": item.workspace.to_dict(),
+                            }
+                            for index, item in enumerate(attempts)
+                        ],
+                    },
+                )
 
             trial_id = f"{spec.experiment_id}-trial-{trial_index:03d}"
             record = RunRecord(
@@ -198,7 +272,7 @@ class ExperimentRunner:
                 trial_id=trial_id,
                 trial_index=trial_index,
                 created_at=_now(),
-                duration_ms=round((time.monotonic() - started) * 1000, 1),
+                duration_ms=round(sum(attempt_durations), 1),
                 task=spec.task,
                 task_hash=_task_hash(spec.task),
                 config_hash=spec.config_hash,

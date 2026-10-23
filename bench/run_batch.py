@@ -89,6 +89,29 @@ def _model_client(spec: ExperimentSpec) -> LLMClient:
     )
 
 
+def _trial_attempt_workdir(
+    output_root: Path,
+    *,
+    batch_id: str,
+    experiment_id: str,
+    trial_index: int,
+    task_id: str,
+) -> Path:
+    trial_root = (
+        output_root
+        / "_work"
+        / batch_id
+        / experiment_id
+        / f"trial-{trial_index:03d}"
+    )
+    for attempt in range(1_000):
+        candidate = trial_root / f"attempt-{attempt:03d}"
+        workspace = candidate / task_id
+        if not workspace.exists() or not any(workspace.iterdir()):
+            return candidate
+    raise RuntimeError(f"Trial attempt 目录耗尽: {trial_root}")
+
+
 def _live_executor(spec: ExperimentSpec, *, output_root: Path):
     client = _model_client(spec)
     factory = resolve_arm(str(spec.config["arm"]), llm=client)
@@ -107,12 +130,12 @@ def _live_executor(spec: ExperimentSpec, *, output_root: Path):
     )
 
     async def run_one(current: ExperimentSpec, trial_index: int):
-        workdir = (
-            output_root
-            / "_work"
-            / str(current.config["batch_id"])
-            / current.experiment_id
-            / f"trial-{trial_index:03d}"
+        workdir = _trial_attempt_workdir(
+            output_root,
+            batch_id=str(current.config["batch_id"]),
+            experiment_id=current.experiment_id,
+            trial_index=trial_index,
+            task_id=task.task_id,
         )
         result = await run_task(
             spec=task,
