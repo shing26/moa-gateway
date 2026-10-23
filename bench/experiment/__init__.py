@@ -34,6 +34,11 @@ from bench.experiment.batch import (
     BatchStore,
     build_batch_report,
 )
+from bench.experiment.cross_model import (
+    CrossModelReport,
+    build_cross_model_report,
+    write_cross_model_report,
+)
 
 __all__ = [
     "BATCH_SCHEMA_VERSION",
@@ -45,6 +50,7 @@ __all__ = [
     "BatchRunner",
     "BatchStore",
     "CollaborationExperimentAdapter",
+    "CrossModelReport",
     "DEFAULT_PROTOCOL_PATH",
     "ExperimentManifest",
     "ExperimentOutcome",
@@ -58,8 +64,10 @@ __all__ = [
     "TrialExecutor",
     "WorkspaceSnapshot",
     "build_batch_report",
+    "build_cross_model_report",
     "compare_run_records",
     "fingerprint_workspace",
     "load_protocol",
     "protocol_from_dict",
+    "write_cross_model_report",
 ]

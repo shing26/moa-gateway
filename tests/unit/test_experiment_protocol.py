@@ -29,6 +29,9 @@ EXPECTED_TASKS = (
 STATS_PROTOCOL_PATH = (
     DEFAULT_PROTOCOL_PATH.parent / "multi-agent-first-batch-v4.json"
 )
+LOCAL_PROTOCOL_PATH = (
+    DEFAULT_PROTOCOL_PATH.parent / "multi-agent-first-batch-v5-local.json"
+)
 
 
 def test_default_protocol_freezes_the_first_batch() -> None:
@@ -199,3 +202,20 @@ def test_statistics_protocol_rejects_impossible_pre_registration() -> None:
 
     with pytest.raises(ValueError, match="min_valid_repeats_per_cell"):
         protocol_from_dict(payload)
+
+
+def test_local_second_model_protocol_has_an_independent_identity() -> None:
+    confirmatory = load_protocol(STATS_PROTOCOL_PATH)
+    local = load_protocol(LOCAL_PROTOCOL_PATH)
+
+    assert local.version == "5-local"
+    assert local.config_hash != confirmatory.config_hash
+    assert tuple((task.task_id, task.origin) for task in local.tasks) == EXPECTED_TASKS
+    assert tuple(arm.name for arm in local.arms) == arm_names()
+    assert local.model.provider == "local"
+    assert local.model.model == "qwen2.5:3b"
+    assert local.model.base_url == "http://127.0.0.1:11434/v1"
+    assert local.model.timeout == 300.0
+    assert local.model.max_tokens == 4096
+    assert local.model.cost_signal is False
+    assert local.statistics == confirmatory.statistics

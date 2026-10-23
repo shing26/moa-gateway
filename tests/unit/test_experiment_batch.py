@@ -250,6 +250,86 @@ async def test_batch_runs_cells_concurrently_up_to_global_limit(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_batch_marks_only_scheduled_cells_running(tmp_path) -> None:
+    protocol = replace(
+        load_protocol(),
+        tasks=load_protocol().tasks[:1],
+        repeats=replace(load_protocol().repeats, baseline=1),
+    )
+    store = ExperimentStore(tmp_path / "experiments")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingExecutor:
+        async def execute(self, spec, trial_index: int):
+            started.set()
+            await release.wait()
+            return TrialEvidence(status="pass")
+
+    task = asyncio.create_task(
+        BatchRunner(store, protocol).run(
+            phase="baseline",
+            arm_names=("L0", "L1"),
+            batch_id="batch-active-status",
+            max_concurrency=1,
+            executor_factory=lambda spec: BlockingExecutor(),
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    active = BatchStore(store.root).load("batch-active-status")
+    assert [cell.status for cell in active.cells] == ["running", "pending"]
+    assert sum(cell.status == "running" for cell in active.cells) == 1
+
+    release.set()
+    outcome = await asyncio.wait_for(task, timeout=2)
+    assert outcome.manifest.status == "completed"
+    assert [cell.status for cell in outcome.manifest.cells] == [
+        "completed",
+        "completed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_batch_persists_trial_progress_before_cell_completes(tmp_path) -> None:
+    protocol = replace(
+        load_protocol(),
+        tasks=load_protocol().tasks[:1],
+        repeats=replace(load_protocol().repeats, baseline=2),
+    )
+    store = ExperimentStore(tmp_path / "experiments")
+    second_started = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingSecondTrial:
+        async def execute(self, spec, trial_index: int):
+            if trial_index == 1:
+                second_started.set()
+                await release.wait()
+            return TrialEvidence(status="pass")
+
+    task = asyncio.create_task(
+        BatchRunner(store, protocol).run(
+            phase="baseline",
+            arm_names=("L0",),
+            batch_id="batch-trial-progress",
+            max_concurrency=1,
+            executor_factory=lambda spec: BlockingSecondTrial(),
+        )
+    )
+    await asyncio.wait_for(second_started.wait(), timeout=1)
+
+    active = BatchStore(store.root).load("batch-trial-progress")
+    assert active.cells[0].status == "running"
+    assert active.cells[0].trial_count == 1
+    assert active.cells[0].status_counts == {"pass": 1}
+
+    release.set()
+    outcome = await asyncio.wait_for(task, timeout=2)
+    assert outcome.manifest.cells[0].trial_count == 2
+
+
+@pytest.mark.asyncio
 async def test_batch_enforces_trial_start_rate_limit(tmp_path) -> None:
     protocol = replace(
         load_protocol(),
@@ -651,8 +731,40 @@ async def test_preregistered_batch_report_authorizes_only_complete_paired_data(
     assert outcome.report.paired.authorized is True
     assert outcome.report.paired.decision == "candidate_better"
     payload = outcome.report.to_dict()
+    assert payload["analysis_authorized"] is True
     assert payload["statistical_claims"] is True
     assert payload["statistics"]["planned_task_count"] == 8
     assert payload["statistics"]["confidence_interval"] == [1.0, 1.0]
     assert payload["model_matrix"][0]["cost_signal"] == "unavailable_or_zero"
-    assert "统计声明：**已按预注册门禁授权**" in outcome.report.render_markdown()
+    assert "分析门禁：**已按预注册门禁授权**" in outcome.report.render_markdown()
+
+
+@pytest.mark.asyncio
+async def test_preregistered_zero_difference_authorizes_analysis_not_claims(
+    tmp_path,
+) -> None:
+    protocol = load_protocol(STATS_PROTOCOL_PATH)
+    outcomes = {}
+    for task in protocol.tasks:
+        for repeat in range(protocol.repeats.formal):
+            outcomes[(task.task_id, "L0", repeat)] = "fail"
+            outcomes[(task.task_id, "L3", repeat)] = "fail"
+
+    outcome = await BatchRunner(
+        ExperimentStore(tmp_path / "experiments"), protocol
+    ).run(
+        phase="formal",
+        arm_names=("L0", "L3"),
+        batch_id="preregistered-zero-difference",
+        executor_factory=lambda spec: FakeExecutor(outcomes),
+    )
+
+    assert outcome.report.paired is not None
+    assert outcome.report.paired.authorized is True
+    assert outcome.report.paired.decision == "no_significant_difference"
+    payload = outcome.report.to_dict()
+    assert payload["analysis_authorized"] is True
+    assert payload["statistical_claims"] is False
+    markdown = outcome.report.render_markdown()
+    assert "分析门禁：**已按预注册门禁授权**" in markdown
+    assert "显著差异声明：**不授权**" in markdown

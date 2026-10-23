@@ -8,7 +8,7 @@ import os
 import re
 import uuid
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,7 +18,7 @@ from bench.agent.types import B1_TIER, B3_TIER
 from bench.experiment.protocol import ExperimentProtocol, Phase
 from bench.experiment.runner import ExperimentRunner
 from bench.experiment.store import ExperimentStore
-from bench.experiment.types import ExperimentSpec, TrialExecutor
+from bench.experiment.types import ExperimentManifest, ExperimentSpec, TrialExecutor
 from bench.report import (
     DoseReport,
     ModelArmSummary,
@@ -281,6 +281,17 @@ class BatchReport:
     def missing_runs(self) -> int:
         return max(0, self.expected_runs - self.completed_runs)
 
+    @property
+    def analysis_authorized(self) -> bool:
+        return bool(self.paired is not None and self.paired.authorized)
+
+    @property
+    def statistical_claims(self) -> bool:
+        return bool(
+            self.paired is not None
+            and self.paired.significant_difference
+        )
+
     def to_dict(self) -> dict[str, Any]:
         payload = {
             "batch_id": self.manifest.batch_id,
@@ -301,9 +312,8 @@ class BatchReport:
             "expected_runs": self.expected_runs,
             "completed_runs": self.completed_runs,
             "missing_runs": self.missing_runs,
-            "statistical_claims": bool(
-                self.paired is not None and self.paired.authorized
-            ),
+            "analysis_authorized": self.analysis_authorized,
+            "statistical_claims": self.statistical_claims,
             "cells": [cell.to_dict() for cell in self.manifest.cells],
             "report": self.dose.to_dict(),
         }
@@ -338,9 +348,14 @@ class BatchReport:
                 f"{self.missing_runs} 缺失"
             ),
             (
-                "- 统计声明：**已按预注册门禁授权**。"
-                if self.paired is not None and self.paired.authorized
-                else "- 统计声明：**不授权**；样本不足时只作方向性观察。"
+                "- 分析门禁：**已按预注册门禁授权**。"
+                if self.analysis_authorized
+                else "- 分析门禁：**不授权**；样本不足时只作方向性观察。"
+            ),
+            (
+                "- 显著差异声明：**已授权**。"
+                if self.statistical_claims
+                else "- 显著差异声明：**不授权**；不得宣称 arm 更优或更差。"
             ),
             "",
             "## 单元状态",
@@ -405,17 +420,25 @@ class _LimitedTrialExecutor:
         executor: TrialExecutor,
         gate: asyncio.Semaphore,
         pacer: _TrialStartPacer,
+        on_start: Callable[[], Awaitable[None]],
+        on_finish: Callable[[], Awaitable[None]],
     ) -> None:
         self._executor = executor
         self._gate = gate
         self._pacer = pacer
+        self._on_start = on_start
+        self._on_finish = on_finish
 
     async def execute(
         self, spec: ExperimentSpec, trial_index: int
     ) -> Any:
         async with self._gate:
             await self._pacer.wait()
-            return await self._executor.execute(spec, trial_index)
+            await self._on_start()
+            try:
+                return await self._executor.execute(spec, trial_index)
+            finally:
+                await self._on_finish()
 
 
 class BatchRunner:
@@ -549,15 +572,60 @@ class BatchRunner:
             if spec.experiment_id != initial_cell.experiment_id:
                 raise ValueError("批次单元与协议映射出的 Experiment ID 不一致")
 
-            running_cell = replace(initial_cell, status="running", error="")
-            async with manifest_lock:
-                manifest = self._replace_cell(manifest, index, running_cell)
-                manifest = replace(
-                    manifest,
-                    updated_at=_now(),
-                    resume_cursor=running_cell.cell_id,
-                )
-                self._batches.write(manifest)
+            async def mark_running() -> None:
+                nonlocal manifest
+                async with manifest_lock:
+                    current = manifest.cells[index]
+                    running = replace(
+                        self._with_experiment_progress(current, spec),
+                        status="running",
+                        error="",
+                    )
+                    manifest = self._replace_cell(manifest, index, running)
+                    manifest = replace(
+                        manifest,
+                        updated_at=_now(),
+                        resume_cursor=running.cell_id,
+                    )
+                    self._batches.write(manifest)
+
+            async def mark_idle() -> None:
+                nonlocal manifest
+                async with manifest_lock:
+                    current = manifest.cells[index]
+                    if current.status == "completed":
+                        return
+                    idle = replace(
+                        self._with_experiment_progress(current, spec),
+                        status="pending",
+                    )
+                    manifest = self._replace_cell(manifest, index, idle)
+                    manifest = replace(
+                        manifest,
+                        updated_at=_now(),
+                        resume_cursor=self._resume_cursor(manifest.cells),
+                    )
+                    self._batches.write(manifest)
+
+            async def update_progress(
+                experiment_manifest: ExperimentManifest,
+            ) -> None:
+                nonlocal manifest
+                async with manifest_lock:
+                    current = manifest.cells[index]
+                    updated = replace(
+                        current,
+                        trial_count=experiment_manifest.trial_count,
+                        status_counts=dict(experiment_manifest.status_counts),
+                        error="",
+                    )
+                    manifest = self._replace_cell(manifest, index, updated)
+                    manifest = replace(
+                        manifest,
+                        updated_at=_now(),
+                        resume_cursor=self._resume_cursor(manifest.cells),
+                    )
+                    self._batches.write(manifest)
 
             try:
                 executor = executor_factory(spec)
@@ -565,11 +633,19 @@ class BatchRunner:
                     self._experiments
                 ).run_or_resume(
                     spec,
-                    _LimitedTrialExecutor(executor, gate, pacer),
+                    _LimitedTrialExecutor(
+                        executor,
+                        gate,
+                        pacer,
+                        on_start=mark_running,
+                        on_finish=mark_idle,
+                    ),
+                    on_trial_complete=update_progress,
                 )
             except asyncio.CancelledError:
+                current = manifest.cells[index]
                 paused = replace(
-                    self._with_experiment_progress(running_cell, spec),
+                    self._with_experiment_progress(current, spec),
                     status="pending",
                     error="CancelledError: batch interrupted",
                 )
@@ -584,22 +660,23 @@ class BatchRunner:
                     self._batches.write(manifest)
                 raise
             except Exception as exc:  # noqa: BLE001 - 单单元故障不能吞掉后续单元
+                current = manifest.cells[index]
                 failed = replace(
-                    self._with_experiment_progress(running_cell, spec),
+                    self._with_experiment_progress(current, spec),
                     status="error",
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 async with manifest_lock:
                     manifest = self._replace_cell(manifest, index, failed)
             else:
-                complete = replace(
-                    running_cell,
-                    status="completed",
-                    trial_count=outcome.manifest.trial_count,
-                    status_counts=dict(outcome.manifest.status_counts),
-                    error="",
-                )
                 async with manifest_lock:
+                    complete = replace(
+                        manifest.cells[index],
+                        status="completed",
+                        trial_count=outcome.manifest.trial_count,
+                        status_counts=dict(outcome.manifest.status_counts),
+                        error="",
+                    )
                     manifest = self._replace_cell(manifest, index, complete)
 
             async with manifest_lock:
@@ -912,9 +989,33 @@ def build_batch_report(
     experiment_store: ExperimentStore,
     protocol: ExperimentProtocol | None = None,
 ) -> BatchReport:
+    rows = load_batch_rows(manifest, experiment_store)
+    dose = build_report(
+        rows,
+        tier=manifest.budget_tier,
+        tasks=(cell.task_id for cell in manifest.cells),
+        arms=tuple(dict.fromkeys(cell.arm for cell in manifest.cells)),
+    )
+    paired = None
+    if protocol is not None and protocol.statistics is not None:
+        paired = paired_pass_rate_comparison(
+            rows,
+            protocol.statistics,
+            expected_tasks=(task.task_id for task in protocol.tasks),
+        )
+    return BatchReport(
+        manifest=manifest,
+        dose=dose,
+        paired=paired,
+        model_summaries=model_arm_matrix(rows) if paired is not None else (),
+    )
+
+
+def load_batch_rows(
+    manifest: BatchManifest,
+    experiment_store: ExperimentStore,
+) -> list[RunRow]:
     origins = {cell.task_id: cell.task_origin for cell in manifest.cells}
-    if protocol is not None:
-        origins.update({task.task_id: task.origin for task in protocol.tasks})
     rows: list[RunRow] = []
     for cell in manifest.cells:
         if cell.status != "completed":
@@ -952,25 +1053,7 @@ def build_batch_report(
                     baseline_tokens=baseline_tokens,
                 )
             )
-    dose = build_report(
-        rows,
-        tier=manifest.budget_tier,
-        tasks=(cell.task_id for cell in manifest.cells),
-        arms=tuple(dict.fromkeys(cell.arm for cell in manifest.cells)),
-    )
-    paired = None
-    if protocol is not None and protocol.statistics is not None:
-        paired = paired_pass_rate_comparison(
-            rows,
-            protocol.statistics,
-            expected_tasks=(task.task_id for task in protocol.tasks),
-        )
-    return BatchReport(
-        manifest=manifest,
-        dose=dose,
-        paired=paired,
-        model_summaries=model_arm_matrix(rows) if paired is not None else (),
-    )
+    return rows
 
 
 __all__ = [
@@ -984,4 +1067,5 @@ __all__ = [
     "BaselineByCell",
     "ExecutorFactory",
     "build_batch_report",
+    "load_batch_rows",
 ]

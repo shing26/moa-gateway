@@ -64,6 +64,9 @@ services:
       - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-}
       - GATEWAY_ALLOW_INSECURE=${GATEWAY_ALLOW_INSECURE:-0}
       - HITL_ENABLED=${HITL_ENABLED:-false}
+      - BENCH_EXPERIMENTS_DIR=/app/.bench-experiments
+    volumes:
+      - ./.bench-experiments:/app/.bench-experiments:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

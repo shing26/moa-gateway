@@ -26,6 +26,28 @@ def _load_json(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _observed_progress(root: Path, cells: list[dict[str, Any]]) -> dict[str, int]:
+    expected_runs = 0
+    completed_runs = 0
+    for item in cells:
+        if not isinstance(item, dict):
+            continue
+        expected_runs += int(item.get("expected_trials", 0) or 0)
+        recorded = int(item.get("trial_count", 0) or 0)
+        experiment_id = str(item.get("experiment_id", "") or "")
+        observed = 0
+        if _SAFE_ID.fullmatch(experiment_id):
+            trial_dir = root / experiment_id / "trials"
+            if trial_dir.is_dir():
+                observed = sum(1 for _ in trial_dir.glob("trial-*.json"))
+        completed_runs += max(recorded, observed)
+    return {
+        "completed_runs": completed_runs,
+        "expected_runs": expected_runs,
+        "missing_runs": max(0, expected_runs - completed_runs),
+    }
+
+
 class ExperimentResultService:
     """Discover immutable batch and Run Record artifacts without mutating them."""
 
@@ -52,6 +74,7 @@ class ExperimentResultService:
                 except (OSError, TypeError, ValueError, json.JSONDecodeError):
                     report = {}
             cells = list(manifest.get("cells") or [])
+            progress = _observed_progress(self.root, cells)
             rows.append(
                 {
                     "batch_id": batch_id,
@@ -68,9 +91,20 @@ class ExperimentResultService:
                     "completed_cells": sum(
                         1 for item in cells if item.get("status") == "completed"
                     ),
-                    "completed_runs": int(report.get("completed_runs", 0) or 0),
-                    "expected_runs": int(report.get("expected_runs", 0) or 0),
-                    "missing_runs": int(report.get("missing_runs", 0) or 0),
+                    "completed_runs": int(
+                        report.get(
+                            "completed_runs", progress["completed_runs"]
+                        )
+                        or 0
+                    ),
+                    "expected_runs": int(
+                        report.get("expected_runs", progress["expected_runs"])
+                        or 0
+                    ),
+                    "missing_runs": int(
+                        report.get("missing_runs", progress["missing_runs"])
+                        or 0
+                    ),
                 }
             )
         return sorted(
@@ -88,6 +122,16 @@ class ExperimentResultService:
         manifest = _load_json(manifest_path)
         report_path = batch_dir / "report.json"
         report = _load_json(report_path) if report_path.exists() else {}
+        progress = _observed_progress(
+            self.root,
+            list(manifest.get("cells") or []),
+        )
+        report = {
+            **progress,
+            "analysis_authorized": False,
+            "statistical_claims": False,
+            **report,
+        }
         cells: list[dict[str, Any]] = []
         for raw in list(manifest.get("cells") or []):
             if not isinstance(raw, dict):
@@ -121,6 +165,13 @@ class ExperimentResultService:
                                 "path": path.relative_to(self.root).as_posix(),
                             }
                         )
+            if len(runs) > int(cell.get("trial_count", 0) or 0):
+                cell["trial_count"] = len(runs)
+                counts: dict[str, int] = {}
+                for run in runs:
+                    status = str(run["status"])
+                    counts[status] = counts.get(status, 0) + 1
+                cell["status_counts"] = counts
             cell["runs"] = runs
             cells.append(cell)
         return {

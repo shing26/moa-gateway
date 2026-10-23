@@ -91,8 +91,27 @@ def test_paired_analysis_is_gated_by_preregistered_valid_samples() -> None:
         },
     ]
     markdown = render_paired_markdown(comparison)
-    assert "统计声明：**已授权" in markdown
+    assert "分析门禁：**已授权" in markdown
+    assert "显著差异声明：**已授权" in markdown
     assert "candidate_better" in markdown
+
+
+def test_paired_analysis_zero_difference_is_not_a_significance_claim() -> None:
+    comparison = paired_pass_rate_comparison(
+        _rows(
+            candidate_outcomes=("fail", "fail", "fail"),
+            baseline_outcomes=("fail", "fail", "fail"),
+        ),
+        _preregistration(),
+        expected_tasks=tuple(f"task-{index}" for index in range(8)),
+    )
+
+    assert comparison.authorized is True
+    assert comparison.decision == "no_significant_difference"
+    assert comparison.significant_difference is False
+    markdown = render_paired_markdown(comparison)
+    assert "分析门禁：**已授权" in markdown
+    assert "显著差异声明：**不授权" in markdown
 
 
 def test_paired_analysis_refuses_claim_when_any_cell_is_under_sampled() -> None:
@@ -111,6 +130,7 @@ def test_paired_analysis_refuses_claim_when_any_cell_is_under_sampled() -> None:
     assert comparison.decision == "blocked"
     assert comparison.confidence_interval is None
     assert comparison.p_value is None
+    assert comparison.significant_difference is False
     assert any("有效样本 2 < 3" in reason for reason in comparison.block_reasons)
 
 

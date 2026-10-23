@@ -93,10 +93,16 @@ def batch_page(payload: dict[str, Any]) -> str:
     max_concurrency = int(manifest.get("max_concurrency", 1) or 1)
     rate_limit = int(manifest.get("rate_limit_per_minute", 0) or 0)
     rate_limit_label = f"{rate_limit:,}/min" if rate_limit else "不限速"
+    expected_trials = [
+        int(cell.get("expected_trials", 0) or 0)
+        for cell in cells
+        if isinstance(cell, dict)
+    ]
     sample_target = int(
         manifest.get("target_trials_per_cell")
         or manifest.get("repeats")
         or manifest.get("expected_trials_per_cell")
+        or max(expected_trials, default=0)
         or 1
     )
     report_cells = {
@@ -111,13 +117,47 @@ def batch_page(payload: dict[str, Any]) -> str:
         cell = dict(raw)
         key = (str(cell.get("task_id", "")), str(cell.get("arm", "")))
         metrics = dict(report_cells.get(key) or {})
+        runs = [
+            run for run in list(cell.get("runs") or []) if isinstance(run, dict)
+        ]
+        if not metrics:
+            outcomes = [str(run.get("status", "")) for run in runs]
+            valid = [
+                outcome
+                for outcome in outcomes
+                if outcome in {"pass", "fail", "budget_exhausted"}
+            ]
+            run_metrics = [
+                dict(run.get("metrics") or {})
+                for run in runs
+                if isinstance(run, dict)
+            ]
+            metrics = {
+                "runs": len(runs),
+                "pass_rate": (
+                    outcomes.count("pass") / len(valid) if valid else None
+                ),
+                "error": outcomes.count("error"),
+                "budget_exhausted": outcomes.count("budget_exhausted"),
+                "avg_cost_usd": (
+                    sum(float(item.get("cost_usd", 0.0) or 0.0) for item in run_metrics)
+                    / len(run_metrics)
+                    if run_metrics
+                    else None
+                ),
+                "avg_tokens": (
+                    sum(int(item.get("total_tokens", 0) or 0) for item in run_metrics)
+                    / len(run_metrics)
+                    if run_metrics
+                    else 0
+                ),
+            }
         run_links = "<br>".join(
             f'<a class="text-link mono" href="/dashboard/experiments/{esc(batch_id)}/runs/'
             f'{esc(cell.get("experiment_id", ""))}/{int(run.get("trial_index", 0) or 0)}">'
             f'trial-{int(run.get("trial_index", 0) or 0):03d}</a> '
             f'({esc(run.get("status", ""))})'
-            for run in list(cell.get("runs") or [])
-            if isinstance(run, dict)
+            for run in runs
         ) or '<span class="muted">无记录</span>'
         rows.append(
             "<tr>"
@@ -136,10 +176,19 @@ def batch_page(payload: dict[str, Any]) -> str:
 
     gaps = list(dose.get("gaps") or [])
     under_sampled = list(dose.get("under_sampled") or [])
+    analysis_authorized = report.get("analysis_authorized")
+    if analysis_authorized is None:
+        statistics = dict(report.get("statistics") or {})
+        analysis_authorized = bool(statistics.get("authorized", False))
     warning = ""
-    if report.get("statistical_claims") is False:
+    if analysis_authorized is False:
         warning = (
-            '<p class="panel-note">统计声明未授权：结论受样本量、缺口和错误分类约束。</p>'
+            '<p class="panel-note">统计比较未授权：结论受样本量、缺口和错误分类约束。</p>'
+        )
+    elif report.get("statistical_claims") is False:
+        warning = (
+            '<p class="panel-note">分析已执行，但未授权显著差异声明；'
+            "不得宣称任一 arm 更优或更差。</p>"
         )
     source = manifest.get("source_batch_id") or ""
     source_line = (

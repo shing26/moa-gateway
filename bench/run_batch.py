@@ -32,6 +32,10 @@ from bench.experiment import (  # noqa: E402
     load_protocol,
 )
 from bench.experiment.adapters import BenchExperimentAdapter  # noqa: E402
+from bench.experiment.cross_model import (  # noqa: E402
+    build_cross_model_report,
+    write_cross_model_report,
+)
 from bench.harness.budget import NO_COST_LIMIT  # noqa: E402
 from bench.harness.runner import load_task, run_task  # noqa: E402
 
@@ -199,6 +203,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     b3.add_argument("--out", default=str(DEFAULT_OUT))
     b3.add_argument("--max-concurrency", type=int, default=None)
     b3.add_argument("--rate-limit-per-minute", type=int, default=None)
+    compare = sub.add_parser("compare", help="比较多个已完成模型的独立批次")
+    compare.add_argument("--protocol", default=str(DEFAULT_PROTOCOL_PATH))
+    compare.add_argument(
+        "--batch-id",
+        action="append",
+        required=True,
+        dest="batch_ids",
+    )
+    compare.add_argument("--out", default=str(DEFAULT_OUT))
     return parser.parse_args(argv)
 
 
@@ -257,9 +270,26 @@ async def _run_b3(args: argparse.Namespace) -> int:
     return 0 if outcome.manifest.status == "completed" else 1
 
 
+def _run_compare(args: argparse.Namespace) -> int:
+    protocol = load_protocol(args.protocol)
+    report = build_cross_model_report(
+        tuple(args.batch_ids),
+        output_root=args.out,
+        protocol=protocol,
+    )
+    json_path, markdown_path = write_cross_model_report(args.out, report)
+    payload = report.to_dict()
+    payload["comparison_json"] = str(json_path)
+    payload["comparison_markdown"] = str(markdown_path)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
+        if args.command == "compare":
+            return _run_compare(args)
         if args.command == "b3":
             return asyncio.run(_run_b3(args))
         return asyncio.run(_run(args))

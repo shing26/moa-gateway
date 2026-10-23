@@ -7,6 +7,7 @@ import hashlib
 import time
 import uuid
 from collections import Counter
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -26,6 +27,7 @@ from bench.experiment.types import (
 )
 
 _TEXT_LIMIT = 8_000
+TrialCompleteHook = Callable[[ExperimentManifest], Awaitable[None]]
 
 
 def _now() -> str:
@@ -92,7 +94,11 @@ class ExperimentRunner:
         self._text_limit = max(256, int(text_limit))
 
     async def run(
-        self, spec: ExperimentSpec, executor: TrialExecutor
+        self,
+        spec: ExperimentSpec,
+        executor: TrialExecutor,
+        *,
+        on_trial_complete: TrialCompleteHook | None = None,
     ) -> ExperimentOutcome:
         experiment_id = spec.experiment_id or _new_experiment_id()
         spec = with_experiment_id(spec, experiment_id)
@@ -116,10 +122,19 @@ class ExperimentRunner:
             spec=spec,
         )
         self._store.write_manifest(manifest)
-        return await self._execute_pending(spec, executor, manifest)
+        return await self._execute_pending(
+            spec,
+            executor,
+            manifest,
+            on_trial_complete=on_trial_complete,
+        )
 
     async def resume(
-        self, spec: ExperimentSpec, executor: TrialExecutor
+        self,
+        spec: ExperimentSpec,
+        executor: TrialExecutor,
+        *,
+        on_trial_complete: TrialCompleteHook | None = None,
     ) -> ExperimentOutcome:
         """从已落盘的 Experiment 继续缺失 Trial；绝不覆盖已有 Run Record。"""
         if not spec.experiment_id:
@@ -180,20 +195,39 @@ class ExperimentRunner:
             ),
         )
         self._store.write_manifest(manifest)
-        return await self._execute_pending(spec, executor, manifest)
+        return await self._execute_pending(
+            spec,
+            executor,
+            manifest,
+            on_trial_complete=on_trial_complete,
+        )
 
     async def run_or_resume(
-        self, spec: ExperimentSpec, executor: TrialExecutor
+        self,
+        spec: ExperimentSpec,
+        executor: TrialExecutor,
+        *,
+        on_trial_complete: TrialCompleteHook | None = None,
     ) -> ExperimentOutcome:
         if spec.experiment_id and self._store.manifest_path(spec.experiment_id).exists():
-            return await self.resume(spec, executor)
-        return await self.run(spec, executor)
+            return await self.resume(
+                spec,
+                executor,
+                on_trial_complete=on_trial_complete,
+            )
+        return await self.run(
+            spec,
+            executor,
+            on_trial_complete=on_trial_complete,
+        )
 
     async def _execute_pending(
         self,
         spec: ExperimentSpec,
         executor: TrialExecutor,
         manifest: ExperimentManifest,
+        *,
+        on_trial_complete: TrialCompleteHook | None = None,
     ) -> ExperimentOutcome:
         records = list(
             self._store.load_experiment_records(spec.experiment_id)
@@ -313,6 +347,8 @@ class ExperimentRunner:
                 trial_paths=tuple(trial_paths),
             )
             self._store.write_manifest(manifest)
+            if on_trial_complete is not None:
+                await on_trial_complete(manifest)
 
         manifest_path = self._store.manifest_path(spec.experiment_id)
         manifest = replace(manifest, path=manifest_path)

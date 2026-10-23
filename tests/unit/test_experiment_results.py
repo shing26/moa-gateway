@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 
 import pytest
@@ -78,6 +79,37 @@ def _build_results(tmp_path):
     return root
 
 
+class CancelSecondTrialExecutor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def execute(self, spec, trial_index: int):
+        self.calls += 1
+        if self.calls == 2:
+            raise asyncio.CancelledError
+        return TrialEvidence(status="pass")
+
+
+def _build_partial_results(tmp_path):
+    base = load_protocol()
+    protocol = replace(
+        base,
+        tasks=base.tasks[:1],
+        repeats=replace(base.repeats, formal=2),
+    )
+    root = tmp_path / "experiments"
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            BatchRunner(ExperimentStore(root), protocol).run(
+                phase="formal",
+                arm_names=("L0",),
+                batch_id="batch-partial",
+                executor_factory=lambda spec: CancelSecondTrialExecutor(),
+            )
+        )
+    return root
+
+
 def test_experiment_result_service_reads_batches_and_guards_paths(tmp_path) -> None:
     root = _build_results(tmp_path)
     service = ExperimentResultService(root)
@@ -107,6 +139,58 @@ def test_experiment_result_service_reads_batches_and_guards_paths(tmp_path) -> N
         service.run("batch-ui", "exp-not-in-batch", 0)
 
 
+def test_unfinished_batch_uses_manifest_progress_before_report_exists(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root = _build_partial_results(tmp_path)
+    service = ExperimentResultService(root)
+
+    row = service.list_batches()[0]
+    assert row["status"] == "paused"
+    assert row["completed_cells"] == 0
+    assert row["completed_runs"] == 1
+    assert row["expected_runs"] == 2
+    assert row["missing_runs"] == 1
+
+    batch = service.batch("batch-partial")
+    assert batch["report"]["completed_runs"] == 1
+    assert batch["report"]["expected_runs"] == 2
+    assert batch["report"]["missing_runs"] == 1
+    assert batch["report"]["analysis_authorized"] is False
+    assert batch["report"]["statistical_claims"] is False
+
+    monkeypatch.setenv("BENCH_EXPERIMENTS_DIR", str(root))
+    with app_client(app) as client:
+        detail = client.get("/dashboard/experiments/batch-partial")
+        assert detail.status_code == 200
+        assert 'data-label="样本量" class="mono">1 / 2</td>' in detail.text
+
+
+def test_unfinished_batch_counts_trial_files_when_manifest_lags(tmp_path) -> None:
+    root = _build_partial_results(tmp_path)
+    manifest_path = root / "_batches" / "batch-partial" / "batch.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["status"] = "running"
+    manifest["cells"][0]["status"] = "running"
+    manifest["cells"][0]["trial_count"] = 0
+    manifest["cells"][0]["status_counts"] = {}
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    service = ExperimentResultService(root)
+    row = service.list_batches()[0]
+    assert row["completed_runs"] == 1
+    assert row["missing_runs"] == 1
+
+    batch = service.batch("batch-partial")
+    assert batch["report"]["completed_runs"] == 1
+    assert batch["cells"][0]["trial_count"] == 1
+    assert batch["cells"][0]["status_counts"] == {"pass": 1}
+
+
 def test_experiment_dashboard_is_read_only_and_links_run_records(
     tmp_path, monkeypatch
 ) -> None:
@@ -132,7 +216,7 @@ def test_experiment_dashboard_is_read_only_and_links_run_records(
         assert 'class="table-wrap table-wrap-responsive"' in detail.text
         assert 'data-label="任务"' in detail.text
         assert 'data-label="记录"' in detail.text
-        assert "统计声明未授权" in detail.text
+        assert "统计比较未授权" in detail.text
         assert "并发上限" in detail.text
         assert "平均成本" in detail.text
         assert "$0.0200" in detail.text

@@ -25,7 +25,8 @@
 - 已有 `Experiment → Trial → Run Record`、不可变落盘和受控复跑。
 - `bench/run_curve.py` 与 `bench/run_experiment.py` 尚未统一成单一权威批量入口。
 - 协作图已有 SQLite 持久化 checkpointer；并发专家写同一路径由隔离写集与显式冲突处理。
-- 只读结果 UI 已实现；跨模型自动跑分和统计显著性仍未实现。
+- 只读结果 UI、跨模型描述矩阵和预注册统计门禁已实现；本地第二模型正式批次
+  已完成 96 条，NVIDIA 第一模型确认性批次仍受端点容量阻塞。
 
 ## 里程碑
 
@@ -61,7 +62,8 @@
 
 - `bench/protocols/multi-agent-first-batch-v1.json`（历史）
 - `bench/protocols/multi-agent-first-batch-v2.json`（历史：1024 输出上限）
-- `bench/protocols/multi-agent-first-batch-v3.json`（当前：4096 输出上限）
+- `bench/protocols/multi-agent-first-batch-v3.json`（历史：4096 输出上限）
+- `bench/protocols/multi-agent-first-batch-v4.json`（当前：预注册配对统计门禁）
 - `bench/experiment/protocol.py`
 - `tests/unit/test_experiment_protocol.py`
 - ADR-026
@@ -168,8 +170,8 @@
 - `m5-baseline-live-r1`：32 / 32 单元完成，0 缺口；
 - 32 条 Run Record：15 `pass`、8 `fail`、9 `error`、0 `budget_exhausted`；
 - `docs/multi-agent-baseline-report.md`；
-- 报告连续重算哈希一致：`C8ABB6A7...E02BD`（JSON）与
-  `8EAD2D4E...0DE26`（Markdown）。
+- 报告连续重算哈希一致：`C5B703C8...3E7A`（JSON）与
+  `CB8C35C5...4067`（Markdown）。
 
 说明：M5 发生在协议声明的错误重试真正接入执行器之前，因此 9 个 `error` 都是首次
 attempt。该缺口已单独修复并以单测锁定；M5 只作为单次工程基线，正式比较以 M6 的
@@ -177,7 +179,7 @@ attempt。该缺口已单独修复并以单测锁定；M5 只作为单次工程�
 
 ### M6：正式重复实验
 
-状态：执行中
+状态：阻塞于上游端点容量
 
 交付：
 
@@ -196,11 +198,33 @@ attempt。该缺口已单独修复并以单测锁定；M5 只作为单次工程�
 - `run_batch.py b3` 已实现从完整 B1 批次派生失败/预算耗尽档位；
 - B3 使用独立 Experiment 身份、B3 预算和 B1 基线 cost/token；
 - 离线选择、CLI、来源校验和报告分层已有单测；
-- 正式 `8 × 4 × 3` B1 与派生 B3 尚未执行，因此 M6 未完成。
+- `m6-formal-b1-live-r1` 在并发 4 下尚未完成任何 Trial 即进入持续 429，已暂停并作废，
+  不作为能力证据；
+- `m6-formal-b1-live-r2` 改为并发 1、30 次启动/分钟；运行约 46 分钟后只落下 3 条
+  Trial（pass 1、fail 2），32 个单元仍为 0 个完整单元；最后一条 Trial 后约 25 分钟
+  持续 429，已暂停并保留为容量阻塞证据；
+- 2026-10-23 10:27 使用同一 NVIDIA 模型完成 8-token 容量探测，返回 `HTTP 200`；
+  但短探测不足以证明长调用容量；
+- v4 `m6-m9-formal-b1-v4-live-r1` 以并发 1 完成 3 条 Trial（L0 pass、L1
+  budget_exhausted、L2 pass）后再次进入持续 429，已暂停；
+- v4 `m6-m9-formal-b1-v4-live-r2` 以并发 4 启动后立即连续 429，0 条 Trial，
+  已暂停；不能把这两个批次算作正式 arm 比较；
+- 2026-10-23 11:36 连续 4 次 512-token 长调用均返回 `HTTP 200`，但恢复 v4 r1 后
+  第一次真实 agent 调用立即再次 429；runner 已停止，批次重新置为 paused，证明
+  探测成功仍不能替代持续容量；
+- 正式 `8 × 4 × 3` B1 与派生 B3 尚未完成，因此 M6 未完成。
+
+下一步：
+
+1. 等账户级容量稳定后恢复 v4 r1，不要用已暂停批次冒充正式样本；
+2. 正式 B1 达到 96 条连续 Run Record 后，才允许从其最终 `fail` /
+   `budget_exhausted` 单元派生 B3；
+3. 若改用其他模型，必须生成新的协议版本和 `protocol_hash`，不能把跨模型结果混入
+   当前 v4 批次。
 
 ### M7：报告与只读 UI
 
-状态：执行中（只读 UI 已实现，正式数据验收待 M6）
+状态：已完成
 
 交付：
 
@@ -219,7 +243,21 @@ attempt。该缺口已单独修复并以单测锁定；M5 只作为单次工程�
 - Experiment 列表、批次状态、Trial/Run Record 详情与只读 API 已实现；
 - 批次页显示样本量、有效通过率、`error`、预算耗尽、平均 token、平均成本；
 - 并发上限、启动速率和协议哈希读取自持久化 Manifest；
-- 正式 96 条 B1 报告生成后，再执行 JSON/UI 对账与桌面/移动端验收。
+- 最终报告缺失时从已落盘 Trial 文件计算进度；`running` 只标记真正持有执行槽的
+  cell，排队中的 cell 保持 `pending`；
+- 移动端表格已改为带字段名的记录块；桌面与 390px 视口均无横向溢出、控制台错误或
+  框架遮罩，批次链接与 Run Record 链接可交互（`7fe42ca`）；
+- 新增 `scripts/verify_experiment_batch.py`，从不可变 Run Record 重建完整报告，
+  并核对 `report.json`、报告来源路径、Trial 序号和只读 API 返回；篡改报告回归
+  用例会拒绝通过；
+- M5 的 32 条记录已通过新的确定性对账脚本：重建报告与 `report.json` 一致，
+  32 条 Run Record、来源路径和只读 API 返回全部核对通过；桌面与移动端另完成
+  页面抽样验收；
+- 本地正式批次 `m9-local-qwen25-3b-formal-b1-live-r1` 的 96 条 Run Record
+  也通过同一脚本全量对账；`report.json` SHA256 为
+  `5D004F8B1E16466B13EA0CF82ED9EF3FDBCCF2092D7801DD3589CC78CD16A05C`；
+- 正式 96 条 B1 已完成 JSON、只读 API、Run Record 全量对账；容器中的桌面
+  1440px 与移动端 390px 均无空白、横向溢出、控制台错误或页面异常。
 
 ### M8：并发 Trial 与持久化恢复
 
@@ -251,7 +289,7 @@ attempt。该缺口已单独修复并以单测锁定；M5 只作为单次工程�
 
 ### M9：跨模型与统计扩展
 
-状态：执行中（分析契约已实现，确认性 v4 live 数据未执行）
+状态：部分完成；本地第二模型正式批次已完成，阻塞于 NVIDIA 第一模型确认性数据
 
 交付：
 
@@ -274,14 +312,30 @@ attempt。该缺口已单独修复并以单测锁定；M5 只作为单次工程�
 - 多模型输入必须显式选择单一模型才可做确认性比较；
 - `model × arm` 矩阵把无成本信号标为 `unavailable_or_zero` 或
   `mixed_or_unpriced`，不冒充零成本；
-- `BatchReport` 只有分析门禁通过时才写出 `statistical_claims=true`；
+- `BatchReport` 分别写出 `analysis_authorized` 与 `statistical_claims`：前者表示
+  预注册分析可执行，后者只在得到 `candidate_better` / `candidate_worse` 时为真；
+- `run_batch.py compare` 可读取多个已完成且矩阵一致的独立模型批次，输出
+  `model × arm` 描述矩阵，并在每个模型内分别执行预注册配对分析；
+- 跨模型报告固定 `cross_model_inferential_claim=false`，不合并模型总体通过率；
+- 新增独立协议 `multi-agent-first-batch-v5-local.json`，固定本地
+  `qwen2.5:3b`、Ollama OpenAI 兼容端点和独立 `protocol_hash`
+  `efa76c90...4e9b5`；
+- v5 pilot `m9-local-qwen25-3b-pilot-live-r1` 完成 `4/4`：L0/L1/L2/L3 均为
+  真实 `fail`，0 `error`；四条 Run Record 均含模型调用与工具轨迹；
+- v5 正式批次 `m9-local-qwen25-3b-formal-b1-live-r1` 完成 `96/96`，
+  32 个单元全部完成，0 error；四个 arm 各 24 个有效样本，通过率均为 0%；
+- 预注册分析门禁已通过并给出 `no_significant_difference`：L3 - L0 平均配对差
+  `0.0`，95% 区间 `[0.0, 0.0]`，符号翻转 `p=1.0`；这不是 L3 优于 L0 的证据；
+  该批次 `analysis_authorized=true`，`statistical_claims=false`；
 - ADR-029 与统计单测已落地。
 
-剩余：用 v4 协议执行确认性 live 批次。不能用 v3 B1 批次回写成 v4 结论。
+剩余：端点容量恢复后，用 v4 协议完成 NVIDIA 第一模型确认性 live 批次；只有它和
+本地 v5 正式批次都完成后，才能生成有真实数据的跨模型报告。不能用 v3 B1 批次
+回写成 v4 结论，也不能把 M5 的单次方向性曲线升级为统计声明。
 
 ### M10：部署与交付
 
-状态：待完成
+状态：已完成（单机 Compose + Tailnet 私有入口）
 
 交付：
 
@@ -296,6 +350,32 @@ attempt。该缺口已单独修复并以单测锁定；M5 只作为单次工程�
 - CI 不访问真实模型；
 - live 实验明确手动触发；
 - 部署后可查看至少一轮已完成实验。
+
+当前进展：
+
+- `uv lock --check`、Ruff、依赖锁定检查、离线 eval 和 redteam 基线已通过；
+- 完整回归为 `1629 passed, 21 skipped`（641.52 秒）；
+- 启动仓库测试 Postgres/Redis 后，集成与契约回归为 `37 passed, 16 skipped`；
+- Bandit 的固定命令子进程低危发现已按真实边界标注，CI 命令现在通过；
+- `bench.report` / `bench.experiment` 的双向导入顺序已由独立进程测试锁定
+  （`45ba01e`）；
+- Compose 网关已按当前代码重建；端口由 `.env` 的 `GATEWAY_PORT` 控制，当前为
+  `http://127.0.0.1:8083`，实验目录以只读卷挂载；
+- Tailnet 私有部署入口 `http://100.99.204.104:8083` 已实测返回 `HTTP 200`；
+- 部署后 smoke 已验证 M5 的 `32/32`、Run Record 详情和运行中 v4 批次进度；
+- 2026-10-23 11:23（Asia/Shanghai）复验容器 `moa-gateway-gateway-1` 正常运行，
+  本机与 Tailnet 的 `/dashboard/api/experiments` 均返回 `HTTP 200`；
+- 2026-10-23 13:11 容器在长批次期间曾退出，已重启并重新验证本机与 Tailnet；
+  两者都能读取本地正式批次的 `96/96`、0 缺口和只读统计结果；
+- 2026-10-23 14:36（Asia/Shanghai）用当前代码重建镜像并重启；本机与 Tailnet
+  均能从 `8083` 读取 `96/96`、0 缺口、`analysis_authorized=true` 和
+  `statistical_claims=false`，页面明确提示未授权显著差异；
+- 发布证据批次为 `m5-baseline-live-r1`，`report.json` SHA256 为
+  `C5B703C8AEAED5766A52BD9635E4F5CB9DD3EEC3C50EFE722112E906B77B3E7A`；
+- 桌面 1440px 与移动端 390px 重新验收通过：无空白、横向溢出、框架遮罩、
+  控制台错误或页面异常，批次页与 Run Record 链接可交互；
+- 当前交付是受 Basic Auth 保护的单机 Compose + Tailnet 私有入口；公网 Funnel
+  尚未切到实验台，不能把本地或 Tailnet 地址冒充公网部署。
 
 ## 执行顺序
 

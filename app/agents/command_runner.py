@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
+# Fixed verification commands require a process boundary; task argv is never shell-expanded.
+import subprocess  # nosec B404
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,7 +77,8 @@ def run_command(
     ``OSError``，由调用方决定怎么记账。
     """
     try:
-        proc = subprocess.run(  # noqa: S603 - argv 由任务定义给出，不经 shell
+        # argv 由任务定义给出，shell=False，字符串不会交给 shell 解释。
+        proc = subprocess.run(  # noqa: S603  # nosec B603
             list(argv),
             cwd=str(cwd),
             env=build_env(cwd),

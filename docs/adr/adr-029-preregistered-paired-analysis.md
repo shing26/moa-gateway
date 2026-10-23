@@ -28,6 +28,8 @@ arm 显著更好”。错误、缺口、任务难度和模型/价格不可用都
 ## 后果
 
 - v3 正式批次仍是运行时行为证据；统计确认性结论必须来自 v4 协议和满足门禁的数据。
-- 报告中的 `statistical_claims` 由分析结果授权，不再由协议存在或样本数猜测。
+- 报告中的 `analysis_authorized` 表示预注册分析是否可执行；`statistical_claims`
+  只在结果明确为 `candidate_better` / `candidate_worse` 时为真。样本达标但结论为
+  `no_significant_difference` 时不得把字段误读成“已宣称某个 arm 更好”。
 - 缺口、错误和样本不足会直接阻止结论，而不是被排除后继续比较。
 - 敏感性分析可以帮助判断结论是否依赖单个任务，但不能替代预注册主分析。

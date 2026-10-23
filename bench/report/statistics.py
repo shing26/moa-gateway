@@ -130,6 +130,13 @@ class PairedComparison:
     method: str
     sensitivity: dict[str, Any]
 
+    @property
+    def significant_difference(self) -> bool:
+        return self.authorized and self.decision in {
+            "candidate_better",
+            "candidate_worse",
+        }
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "authorized": self.authorized,
@@ -429,14 +436,14 @@ def render_paired_markdown(comparison: PairedComparison) -> str:
         ),
     ]
     if not comparison.authorized:
-        lines.append("- 统计声明：**未授权**")
+        lines.append("- 分析门禁：**未授权**")
         lines.append(
             "- 阻止原因：" + "；".join(comparison.block_reasons)
         )
     else:
         assert comparison.confidence_interval is not None
         low, high = comparison.confidence_interval
-        lines.append("- 统计声明：**已授权并满足预注册门禁**")
+        lines.append("- 分析门禁：**已授权并满足预注册门禁**")
         lines.append(
             f"- 平均配对差值：{comparison.mean_difference:+.3f}"
             if comparison.mean_difference is not None
@@ -448,6 +455,11 @@ def render_paired_markdown(comparison: PairedComparison) -> str:
             f"{comparison.p_value:.4f}"
         )
         lines.append(f"- 决策：`{comparison.decision}`")
+        lines.append(
+            "- 显著差异声明：**已授权**"
+            if comparison.significant_difference
+            else "- 显著差异声明：**不授权**；不得宣称 arm 更优或更差"
+        )
     return "\n".join(lines) + "\n"
 
 
