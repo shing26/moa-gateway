@@ -128,6 +128,10 @@ def test_experiment_dashboard_is_read_only_and_links_run_records(
         assert detail.status_code == 200
         assert "0896629" in detail.text
         assert f"/runs/{experiment_id}/0" in detail.text
+        assert 'class="data-table responsive-stack"' in detail.text
+        assert 'class="table-wrap table-wrap-responsive"' in detail.text
+        assert 'data-label="任务"' in detail.text
+        assert 'data-label="记录"' in detail.text
         assert "统计声明未授权" in detail.text
         assert "并发上限" in detail.text
         assert "平均成本" in detail.text

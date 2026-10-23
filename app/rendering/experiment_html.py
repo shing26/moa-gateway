@@ -55,15 +55,15 @@ def batches_page(rows: list[dict[str, Any]]) -> str:
 """
     body = "\n".join(
         "<tr>"
-        f'<td><a class="text-link mono" href="/dashboard/experiments/{esc(row["batch_id"])}">'
+        f'<td data-label="批次"><a class="text-link mono" href="/dashboard/experiments/{esc(row["batch_id"])}">'
         f'{esc(row["batch_id"])}</a></td>'
-        f'<td>{esc(row["phase"])}</td>'
-        f'<td>{esc(row["budget_tier"])}</td>'
-        f'<td>{_status(row["status"])}</td>'
-        f'<td class="mono">{_int(row["completed_cells"])} / {_int(row["cell_count"])}</td>'
-        f'<td class="mono">{_int(row["completed_runs"])} / {_int(row["expected_runs"])}</td>'
-        f'<td class="mono">{_int(row["missing_runs"])}</td>'
-        f'<td class="mono">{esc(row["updated_at"])}</td>'
+        f'<td data-label="阶段">{esc(row["phase"])}</td>'
+        f'<td data-label="预算档">{esc(row["budget_tier"])}</td>'
+        f'<td data-label="状态">{_status(row["status"])}</td>'
+        f'<td data-label="单元" class="mono">{_int(row["completed_cells"])} / {_int(row["cell_count"])}</td>'
+        f'<td data-label="Runs" class="mono">{_int(row["completed_runs"])} / {_int(row["expected_runs"])}</td>'
+        f'<td data-label="缺失" class="mono">{_int(row["missing_runs"])}</td>'
+        f'<td data-label="更新时间" class="mono">{esc(row["updated_at"])}</td>'
         "</tr>"
         for row in rows
     )
@@ -73,8 +73,8 @@ def batches_page(rows: list[dict[str, Any]]) -> str:
     <h2>实验批次</h2>
     <span class="muted">只读视图，不提供启动、重跑或修改入口</span>
   </div>
-  <div class="table-wrap">
-    <table class="data-table">
+  <div class="table-wrap table-wrap-responsive">
+    <table class="data-table responsive-stack">
       <thead><tr><th>批次</th><th>阶段</th><th>预算档</th><th>状态</th>
       <th>单元</th><th>Runs</th><th>缺失</th><th>更新时间</th></tr></thead>
       <tbody>{body}</tbody>
@@ -121,16 +121,16 @@ def batch_page(payload: dict[str, Any]) -> str:
         ) or '<span class="muted">无记录</span>'
         rows.append(
             "<tr>"
-            f'<td class="mono">{esc(cell.get("task_id", ""))}</td>'
-            f'<td>{esc(cell.get("arm", ""))}</td>'
-            f'<td>{_status(cell.get("status", ""))}</td>'
-            f'<td class="mono">{_int(metrics.get("runs"))} / {sample_target}</td>'
-            f'<td>{_rate(metrics.get("pass_rate"))}</td>'
-            f'<td class="mono">{_int(metrics.get("error"))}</td>'
-            f'<td class="mono">{_int(metrics.get("budget_exhausted"))}</td>'
-            f'<td class="mono">{_cost(metrics.get("avg_cost_usd"))}</td>'
-            f'<td class="mono">{_float(metrics.get("avg_tokens"))}</td>'
-            f"<td>{run_links}</td>"
+            f'<td data-label="任务" class="mono">{esc(cell.get("task_id", ""))}</td>'
+            f'<td data-label="Arm">{esc(cell.get("arm", ""))}</td>'
+            f'<td data-label="状态">{_status(cell.get("status", ""))}</td>'
+            f'<td data-label="样本量" class="mono">{_int(metrics.get("runs"))} / {sample_target}</td>'
+            f'<td data-label="通过率">{_rate(metrics.get("pass_rate"))}</td>'
+            f'<td data-label="Error" class="mono">{_int(metrics.get("error"))}</td>'
+            f'<td data-label="预算耗尽" class="mono">{_int(metrics.get("budget_exhausted"))}</td>'
+            f'<td data-label="平均成本" class="mono">{_cost(metrics.get("avg_cost_usd"))}</td>'
+            f'<td data-label="平均 token" class="mono">{_float(metrics.get("avg_tokens"))}</td>'
+            f'<td data-label="记录">{run_links}</td>'
             "</tr>"
         )
 
@@ -176,8 +176,8 @@ def batch_page(payload: dict[str, Any]) -> str:
   <div class="panel-head"><h2>单元与 Run Record</h2>
     <span class="muted">缺口 {len(gaps)} · 样本不足 {len(under_sampled)}</span>
   </div>
-  <div class="table-wrap">
-    <table class="data-table">
+  <div class="table-wrap table-wrap-responsive">
+    <table class="data-table responsive-stack">
       <thead><tr><th>任务</th><th>Arm</th><th>状态</th><th>样本量</th><th>通过率</th>
       <th>Error</th><th>预算耗尽</th><th>平均成本</th><th>平均 token</th><th>记录</th></tr></thead>
       <tbody>{''.join(rows) or '<tr><td colspan="10" class="muted">暂无单元</td></tr>'}</tbody>
@@ -194,11 +194,11 @@ def run_page(record: dict[str, Any], batch_id: str) -> str:
     steps = list(evidence.get("steps") or [])
     step_rows = "\n".join(
         "<tr>"
-        f'<td class="mono">{int(step.get("index", 0) or 0)}</td>'
-        f'<td>{esc(step.get("action", ""))}</td>'
-        f'<td>{esc(step.get("tool", ""))}</td>'
-        f'<td>{_status(step.get("outcome", ""))}</td>'
-        f'<td class="mono">{_float(step.get("elapsed_ms"), 1)} ms</td>'
+        f'<td data-label="#" class="mono">{int(step.get("index", 0) or 0)}</td>'
+        f'<td data-label="动作">{esc(step.get("action", ""))}</td>'
+        f'<td data-label="工具">{esc(step.get("tool", ""))}</td>'
+        f'<td data-label="结果">{_status(step.get("outcome", ""))}</td>'
+        f'<td data-label="耗时" class="mono">{_float(step.get("elapsed_ms"), 1)} ms</td>'
         "</tr>"
         for step in steps
         if isinstance(step, dict)
@@ -226,8 +226,8 @@ def run_page(record: dict[str, Any], batch_id: str) -> str:
 </section>
 <section class="panel">
   <div class="panel-head"><h2>工具轨迹</h2><span class="muted">{len(steps)} steps</span></div>
-  <div class="table-wrap">
-    <table class="data-table">
+  <div class="table-wrap table-wrap-responsive">
+    <table class="data-table responsive-stack">
       <thead><tr><th>#</th><th>动作</th><th>工具</th><th>结果</th><th>耗时</th></tr></thead>
       <tbody>{step_rows or '<tr><td colspan="5" class="muted">无工具步骤</td></tr>'}</tbody>
     </table>
