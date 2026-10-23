@@ -39,9 +39,18 @@ from bench.experiment.cross_model import (
     build_cross_model_report,
     write_cross_model_report,
 )
+from bench.experiment.capacity import (
+    CAPACITY_GATE_SUCCESSES,
+    CapacityGateResult,
+    CapacityPilotObservation,
+    evaluate_capacity_gate,
+    load_capacity_gate,
+    observe_capacity_pilot,
+)
 
 __all__ = [
     "BATCH_SCHEMA_VERSION",
+    "CAPACITY_GATE_SUCCESSES",
     "BenchExperimentAdapter",
     "BatchCell",
     "BatchManifest",
@@ -50,6 +59,8 @@ __all__ = [
     "BatchRunner",
     "BatchStore",
     "CollaborationExperimentAdapter",
+    "CapacityGateResult",
+    "CapacityPilotObservation",
     "CrossModelReport",
     "DEFAULT_PROTOCOL_PATH",
     "ExperimentManifest",
@@ -66,8 +77,11 @@ __all__ = [
     "build_batch_report",
     "build_cross_model_report",
     "compare_run_records",
+    "evaluate_capacity_gate",
     "fingerprint_workspace",
     "load_protocol",
+    "load_capacity_gate",
+    "observe_capacity_pilot",
     "protocol_from_dict",
     "write_cross_model_report",
 ]

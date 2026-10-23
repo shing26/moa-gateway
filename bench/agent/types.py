@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -79,6 +79,22 @@ class Step:
 
 
 @dataclass(frozen=True)
+class LLMRetryEvent:
+    """一次失败的真实 LLM 尝试；用于区分“最终成功”与“贯穿 429 后成功”。"""
+
+    call_index: int
+    failed_attempt: int
+    max_attempts: int
+    delay_ms: int
+    error_type: str
+    status_code: int | None = None
+    rate_limited: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class Usage:
     """一次 run 的账本。来源是 ``LLMClient.last_metrics``（N3 已建好的通道）。"""
 
@@ -95,6 +111,9 @@ class Usage:
     finish_reasons: tuple[str, ...] = ()
     #: reasoning 总字符数。只记规模，不把思维链正文写进 Run Record。
     reasoning_chars: int = 0
+    #: 被有界重试吸收的调用故障。没有它，一次先 429 后成功的 run 看起来与
+    #: 全程稳定成功的 run 完全相同，容量门禁就无法复核。
+    retry_events: tuple[LLMRetryEvent, ...] = ()
 
     @property
     def total_tokens(self) -> int:
@@ -124,7 +143,11 @@ class Usage:
             ),
             reasoning_chars=self.reasoning_chars
             + int(values.get("reasoning_chars", 0) or 0),
+            retry_events=self.retry_events,
         )
+
+    def add_retry(self, event: LLMRetryEvent) -> "Usage":
+        return replace(self, retry_events=(*self.retry_events, event))
 
     def __add__(self, other: "Usage") -> "Usage":
         """把多段执行体的账并进同一份。"""
@@ -139,6 +162,7 @@ class Usage:
             prompt_hashes=self.prompt_hashes + other.prompt_hashes,
             finish_reasons=self.finish_reasons + other.finish_reasons,
             reasoning_chars=self.reasoning_chars + other.reasoning_chars,
+            retry_events=self.retry_events + other.retry_events,
         )
 
 
@@ -297,6 +321,7 @@ __all__ = [
     "CodingAgent",
     "E1_ORIGIN",
     "E3_ORIGIN",
+    "LLMRetryEvent",
     "Outcome",
     "RunResult",
     "Step",

@@ -205,6 +205,10 @@ class BenchExperimentAdapter:
                 "reasoning_chars": int(
                     getattr(usage, "reasoning_chars", 0) or 0
                 ),
+                "llm_retry_events": [
+                    item.to_dict()
+                    for item in (getattr(usage, "retry_events", ()) or ())
+                ],
                 "workspace_writes": [
                     dict(item)
                     for item in (

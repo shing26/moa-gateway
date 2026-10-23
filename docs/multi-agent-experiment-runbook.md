@@ -130,12 +130,34 @@ $env:CI = ""
 恢复 v4 正式批次前，至少连续完成两个真实 agent pilot，其中至少一个使用 L2。
 任何一次出现 `429` 都重新计算门槛；8/512-token 探测或单个 L0 成功不构成容量恢复。
 
+Run Record 会保留被内部重试吸收的 `llm_retry_events`。旧记录如果没有该字段，
+检查器不会把它算作有效恢复证据。门禁本身可执行：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/verify_capacity_gate.py `
+  --protocol bench/protocols/multi-agent-first-batch-v4.json `
+  --batch-id <pilot-1> `
+  --batch-id <pilot-2> `
+  --out .bench-experiments
+```
+
+只有输出 `"ready": true` 才能恢复 v4 B1；命令返回 `1` 表示尚未恢复，返回 `2`
+表示输入批次或 Run Record 不可读取。检查器按批次创建时间排序，任何无效 pilot
+或 `429` 都会让此前的连续计数归零。
+
 已记录的阻塞批次：
 
 - `m6-formal-b1-live-r1`：并发 4 触发持续 429，0 条 Trial，作废；
 - `m6-formal-b1-live-r2`：并发 1 仍只完成 3 条 Trial、0 个完整单元，暂停保留。
 - `capacity-v4-l0-pilot-live-r3`：v4 L0 单任务真实 pilot 连续 429，最终 1 个
   `error`、0 个有效样本；只作容量证据，不进入正式比较。
+- `capacity-v4-l0-pilot-live-r4`：首个真实调用 429，内部退避后 L0 通过；因出现过
+  429，本次不计入连续恢复门槛。
+- `capacity-v4-l2-pilot-live-r1`：L2 首个 attempt 出现 429，第二次 attempt 的
+  planner 又被 4096 completion 上限截断，最终 1 个 `error`、0 个有效样本。
+- `capacity-v4-l0-pilot-live-r5`：L0 得到有效 `fail`，但 Run Record 捕获到
+  2 次 429；`verify_capacity_gate.py` 返回 `ready=false`，证明重试遥测与门禁
+  已能在不依赖终端日志的情况下自行判断容量未恢复。
 
 B3 只能从完整 B1 派生，并且只选择最终为 `fail` / `budget_exhausted` 的单元：
 

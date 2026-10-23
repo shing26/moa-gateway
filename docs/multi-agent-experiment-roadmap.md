@@ -215,12 +215,22 @@ attempt。该缺口已单独修复并以单测锁定；M5 只作为单次工程�
 - 2026-10-23 14:45 使用同一 v4 模型/端点单跑 `L0` 真实任务
   `capacity-v4-l0-pilot-live-r3`，首个 agent 调用即连续 429；最终记录 1 个
   `error`、0 个有效样本，报告全量对账通过，未触碰正式批次；
+- `capacity-v4-l0-pilot-live-r4` 的首个真实调用先 429，内部退避后 L0 通过；
+  由于出现 429，本次不计入连续恢复门槛；
+- `capacity-v4-l2-pilot-live-r1` 的首个 attempt 再次 429，第二次 attempt 的
+  planner 输出被 4096 completion 上限截断，最终 1 个 `error`、0 个有效样本；
+- Run Record 新增 `llm_retry_events`，保留被内部重试吸收的限流事件；
+  `scripts/verify_capacity_gate.py` 按创建时间验证连续有效 pilot、L0/L2 覆盖和
+  429 重置规则，旧记录缺少该字段时不能冒充恢复证据；
+- `capacity-v4-l0-pilot-live-r5` 得到有效 `fail`，但 Run Record 捕获到 2 次 429；
+  容量门禁返回 `ready=false`，证明判定已经能只依赖不可变 Run Record；
 - 正式 `8 × 4 × 3` B1 与派生 B3 尚未完成，因此 M6 未完成。
 
 下一步：
 
 1. 恢复门槛是至少连续两个真实 agent pilot 成功，其中至少一个走 L2 多调用链路，
-   且没有 429；短 token 探测和单个 L0 成功都不算容量恢复；
+   且没有 429；短 token 探测和单个 L0 成功都不算容量恢复；恢复前必须运行
+   `scripts/verify_capacity_gate.py` 并得到 `ready=true`；
 2. 达到容量门槛后恢复 v4 r1，不要用已暂停批次或 pilot 冒充正式样本；
 3. 正式 B1 达到 96 条连续 Run Record 后，才允许从其最终 `fail` /
    `budget_exhausted` 单元派生 B3；

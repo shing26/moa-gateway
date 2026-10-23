@@ -51,6 +51,22 @@ class _TruncatedLLM(ScriptedLLM):
         return replace(result, finish_reason="length", reasoning_chars=3620)
 
 
+class _RateLimitedOnceLLM(ScriptedLLM):
+    """首个真实调用被 429 拒绝，重试成功后必须留下可复核事件。"""
+
+    def __init__(self) -> None:
+        super().__init__([ScriptedTurn(final="重试后完成")], model="rate-limited")
+        self.calls = 0
+
+    async def chat_with_tools(self, messages, tools, **kwargs):  # type: ignore[override]
+        self.calls += 1
+        if self.calls == 1:
+            exc = RuntimeError("429 Too Many Requests")
+            exc.status_code = 429  # type: ignore[attr-defined]
+            raise exc
+        return await super().chat_with_tools(messages, tools, **kwargs)
+
+
 @pytest.mark.asyncio
 async def test_terminal_turn_is_completed(tmp_path: Path) -> None:
     agent = make_agent(tmp_path, [ScriptedTurn(final="做完了")])
@@ -132,6 +148,30 @@ async def test_transient_llm_error_is_retried_then_completes(
     assert run.error == ""
     # 重试的那一轮没有落到轨迹上：失败不是一步。
     assert [step.action for step in run.steps] == ["finish"]
+    assert len(run.usage.retry_events) == 1
+    assert run.usage.retry_events[0].error_type == "RuntimeError"
+    assert run.usage.retry_events[0].rate_limited is False
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_retry_survives_into_successful_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("bench.agent.loop.LLM_RETRY_BACKOFF_MS", (0, 0))
+    tools = build_toolset(workspace=tmp_path, verify_command=FAILING_VERIFY)
+    run = await LLMBackedAgent(_RateLimitedOnceLLM(), tools).run(
+        workspace=tmp_path,
+        goal="目标",
+        budget=Budget(1.0, 5),
+    )
+
+    assert run.status == "completed"
+    assert len(run.usage.retry_events) == 1
+    event = run.usage.retry_events[0]
+    assert event.call_index == 1
+    assert event.failed_attempt == 1
+    assert event.status_code == 429
+    assert event.rate_limited is True
 
 
 @pytest.mark.asyncio

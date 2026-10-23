@@ -62,7 +62,9 @@ prompt 返回 `stop` 和可解析计划。因此 v3 将单次输出上限固定�
 失败批次与 v3 不共享 `protocol_hash`，不会混合解释。
 
 Run Record 的 `evidence.finish_reasons` 与 `evidence.reasoning_chars` 会保留每次
-调用的停止原因和 reasoning 规模；不落思维链正文。
+调用的停止原因和 reasoning 规模；不落思维链正文。被循环内部有界重试吸收的调用
+故障写入 `evidence.llm_retry_events`，包括状态码、是否限流、失败 attempt 与退避时间。
+因此“先 429 后成功”不会伪装成一次全程稳定的成功。
 
 `config_hash` 对协议身份做规范化 JSON 哈希。字段顺序不影响哈希；任务集、arm、模型、
 预算、重复次数、重试、排除或报告口径的语义变化都会产生新哈希。协议单元映射到
@@ -206,6 +208,7 @@ bench L0-L3 适配器：
 | 输入 | `task`、`task_hash`、`config_hash`、`model`、`config`、`verify_command` |
 | 实际行为 | `plan`、`node_path`、`per_agent_outputs`、`final_text` |
 | 提示词证据 | `prompt_hashes`，每次真实 LLM 请求的 messages + tool schemas 摘要 |
+| 重试证据 | `evidence.llm_retry_events`，被内部重试吸收的调用故障与 429 标记 |
 | 治理结果 | `evidence.critic`、`guard_action`、`error_code`、HITL 相关字段 |
 | 资源 | `metrics`：调用数、token、成本、延迟、工具调用与错误 |
 | 工作区 | `workspace.snapshot_id`、执行前后内容哈希与文件数 |

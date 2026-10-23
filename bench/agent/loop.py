@@ -41,7 +41,14 @@ from app.agents.tools import ToolRegistry
 
 from bench.agent.memory import MemoryPolicy, compact_messages, truncate_observation
 from bench.agent.tools import call_bench_tool
-from bench.agent.types import AgentRun, AgentStatus, Budget, Step, Usage
+from bench.agent.types import (
+    AgentRun,
+    AgentStatus,
+    Budget,
+    LLMRetryEvent,
+    Step,
+    Usage,
+)
 
 logger = logging.getLogger("bench.agent.loop")
 
@@ -50,6 +57,23 @@ logger = logging.getLogger("bench.agent.loop")
 LLM_RETRY_ATTEMPTS = 3
 #: 每次重试前的退避（毫秒），最后一次的值会重复用于更后面的尝试。
 LLM_RETRY_BACKOFF_MS = (1000, 3000)
+
+
+def _rate_limit_status(exc: BaseException) -> int | None:
+    """从 provider 异常里提取可复核的限流状态，不保存请求正文。"""
+    for value in (
+        getattr(exc, "status_code", None),
+        getattr(exc, "http_status", None),
+        getattr(exc, "code", None),
+    ):
+        try:
+            status = int(value)
+        except (TypeError, ValueError):
+            continue
+        if status > 0:
+            return status
+    label = f"{type(exc).__name__}: {exc}".lower()
+    return 429 if "ratelimit" in label or "too many requests" in label else None
 
 
 class _ToolRunner(Protocol):
@@ -282,11 +306,27 @@ class LoopSession:
                 raise
             except Exception as exc:  # noqa: BLE001 - 任何调用故障都可重试
                 last = exc
+                delay_ms = (
+                    0
+                    if attempt >= LLM_RETRY_ATTEMPTS
+                    else LLM_RETRY_BACKOFF_MS[
+                        min(attempt - 1, len(LLM_RETRY_BACKOFF_MS) - 1)
+                    ]
+                )
+                status_code = _rate_limit_status(exc)
+                self.usage = self.usage.add_retry(
+                    LLMRetryEvent(
+                        call_index=self.served_calls,
+                        failed_attempt=attempt,
+                        max_attempts=LLM_RETRY_ATTEMPTS,
+                        delay_ms=delay_ms,
+                        error_type=type(exc).__name__,
+                        status_code=status_code,
+                        rate_limited=status_code == 429,
+                    )
+                )
                 if attempt >= LLM_RETRY_ATTEMPTS:
                     break
-                delay_ms = LLM_RETRY_BACKOFF_MS[
-                    min(attempt - 1, len(LLM_RETRY_BACKOFF_MS) - 1)
-                ]
                 logger.warning(
                     "agent llm call failed (attempt %d/%d): %s; retrying in %dms",
                     attempt,
