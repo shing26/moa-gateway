@@ -141,12 +141,16 @@ def build_cross_model_report(
         raise ValueError("每个模型只能由一个批次提供，不能合并重复模型批次")
 
     expected_tasks = tuple(task.task_id for task in protocol.tasks)
+    expected_task_origins = {
+        task.task_id: task.origin for task in protocol.tasks
+    }
     paired = tuple(
         paired_pass_rate_comparison(
             rows,
             protocol.statistics,
             model=model,
             expected_tasks=expected_tasks,
+            expected_task_origins=expected_task_origins,
         )
         for model in model_names
     )

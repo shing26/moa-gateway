@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from bench.experiment.protocol import ProtocolStatistics
 from bench.report import (
     RunRow,
@@ -112,6 +114,31 @@ def test_paired_analysis_zero_difference_is_not_a_significance_claim() -> None:
     markdown = render_paired_markdown(comparison)
     assert "分析门禁：**已授权" in markdown
     assert "显著差异声明：**不授权" in markdown
+
+
+def test_paired_analysis_keeps_task_origin_when_all_runs_are_errors() -> None:
+    rows = [replace(row, outcome="error") for row in _rows()]
+
+    comparison = paired_pass_rate_comparison(
+        rows,
+        _preregistration(),
+        expected_tasks=tuple(f"task-{index}" for index in range(8)),
+    )
+
+    tasks = {item.task_id: item for item in comparison.tasks}
+    assert tasks["task-5"].task_origin == "E3"
+    assert comparison.sensitivity["origin_stratified"] == []
+
+
+def test_paired_analysis_uses_protocol_origin_for_missing_task() -> None:
+    comparison = paired_pass_rate_comparison(
+        [],
+        _preregistration(),
+        expected_tasks=("missing-e3",),
+        expected_task_origins={"missing-e3": "E3"},
+    )
+
+    assert comparison.tasks[0].task_origin == "E3"
 
 
 def test_paired_analysis_refuses_claim_when_any_cell_is_under_sampled() -> None:

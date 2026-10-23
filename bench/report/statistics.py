@@ -5,8 +5,9 @@ from __future__ import annotations
 import math
 import random
 from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Iterable
+from typing import TYPE_CHECKING, Any
 
 from bench.report.aggregate import RunRow
 
@@ -169,6 +170,7 @@ def paired_pass_rate_comparison(
     *,
     model: str | None = None,
     expected_tasks: Iterable[str] | None = None,
+    expected_task_origins: Mapping[str, str] | None = None,
 ) -> PairedComparison:
     all_rows = list(rows)
     models = sorted({row.model for row in all_rows if row.model})
@@ -252,11 +254,11 @@ def paired_pass_rate_comparison(
             else None
         )
         origin = (
-            candidate_valid[0].task_origin
-            if candidate_valid
-            else baseline_valid[0].task_origin
-            if baseline_valid
-            else "E1"
+            candidate[0].task_origin
+            if candidate
+            else baseline[0].task_origin
+            if baseline
+            else (expected_task_origins or {}).get(task_id, "E1")
         )
         tasks.append(
             PairedTask(

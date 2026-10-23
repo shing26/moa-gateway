@@ -1002,6 +1002,9 @@ def build_batch_report(
             rows,
             protocol.statistics,
             expected_tasks=(task.task_id for task in protocol.tasks),
+            expected_task_origins={
+                task.task_id: task.origin for task in protocol.tasks
+            },
         )
     return BatchReport(
         manifest=manifest,

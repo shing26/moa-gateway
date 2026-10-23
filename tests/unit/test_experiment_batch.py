@@ -473,6 +473,30 @@ async def test_batch_report_uses_run_records_and_keeps_errors_out_of_pass_rate(
 
 
 @pytest.mark.asyncio
+async def test_batch_report_keeps_e3_origin_when_the_only_run_is_an_error(
+    tmp_path,
+) -> None:
+    protocol = load_protocol(STATS_PROTOCOL_PATH)
+    task_id = "e3-c2-keyword-normalization"
+    experiments = ExperimentStore(tmp_path / "experiments")
+    outcome = await BatchRunner(experiments, protocol).run(
+        phase="pilot",
+        task_ids=(task_id,),
+        arm_names=("L0",),
+        batch_id="e3-error-origin",
+        executor_factory=lambda spec: FakeExecutor(
+            {(task_id, "L0", 0): "error"}
+        ),
+    )
+
+    report = build_batch_report(outcome.manifest, experiments, protocol)
+    assert report.paired is not None
+    task = next(item for item in report.paired.tasks if item.task_id == task_id)
+    assert task.task_origin == "E3"
+    assert task.baseline_valid_runs == 0
+
+
+@pytest.mark.asyncio
 async def test_b3_only_reruns_fail_and_budget_exhausted_cells_with_baseline(
     tmp_path,
 ) -> None:
