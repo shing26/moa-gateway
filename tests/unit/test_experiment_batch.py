@@ -3,12 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 from bench import run_batch as batch_cli
 from bench.experiment import (
     BatchRunner,
+    BatchManifest,
     BatchStore,
     ExperimentRunner,
     ExperimentStore,
@@ -16,6 +18,13 @@ from bench.experiment import (
     TrialEvidence,
     build_batch_report,
     load_protocol,
+)
+
+STATS_PROTOCOL_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "bench"
+    / "protocols"
+    / "multi-agent-first-batch-v4.json"
 )
 
 
@@ -83,6 +92,31 @@ class ConcurrencyProbeExecutor:
 def _two_task_protocol():
     protocol = load_protocol()
     return replace(protocol, tasks=protocol.tasks[:2])
+
+
+def test_batch_manifest_v1_migrates_execution_controls_with_safe_defaults() -> None:
+    current = BatchManifest(
+        schema_version=1,
+        batch_id="batch-v1",
+        protocol_id="protocol",
+        protocol_version="1",
+        protocol_hash="hash",
+        phase="baseline",
+        budget_tier="B1",
+        source_batch_id="",
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+        status="completed",
+        resume_cursor="",
+        cells=(),
+    ).to_dict()
+    current.pop("max_concurrency")
+    current.pop("rate_limit_per_minute")
+
+    manifest = BatchManifest.from_dict(current)
+
+    assert manifest.max_concurrency == 1
+    assert manifest.rate_limit_per_minute == 0
 
 
 @pytest.mark.asyncio
@@ -492,6 +526,42 @@ def test_batch_cli_runs_a_full_mock_subset_and_writes_reports(
     assert (batch_dir / "report.md").exists()
 
 
+def test_batch_cli_rejects_live_models_in_ci(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.delenv("BENCH_ALLOW_LIVE_IN_CI", raising=False)
+
+    code = batch_cli.main(
+        [
+            "batch",
+            "--phase",
+            "pilot",
+            "--tasks",
+            "0896629",
+            "--arms",
+            "L0",
+            "--mode",
+            "live",
+            "--out",
+            str(tmp_path / "experiments"),
+            "--batch-id",
+            "must-not-run",
+        ]
+    )
+
+    message = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert message["error"] == "ValueError"
+    assert "拒绝执行 live" in message["message"]
+    assert not (tmp_path / "experiments" / "_batches" / "must-not-run").exists()
+
+
+def test_batch_ci_guard_can_be_explicitly_overridden(monkeypatch) -> None:
+    monkeypatch.setenv("CI", "true")
+    monkeypatch.setenv("BENCH_ALLOW_LIVE_IN_CI", "1")
+
+    batch_cli._guard_live_mode("live")
+
+
 def test_live_retry_uses_a_fresh_attempt_workspace(tmp_path) -> None:
     first = batch_cli._trial_attempt_workdir(
         tmp_path,
@@ -555,3 +625,34 @@ def test_batch_cli_b3_selects_only_failed_cells_and_records_source(
     assert summary["cell_count"] == 1
     assert summary["cells"][0]["cell_id"] == "0896629__L1"
     assert summary["completed_runs"] == 3
+
+
+@pytest.mark.asyncio
+async def test_preregistered_batch_report_authorizes_only_complete_paired_data(
+    tmp_path,
+) -> None:
+    protocol = load_protocol(STATS_PROTOCOL_PATH)
+    outcomes = {}
+    for task in protocol.tasks:
+        for repeat in range(protocol.repeats.formal):
+            outcomes[(task.task_id, "L0", repeat)] = "fail"
+            outcomes[(task.task_id, "L3", repeat)] = "pass"
+
+    outcome = await BatchRunner(
+        ExperimentStore(tmp_path / "experiments"), protocol
+    ).run(
+        phase="formal",
+        arm_names=("L0", "L3"),
+        batch_id="preregistered-batch",
+        executor_factory=lambda spec: FakeExecutor(outcomes),
+    )
+
+    assert outcome.report.paired is not None
+    assert outcome.report.paired.authorized is True
+    assert outcome.report.paired.decision == "candidate_better"
+    payload = outcome.report.to_dict()
+    assert payload["statistical_claims"] is True
+    assert payload["statistics"]["planned_task_count"] == 8
+    assert payload["statistics"]["confidence_interval"] == [1.0, 1.0]
+    assert payload["model_matrix"][0]["cost_signal"] == "unavailable_or_zero"
+    assert "统计声明：**已按预注册门禁授权**" in outcome.report.render_markdown()

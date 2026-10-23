@@ -19,7 +19,17 @@ from bench.experiment.protocol import ExperimentProtocol, Phase
 from bench.experiment.runner import ExperimentRunner
 from bench.experiment.store import ExperimentStore
 from bench.experiment.types import ExperimentSpec, TrialExecutor
-from bench.report import DoseReport, RunRow, build_report, render_markdown
+from bench.report import (
+    DoseReport,
+    ModelArmSummary,
+    PairedComparison,
+    RunRow,
+    build_report,
+    model_arm_matrix,
+    paired_pass_rate_comparison,
+    render_markdown,
+    render_paired_markdown,
+)
 
 BATCH_SCHEMA_VERSION = 3
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -256,6 +266,8 @@ class BatchStore:
 class BatchReport:
     manifest: BatchManifest
     dose: DoseReport
+    paired: PairedComparison | None = None
+    model_summaries: tuple[ModelArmSummary, ...] = ()
 
     @property
     def expected_runs(self) -> int:
@@ -270,7 +282,7 @@ class BatchReport:
         return max(0, self.expected_runs - self.completed_runs)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "batch_id": self.manifest.batch_id,
             "protocol_id": self.manifest.protocol_id,
             "protocol_version": self.manifest.protocol_version,
@@ -289,10 +301,18 @@ class BatchReport:
             "expected_runs": self.expected_runs,
             "completed_runs": self.completed_runs,
             "missing_runs": self.missing_runs,
-            "statistical_claims": False,
+            "statistical_claims": bool(
+                self.paired is not None and self.paired.authorized
+            ),
             "cells": [cell.to_dict() for cell in self.manifest.cells],
             "report": self.dose.to_dict(),
         }
+        if self.paired is not None:
+            payload["statistics"] = self.paired.to_dict()
+            payload["model_matrix"] = [
+                item.to_dict() for item in self.model_summaries
+            ]
+        return payload
 
     def render_markdown(self) -> str:
         lines = [
@@ -317,7 +337,11 @@ class BatchReport:
                 f"- Trial：{self.completed_runs} / {self.expected_runs} 完成，"
                 f"{self.missing_runs} 缺失"
             ),
-            "- 统计声明：**不授权**；样本不足时只作方向性观察。",
+            (
+                "- 统计声明：**已按预注册门禁授权**。"
+                if self.paired is not None and self.paired.authorized
+                else "- 统计声明：**不授权**；样本不足时只作方向性观察。"
+            ),
             "",
             "## 单元状态",
         ]
@@ -340,6 +364,8 @@ class BatchReport:
                 f"{cell.trial_count}/{cell.expected_trials} | {outcomes or '-'} |"
             )
         lines.extend(["", render_markdown(self.dose)])
+        if self.paired is not None:
+            lines.extend(["", render_paired_markdown(self.paired)])
         return "\n".join(lines)
 
 
@@ -932,7 +958,19 @@ def build_batch_report(
         tasks=(cell.task_id for cell in manifest.cells),
         arms=tuple(dict.fromkeys(cell.arm for cell in manifest.cells)),
     )
-    return BatchReport(manifest=manifest, dose=dose)
+    paired = None
+    if protocol is not None and protocol.statistics is not None:
+        paired = paired_pass_rate_comparison(
+            rows,
+            protocol.statistics,
+            expected_tasks=(task.task_id for task in protocol.tasks),
+        )
+    return BatchReport(
+        manifest=manifest,
+        dose=dose,
+        paired=paired,
+        model_summaries=model_arm_matrix(rows) if paired is not None else (),
+    )
 
 
 __all__ = [

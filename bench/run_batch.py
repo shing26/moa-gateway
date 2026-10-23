@@ -38,6 +38,20 @@ from bench.harness.runner import load_task, run_task  # noqa: E402
 DEFAULT_OUT = ROOT / ".bench-experiments"
 
 
+def _guard_live_mode(mode: str) -> None:
+    """CI 只能跑 mock；真实模型批次必须由人或显式调度器手动触发。"""
+    if mode != "live":
+        return
+    if os.getenv("CI", "").strip().lower() not in {"1", "true", "yes"}:
+        return
+    if os.getenv("BENCH_ALLOW_LIVE_IN_CI", "").strip() == "1":
+        return
+    raise ValueError(
+        "检测到 CI 环境，拒绝执行 live 实验；"
+        "如确需显式调度，请设置 BENCH_ALLOW_LIVE_IN_CI=1"
+    )
+
+
 class MockBatchExecutor:
     """离线执行器：只证明矩阵、落盘与恢复，不冒充模型能力证据。"""
 
@@ -189,6 +203,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace) -> int:
+    _guard_live_mode(args.mode)
     protocol = load_protocol(args.protocol)
     store = ExperimentStore(args.out)
     output_root = Path(args.out).resolve()
@@ -216,6 +231,7 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 async def _run_b3(args: argparse.Namespace) -> int:
+    _guard_live_mode(args.mode)
     protocol = load_protocol(args.protocol)
     store = ExperimentStore(args.out)
     output_root = Path(args.out).resolve()

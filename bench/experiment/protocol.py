@@ -386,6 +386,88 @@ class ProtocolReporting:
 
 
 @dataclass(frozen=True)
+class ProtocolStatistics:
+    """Statistical analysis contract frozen before the confirmatory batch."""
+
+    unit: str
+    primary_metric: str
+    candidate_arm: str
+    baseline_arm: str
+    planned_task_count: int
+    planned_repeats_per_cell: int
+    min_valid_repeats_per_cell: int
+    confidence_level: float
+    bootstrap_resamples: int
+    random_seed: int
+    alpha: float = 0.05
+    sensitivity: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.unit != "task":
+            raise ValueError("statistics.unit 当前只支持 task")
+        if self.primary_metric != "pass_rate":
+            raise ValueError("statistics.primary_metric 当前只支持 pass_rate")
+        if self.candidate_arm == self.baseline_arm:
+            raise ValueError("statistics 比较的两个 arm 必须不同")
+        if self.planned_task_count < 1:
+            raise ValueError("statistics.planned_task_count 必须 >= 1")
+        if self.planned_repeats_per_cell < 1:
+            raise ValueError("statistics.planned_repeats_per_cell 必须 >= 1")
+        if self.min_valid_repeats_per_cell < 1:
+            raise ValueError("statistics.min_valid_repeats_per_cell 必须 >= 1")
+        if self.min_valid_repeats_per_cell > self.planned_repeats_per_cell:
+            raise ValueError(
+                "statistics.min_valid_repeats_per_cell 不能大于计划重复数"
+            )
+        if not 0.5 < self.confidence_level < 1:
+            raise ValueError("statistics.confidence_level 必须在 (0.5, 1) 内")
+        if self.bootstrap_resamples < 100:
+            raise ValueError("statistics.bootstrap_resamples 必须 >= 100")
+        if not 0 < self.alpha < 0.5:
+            raise ValueError("statistics.alpha 必须在 (0, 0.5) 内")
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ProtocolStatistics":
+        return cls(
+            unit=_text(payload, "unit"),
+            primary_metric=_text(payload, "primary_metric"),
+            candidate_arm=_text(payload, "candidate_arm"),
+            baseline_arm=_text(payload, "baseline_arm"),
+            planned_task_count=_integer(payload, "planned_task_count"),
+            planned_repeats_per_cell=_integer(
+                payload, "planned_repeats_per_cell"
+            ),
+            min_valid_repeats_per_cell=_integer(
+                payload, "min_valid_repeats_per_cell"
+            ),
+            confidence_level=_number(payload, "confidence_level"),
+            bootstrap_resamples=_integer(payload, "bootstrap_resamples"),
+            random_seed=_integer(payload, "random_seed"),
+            alpha=_number(payload, "alpha"),
+            sensitivity=tuple(
+                _text_item(item, "sensitivity")
+                for item in _sequence(payload, "sensitivity")
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "unit": self.unit,
+            "primary_metric": self.primary_metric,
+            "candidate_arm": self.candidate_arm,
+            "baseline_arm": self.baseline_arm,
+            "planned_task_count": self.planned_task_count,
+            "planned_repeats_per_cell": self.planned_repeats_per_cell,
+            "min_valid_repeats_per_cell": self.min_valid_repeats_per_cell,
+            "confidence_level": self.confidence_level,
+            "bootstrap_resamples": self.bootstrap_resamples,
+            "random_seed": self.random_seed,
+            "alpha": self.alpha,
+            "sensitivity": list(self.sensitivity),
+        }
+
+
+@dataclass(frozen=True)
 class ExperimentProtocol:
     schema_version: int
     protocol_id: str
@@ -399,6 +481,7 @@ class ExperimentProtocol:
     retry: ProtocolRetry
     exclusions: ProtocolExclusions
     reporting: ProtocolReporting
+    statistics: ProtocolStatistics | None = None
 
     def __post_init__(self) -> None:
         task_ids = [task.task_id for task in self.tasks]
@@ -416,7 +499,7 @@ class ExperimentProtocol:
             raise ValueError(f"protocol 缺少已登记 arm: {', '.join(missing)}")
 
     def identity_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": self.schema_version,
             "protocol_id": self.protocol_id,
             "version": self.version,
@@ -430,6 +513,9 @@ class ExperimentProtocol:
             "exclusions": self.exclusions.to_dict(),
             "reporting": self.reporting.to_dict(),
         }
+        if self.statistics is not None:
+            payload["statistics"] = self.statistics.to_dict()
+        return payload
 
     @property
     def config_hash(self) -> str:
@@ -537,6 +623,16 @@ class ExperimentProtocol:
                 f"不支持的协议 schema_version: {schema_version}"
                 f"（只认 {PROTOCOL_SCHEMA_VERSION}）"
             )
+        statistics_payload = payload.get("statistics")
+        if statistics_payload is not None and not isinstance(
+            statistics_payload, dict
+        ):
+            raise TypeError("protocol.statistics 必须是对象")
+        statistics = (
+            ProtocolStatistics.from_dict(statistics_payload)
+            if statistics_payload is not None
+            else None
+        )
         protocol = cls(
             schema_version=schema_version,
             protocol_id=_text(payload, "protocol_id"),
@@ -556,6 +652,7 @@ class ExperimentProtocol:
             retry=ProtocolRetry.from_dict(_mapping(payload, "retry")),
             exclusions=ProtocolExclusions.from_dict(_mapping(payload, "exclusions")),
             reporting=ProtocolReporting.from_dict(_mapping(payload, "reporting")),
+            statistics=statistics,
         )
         if not protocol.tasks:
             raise ValueError("protocol.tasks 不能为空")
@@ -591,6 +688,7 @@ __all__ = [
     "ProtocolReporting",
     "ProtocolRepeats",
     "ProtocolRetry",
+    "ProtocolStatistics",
     "ProtocolTask",
     "load_protocol",
     "protocol_from_dict",

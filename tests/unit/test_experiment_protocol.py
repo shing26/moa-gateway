@@ -26,6 +26,9 @@ EXPECTED_TASKS = (
     ("e3-c2-keyword-normalization", "E3"),
     ("e3-c3-binary-write-review", "E3"),
 )
+STATS_PROTOCOL_PATH = (
+    DEFAULT_PROTOCOL_PATH.parent / "multi-agent-first-batch-v4.json"
+)
 
 
 def test_default_protocol_freezes_the_first_batch() -> None:
@@ -167,3 +170,32 @@ def test_protocol_rejects_incomplete_or_unknown_contract_fields(
 def test_default_protocol_path_is_stable() -> None:
     assert DEFAULT_PROTOCOL_PATH.name == "multi-agent-first-batch-v3.json"
     assert DEFAULT_PROTOCOL_PATH.exists()
+
+
+def test_statistics_protocol_has_a_distinct_preregistered_identity() -> None:
+    baseline = load_protocol()
+    confirmatory = load_protocol(STATS_PROTOCOL_PATH)
+
+    assert confirmatory.version == "4"
+    assert confirmatory.config_hash != baseline.config_hash
+    assert confirmatory.statistics is not None
+    assert confirmatory.statistics.unit == "task"
+    assert confirmatory.statistics.primary_metric == "pass_rate"
+    assert confirmatory.statistics.candidate_arm == "L3"
+    assert confirmatory.statistics.baseline_arm == "L0"
+    assert confirmatory.statistics.planned_task_count == 8
+    assert confirmatory.statistics.planned_repeats_per_cell == 3
+    assert confirmatory.statistics.min_valid_repeats_per_cell == 3
+    assert confirmatory.statistics.bootstrap_resamples == 10_000
+    assert confirmatory.statistics.sensitivity == (
+        "leave_one_task_out",
+        "origin_stratified",
+    )
+
+
+def test_statistics_protocol_rejects_impossible_pre_registration() -> None:
+    payload = json.loads(STATS_PROTOCOL_PATH.read_text(encoding="utf-8"))
+    payload["statistics"]["min_valid_repeats_per_cell"] = 4
+
+    with pytest.raises(ValueError, match="min_valid_repeats_per_cell"):
+        protocol_from_dict(payload)
