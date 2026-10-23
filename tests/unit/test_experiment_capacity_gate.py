@@ -29,11 +29,11 @@ def _observation(
     *,
     eligible: bool = True,
     l2_multicall: bool = False,
-    created_at: str = "",
+    observed_at: str = "",
 ) -> CapacityPilotObservation:
     return CapacityPilotObservation(
         batch_id=name,
-        created_at=created_at or f"2026-10-23T00:00:0{name[-1]}+00:00",
+        observed_at=observed_at or f"2026-10-23T00:00:0{name[-1]}+00:00",
         arm="L2" if l2_multicall else "L0",
         status="pass" if eligible else "error",
         llm_calls=2 if l2_multicall else 1,

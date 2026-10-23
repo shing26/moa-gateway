@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
         "--batch-id",
         action="append",
         required=True,
-        help="按时间顺序可重复传入；脚本仍会按 batch.created_at 排序",
+        help="可重复传入；脚本按 Batch Manifest updated_at 排序",
     )
     parser.add_argument("--out", default=".bench-experiments")
     return parser.parse_args()

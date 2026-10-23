@@ -224,6 +224,13 @@ attempt。该缺口已单独修复并以单测锁定；M5 只作为单次工程�
   429 重置规则，旧记录缺少该字段时不能冒充恢复证据；
 - `capacity-v4-l0-pilot-live-r5` 得到有效 `fail`，但 Run Record 捕获到 2 次 429；
   容量门禁返回 `ready=false`，证明判定已经能只依赖不可变 Run Record；
+- `capacity-v4-l2-pilot-live-r2` 与 `capacity-v4-l0-pilot-live-r6` 连续通过，
+  L2 为 45 次调用、4 个子任务，两轮均无 429；容量门禁返回 `ready=true`；
+- 恢复 `m6-m9-formal-b1-v4-live-r1` 后，`0896629__L0` 与
+  `0896629__L1` 的 trial-001 均为 `pass`；随后 L2 持续 429 约 10 分钟，
+  runner 已停止并把批次恢复为 `paused`，当前为 5 / 96 Trials、0 / 32 完整单元；
+- 容量门禁改用 Manifest `updated_at` 排序；恢复后的批次必须作为最后一条门禁输入，
+  使旧 pilot 资格在该批次再次暂停后失效；
 - 正式 `8 × 4 × 3` B1 与派生 B3 尚未完成，因此 M6 未完成。
 
 下一步：

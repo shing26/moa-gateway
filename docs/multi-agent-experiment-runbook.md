@@ -138,12 +138,15 @@ Run Record 会保留被内部重试吸收的 `llm_retry_events`。旧记录如�
   --protocol bench/protocols/multi-agent-first-batch-v4.json `
   --batch-id <pilot-1> `
   --batch-id <pilot-2> `
+  --batch-id <latest-resumed-batch-if-any> `
   --out .bench-experiments
 ```
 
 只有输出 `"ready": true` 才能恢复 v4 B1；命令返回 `1` 表示尚未恢复，返回 `2`
-表示输入批次或 Run Record 不可读取。检查器按批次创建时间排序，任何无效 pilot
-或 `429` 都会让此前的连续计数归零。
+表示输入批次或 Run Record 不可读取。检查器按 Batch Manifest 的 `updated_at`
+排序，因此一个创建很早、后来才恢复的批次会排在其真实使用时间。任何无效 pilot
+或 `429` 都会让此前的连续计数归零；恢复后再次暂停的批次也必须作为最后一条输入，
+用来证明前一轮容量资格已经失效。
 
 已记录的阻塞批次：
 
@@ -158,6 +161,15 @@ Run Record 会保留被内部重试吸收的 `llm_retry_events`。旧记录如�
 - `capacity-v4-l0-pilot-live-r5`：L0 得到有效 `fail`，但 Run Record 捕获到
   2 次 429；`verify_capacity_gate.py` 返回 `ready=false`，证明重试遥测与门禁
   已能在不依赖终端日志的情况下自行判断容量未恢复。
+- `capacity-v4-l2-pilot-live-r2`：L2 `pass`，45 次调用、4 个子任务、0 次重试；
+  与下一轮 L0 共同满足连续恢复门槛。
+- `capacity-v4-l0-pilot-live-r6`：L0 `pass`，17 次调用、0 次重试；门禁返回
+  `ready=true` 后恢复 v4 正式批次。
+- `m6-m9-formal-b1-v4-live-r1`：恢复后新增 `0896629__L0` 与
+  `0896629__L1` 的 trial-001，均为 `pass` 且无 429；随后 L2 持续 429 约
+  10 分钟没有新增 Run Record，runner 已停止，批次回到 `paused`：
+  5 / 96 Trials、0 / 32 完整单元。把该批次作为最后一条门禁输入后必须重新返回
+  `ready=false`，不能复用恢复前的 pilot 结论。
 
 B3 只能从完整 B1 派生，并且只选择最终为 `fail` / `budget_exhausted` 的单元：
 

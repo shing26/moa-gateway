@@ -44,7 +44,7 @@ def _event_count(record: RunRecord) -> int:
 @dataclass(frozen=True)
 class CapacityPilotObservation:
     batch_id: str
-    created_at: str
+    observed_at: str
     arm: str
     status: str
     llm_calls: int
@@ -59,7 +59,7 @@ class CapacityPilotObservation:
     def to_dict(self) -> dict[str, Any]:
         return {
             "batch_id": self.batch_id,
-            "created_at": self.created_at,
+            "observed_at": self.observed_at,
             "arm": self.arm,
             "status": self.status,
             "llm_calls": self.llm_calls,
@@ -149,7 +149,7 @@ def observe_capacity_pilot(
     eligible = not reasons
     return CapacityPilotObservation(
         batch_id=manifest.batch_id,
-        created_at=manifest.created_at,
+        observed_at=manifest.updated_at,
         arm=arm,
         status=status,
         llm_calls=llm_calls,
@@ -167,7 +167,7 @@ def evaluate_capacity_gate(
     observations: tuple[CapacityPilotObservation, ...] | list[CapacityPilotObservation],
 ) -> CapacityGateResult:
     ordered = tuple(
-        sorted(observations, key=lambda item: (item.created_at, item.batch_id))
+        sorted(observations, key=lambda item: (item.observed_at, item.batch_id))
     )
     streak: list[CapacityPilotObservation] = []
     for item in ordered:
