@@ -1072,6 +1072,16 @@ def _model_identity(model: Mapping[str, Any]) -> str:
     name = str(model.get("model", "") or "")
     if not name:
         return ""
+    missing = [
+        key
+        for key in ("temperature", "max_tokens")
+        if key not in model or model[key] is None
+    ]
+    if missing:
+        raise ValueError(
+            f"模型记录缺少配置键 {', '.join(missing)}，无法生成无歧义的"
+            "模型配置身份"
+        )
     parts = [name]
     for key in ("temperature", "max_tokens"):
         if key in model:

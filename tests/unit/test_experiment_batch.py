@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from bench import run_batch as batch_cli
+from bench.experiment.batch import load_batch_rows
 from bench.experiment import (
     BatchRunner,
     BatchManifest,
@@ -761,6 +762,13 @@ async def test_preregistered_batch_report_authorizes_only_complete_paired_data(
     assert payload["statistics"]["confidence_interval"] == [1.0, 1.0]
     assert payload["model_matrix"][0]["cost_signal"] == "unavailable_or_zero"
     assert "分析门禁：**已按预注册门禁授权**" in outcome.report.render_markdown()
+
+
+def test_incomplete_model_config_fails_instead_of_splitting_identity() -> None:
+    from bench.experiment.batch import _model_identity
+
+    with pytest.raises(ValueError, match="缺少配置键 temperature"):
+        _model_identity({"model": "qwen2.5:3b", "max_tokens": 512})
 
 
 @pytest.mark.asyncio
