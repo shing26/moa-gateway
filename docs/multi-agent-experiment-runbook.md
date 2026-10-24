@@ -373,6 +373,16 @@ v8 B3 与 v5 × v8 比较的实测结果：
   v8=`false`（L3 有效样本不足）与 v5=`true`（`no_significant_difference`，
   p=1.0）逐条复核成立。
 
+### 工件哈希记录规范
+
+文档中嵌入的工件 SHA256 必须由脚本输出后复制，**禁止手抄或凭记忆转写**：
+批次报告哈希取自 `scripts/verify_experiment_batch.py` 输出的
+`report_sha256` 字段；comparison 工件哈希用
+`Get-FileHash -Algorithm SHA256` 计算后从命令输出复制。提交前对文档中
+每个哈希与磁盘工件做一次自动比对。哈希是机器可靠生成、人工不可靠复制
+的值——2026-10-25 勘误中一处 SHA256 曾在手抄时错一个字符，靠复核抓住；
+本条规则把这类纠错从运气变成机制。
+
 ## 5. 错误与恢复
 
 - `error` 按协议最多重试一次；每个 attempt 的 usage、错误和工作区快照保存在
