@@ -372,6 +372,7 @@ def _sensitivity(
 @dataclass(frozen=True)
 class ModelArmSummary:
     model: str
+    model_identity: str
     arm: str
     runs: int
     valid_runs: int
@@ -384,6 +385,7 @@ class ModelArmSummary:
     def to_dict(self) -> dict[str, Any]:
         return {
             "model": self.model,
+            "model_identity": self.model_identity,
             "arm": self.arm,
             "runs": self.runs,
             "valid_runs": self.valid_runs,
@@ -400,7 +402,7 @@ def model_arm_matrix(rows: Iterable[RunRow]) -> tuple[ModelArmSummary, ...]:
     for row in rows:
         grouped[(row.model_identity or "<unknown>", row.arm)].append(row)
     output = []
-    for (_, arm), chosen in sorted(grouped.items()):
+    for (identity, arm), chosen in sorted(grouped.items()):
         valid = [row for row in chosen if row.outcome in _VALID_OUTCOMES]
         display_model = next((row.model for row in chosen if row.model), "")
         passes = sum(row.outcome == "pass" for row in valid)
@@ -414,6 +416,7 @@ def model_arm_matrix(rows: Iterable[RunRow]) -> tuple[ModelArmSummary, ...]:
         output.append(
             ModelArmSummary(
                 model=display_model,
+                model_identity=identity,
                 arm=arm,
                 runs=len(chosen),
                 valid_runs=len(valid),

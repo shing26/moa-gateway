@@ -96,7 +96,7 @@ def _build_baseline_pilot(
     protocol_path: Path,
     *,
     pilot_repeats: int,
-    statuses_by_arm: dict[str, str],
+    statuses_by_arm: dict[str, str | tuple[str, ...]],
 ):
     protocol = _baseline_pilot_protocol(
         protocol_path,
@@ -105,7 +105,12 @@ def _build_baseline_pilot(
 
     class StatusByArmExecutor:
         async def execute(self, spec, trial_index: int):
-            status = statuses_by_arm.get(spec.config["arm"], "fail")
+            configured = statuses_by_arm.get(spec.config["arm"], "fail")
+            status = (
+                configured[trial_index % len(configured)]
+                if isinstance(configured, tuple)
+                else configured
+            )
             return TrialEvidence(
                 status=status,
                 node_path=("step:0:run_tests",),
@@ -167,15 +172,15 @@ def _run_script_with_baseline_args(
             "--out",
             str(root),
             "--min-baseline-trials",
-            "1",
+            "3",
             "--baseline-pass-rate-floor",
-            "-0.01",
+            "0.0",
             "--baseline-pass-rate-ceiling",
-            "1.01",
+            "1.0",
             "--baseline-preferred-min",
-            "0",
+            "0.2",
             "--baseline-preferred-max",
-            "1",
+            "0.8",
         ],
         cwd=PROJECT_ROOT,
         capture_output=True,
@@ -194,8 +199,13 @@ def test_pilot_runtime_gate_accepts_complete_evidence_and_covers_all_arms(
     protocol = _build_baseline_pilot(
         root,
         protocol_path,
-        pilot_repeats=1,
-        statuses_by_arm={"L0": "pass", "L1": "pass", "L2": "pass", "L3": "pass"},
+        pilot_repeats=3,
+        statuses_by_arm={
+            "L0": ("pass", "fail", "fail"),
+            "L1": "pass",
+            "L2": "pass",
+            "L3": "pass",
+        },
     )
 
     result = load_pilot_runtime_gate(
@@ -203,15 +213,16 @@ def test_pilot_runtime_gate_accepts_complete_evidence_and_covers_all_arms(
         batch_id="pilot-runtime",
         protocol=protocol,
         min_baseline_trials=1,
-            baseline_pass_rate_floor=-0.01,
-            baseline_pass_rate_ceiling=1.01,
-            baseline_preferred_range=(0.0, 1.0),
+        baseline_pass_rate_floor=0.0,
+        baseline_pass_rate_ceiling=1.0,
+        baseline_preferred_range=(0.2, 0.8),
     )
 
     assert result.ready is True
-    assert result.observed_trials == 4
+    assert result.observed_trials == 12
+    assert result.baseline_pass_rate == pytest.approx(1 / 3)
     assert result.arms == ("L0", "L1", "L2", "L3")
-    assert result.outcomes == {"pass": 4}
+    assert result.outcomes == {"pass": 10, "fail": 2}
     assert result.projected_formal_trials == 96
     # 该 pilot 的 L0 只有 1 条有效样本，区分度信息本身在专用测试中验证。
 
@@ -406,7 +417,12 @@ def test_verify_pilot_runtime_cli_returns_machine_readable_decision(
         root,
         protocol_path,
         pilot_repeats=3,
-        statuses_by_arm={"L0": "pass", "L1": "fail", "L2": "fail", "L3": "fail"},
+        statuses_by_arm={
+            "L0": ("pass", "fail", "fail"),
+            "L1": "fail",
+            "L2": "fail",
+            "L3": "fail",
+        },
     )
 
     completed = _run_script_with_baseline_args(root, protocol_path)

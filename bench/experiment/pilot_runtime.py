@@ -90,7 +90,7 @@ def load_pilot_runtime_gate(
         raise ValueError("基线最小有效样本数必须 >= 1")
     floor = float(baseline_pass_rate_floor)
     ceiling = float(baseline_pass_rate_ceiling)
-    if not -0.02 <= floor < ceiling <= 1.02:
+    if not 0.0 <= floor < ceiling <= 1.0:
         raise ValueError("基线通过率硬线必须满足 0 <= floor < ceiling <= 1")
     if not (
         floor <= baseline_preferred_range[0]

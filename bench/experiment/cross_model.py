@@ -40,12 +40,13 @@ class CrossModelReport:
     paired: tuple[PairedComparison, ...]
 
     def to_dict(self) -> dict[str, Any]:
+        # 同名模型可以对应多个配置批次；授权结论必须按批次键控，避免覆盖。
         analysis = {
-            item.model or f"batch-{index}": item.authorized
+            self.batch_ids[index]: item.authorized
             for index, item in enumerate(self.paired)
         }
         claims = {
-            item.model or f"batch-{index}": item.significant_difference
+            self.batch_ids[index]: item.significant_difference
             for index, item in enumerate(self.paired)
         }
         return {
@@ -59,8 +60,8 @@ class CrossModelReport:
                 item.authorized for item in self.paired
             ],
             "cross_model_inferential_claim": False,
-            "analysis_authorized_by_model": analysis,
-            "statistical_claims_by_model": claims,
+            "analysis_authorized_by_batch": analysis,
+            "statistical_claims_by_batch": claims,
             "model_matrix": [item.to_dict() for item in self.matrix],
             "paired_analyses": [item.to_dict() for item in self.paired],
         }
@@ -78,15 +79,15 @@ class CrossModelReport:
             "",
             "## 模型 × Arm",
             "",
-            "| 模型 | Arm | Runs | 有效样本 | 通过率 | Error | Token | 成本信号 |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- |",
+            "| 模型 | 模型配置 | Arm | Runs | 有效样本 | 通过率 | Error | Token | 成本信号 |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
         ]
         for item in self.matrix:
             pass_rate = (
                 f"{item.pass_rate:.1%}" if item.pass_rate is not None else "-"
             )
             lines.append(
-                f"| {item.model} | {item.arm} | {item.runs} | "
+                f"{item.model} | {item.model_identity} | {item.arm} | {item.runs} | "
                 f"{item.valid_runs} | {pass_rate} | {item.errors} | "
                 f"{item.total_tokens} | {item.cost_signal} |"
             )

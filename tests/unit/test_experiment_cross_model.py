@@ -117,13 +117,13 @@ def test_cross_model_report_keeps_inference_inside_each_model(
     assert len(report.matrix) == 4
     assert {item.model for item in report.paired} == {"model-a", "model-b"}
     assert report.to_dict()["cross_model_inferential_claim"] is False
-    assert report.to_dict()["analysis_authorized_by_model"] == {
-        "model-a": True,
-        "model-b": True,
+    assert report.to_dict()["analysis_authorized_by_batch"] == {
+        "model-a-batch": True,
+        "model-b-batch": True,
     }
-    assert report.to_dict()["statistical_claims_by_model"] == {
-        "model-a": True,
-        "model-b": True,
+    assert report.to_dict()["statistical_claims_by_batch"] == {
+        "model-a-batch": True,
+        "model-b-batch": True,
     }
     matrix = {(item.model, item.arm): item for item in report.matrix}
     assert matrix[("model-a", "L3")].pass_rate == 1.0
@@ -155,13 +155,13 @@ def test_cross_model_zero_difference_does_not_authorize_significance(
         protocol=_protocol("model-a"),
     )
 
-    assert report.to_dict()["analysis_authorized_by_model"] == {
-        "model-a": True,
-        "model-b": True,
+    assert report.to_dict()["analysis_authorized_by_batch"] == {
+        "model-a-batch": True,
+        "model-b-batch": True,
     }
-    assert report.to_dict()["statistical_claims_by_model"] == {
-        "model-a": False,
-        "model-b": False,
+    assert report.to_dict()["statistical_claims_by_batch"] == {
+        "model-a-batch": False,
+        "model-b-batch": False,
     }
 
 
