@@ -290,6 +290,11 @@ v4 受上游容量阻塞
   预注册分析，`cross_model_inferential_claim=false`；v5 分析授权且结论为
   `no_significant_difference`，v8 B1 因 L3 部分单元有效样本不足而保持
   `blocked`。报告并列描述，不挑选“最佳配置”。
+  勘误（2026-10-25）：旧工件以裸模型名为键的
+  `analysis_authorized_by_model` 存在同名覆盖缺陷，v8 的未授权状态在
+  JSON 字段中被隐藏；叙述口径（v5 授权、v8 blocked）依据批次自身报告，
+  不受影响。修复后字段按批次 ID 键控，重建工件为
+  `cross-model-20261024T195243Z-c50fe00e`。
 
 下一步：
 
@@ -487,7 +492,7 @@ M9 不得用当前 8 个任务的单次结果替代预注册实验。
 | v8 live pilot | 已通过门禁 | `4/4`、0 `error`、四 arm 均有真实调用和工具轨迹；0.261h，96-Trial 投影 6.258h | 作为 `m9-local-qwen25-3b-temp0-512-formal-b1-live-r1` 的启动资格 |
 | v8 正式 B1/B3 | 已完成并冻结 | B1 `96/96`、B3 `96/96`、`32/32` 单元、0 缺口，均全量对账通过；报告哈希已登记 | 不修改批次；若需恢复 v8 统计授权，另建新协议版本 |
 | v6 派生 B3 | 不可执行 | v6 B1 未获准启动，因此不存在可供派生的完整 B1 | 不补跑；保留 v6 pilot 失败证据，后续推进 v7 |
-| v5 × v8 跨模型报告 | 已生成并冻结 | `cross-model-20261024T123015Z-c5d7fb84`；两个批次独立分析，`cross_model_inferential_claim=false` | 保留描述性结论；不自动挑选“最佳模型” |
+| v5 × v8 跨模型报告 | 已生成并冻结 | `cross-model-20261024T123015Z-c5d7fb84`；两个批次独立分析，`cross_model_inferential_claim=false`；旧工件同名模型字典键已被 2026-10-25 勘误修正，授权状态以修复后重建工件 `cross-model-20261024T195243Z-c50fe00e` 为准 | 保留描述性结论；不自动挑选“最佳模型” |
 | NVIDIA v4 确认性批次 | 容量阻塞 | 新的连续真实 pilot 满足恢复门槛，且之后 B1/B3 全量对账通过 | 保持暂停；只有 `verify_capacity_gate.py` 返回 `ready=true` 才另案恢复 |
 | 统计声明 | 机制已完成，等待有区分度的数据 | 单一模型达到预注册样本量，`analysis_authorized=true`，区间和检验支持明确方向 | 下一个通过 pilot 门禁的协议完成正式批次后按协议分析；`no_significant_difference` 不升级成优劣结论 |
 | 基线区分度门禁 | 已实现并回溯生效 | `verify_pilot_runtime.py` 检查基线 arm 有效样本 ≥3、通过率不贴 0%/100%，并对 20%–80% 建议区间输出功效 warning；v8 历史 pilot 复验返回 `ready=false`，且该输入输出对已固化为 `test_pilot_runtime.py` 回归测试（归档缺失时 skip） | 新协议 pilot 必须先通过该门禁；失败时调任务难度、模型或任务集，不消耗正式 Run Record 配额 |

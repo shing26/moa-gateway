@@ -361,6 +361,18 @@ v8 B3 与 v5 × v8 比较的实测结果：
   `no_significant_difference`，v8 B1 因部分 L3 单元有效样本不足保持 `blocked`。
   同名模型的不同协议配置不会被合并。
 
+  **勘误（2026-10-25）**：上述旧工件的 `analysis_authorized_by_model` /
+  `statistical_claims_by_model` 字段曾以裸模型名为键，同名模型不同配置时
+  后者覆盖前者——本例中 v8 的 `false` 被 v5 的 `true` 覆盖，v8 的未授权
+  状态在旧工件 JSON 里被隐藏。该缺陷不影响本节叙述（叙述依据各批次自身
+  `report.json`，v5=`true`、v8=`false` 口径本就正确），但旧字段不可再作为
+  授权依据引用。修复后的字段为 `analysis_authorized_by_batch` /
+  `statistical_claims_by_batch`（按批次 ID 键控）；修复后重建工件为
+  `cross-model-20261024T195243Z-c50fe00e`（comparison.json SHA256
+  `9b7f91da27f40239ab133930b6fdbd2026558d9f7cff4e27e474891ac864b26e`），
+  v8=`false`（L3 有效样本不足）与 v5=`true`（`no_significant_difference`，
+  p=1.0）逐条复核成立。
+
 ## 5. 错误与恢复
 
 - `error` 按协议最多重试一次；每个 attempt 的 usage、错误和工作区快照保存在
