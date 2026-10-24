@@ -66,6 +66,18 @@ def _protocol(model: str, *, task_count: int = 1):
     )
 
 
+def _same_name_protocol_configs(protocol, *, temperature: float, max_tokens: int):
+    return replace(
+        protocol,
+        version=f"{protocol.version}-temp{temperature}-tokens{max_tokens}",
+        model=replace(
+            protocol.model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ),
+    )
+
+
 def _build_model_batches(
     root: Path,
     *,
@@ -151,6 +163,39 @@ def test_cross_model_zero_difference_does_not_authorize_significance(
         "model-a": False,
         "model-b": False,
     }
+
+
+def test_cross_model_distinguishes_same_model_protocol_configs(
+    tmp_path,
+) -> None:
+    root = tmp_path / "experiments"
+    base = _protocol("model-a")
+    configs = (
+        _same_name_protocol_configs(base, temperature=1.0, max_tokens=4096),
+        _same_name_protocol_configs(base, temperature=0.0, max_tokens=512),
+    )
+    for index, protocol in enumerate(configs):
+        asyncio.run(
+            BatchRunner(
+                ExperimentStore(root),
+                protocol,
+            ).run(
+                phase="baseline",
+                arm_names=("L0", "L3"),
+                batch_id=f"same-model-config-{index}",
+                executor_factory=lambda spec: CrossModelExecutor(),
+            )
+        )
+
+    report = build_cross_model_report(
+        ("same-model-config-0", "same-model-config-1"),
+        output_root=root,
+        protocol=configs[0],
+    )
+
+    assert len(report.models) == 2
+    assert set(report.models) == {"model-a"}
+    assert len(report.paired) == 2
 
 
 def test_cross_model_cli_writes_json_and_markdown(tmp_path, capsys) -> None:

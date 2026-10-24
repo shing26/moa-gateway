@@ -25,8 +25,9 @@
 - 已有 `Experiment → Trial → Run Record`、不可变落盘和受控复跑。
 - `bench/run_curve.py` 与 `bench/run_experiment.py` 尚未统一成单一权威批量入口。
 - 协作图已有 SQLite 持久化 checkpointer；并发专家写同一路径由隔离写集与显式冲突处理。
-- 只读结果 UI、跨模型描述矩阵和预注册统计门禁已实现；本地第二模型正式批次
-  已完成 96 条，NVIDIA 第一模型确认性批次仍受端点容量阻塞。
+- 只读结果 UI、跨模型描述矩阵和预注册统计门禁已实现；本地 v5 正式批次已完成
+  96 条，NVIDIA 第一模型确认性批次仍受端点容量阻塞。
+- v7 pilot 已失败并冻结；v8 pilot 已通过全量对账和运行门禁，正式 B1 正在执行。
 
 ## 里程碑
 
@@ -64,6 +65,10 @@
 - `bench/protocols/multi-agent-first-batch-v2.json`（历史：1024 输出上限）
 - `bench/protocols/multi-agent-first-batch-v3.json`（历史：4096 输出上限）
 - `bench/protocols/multi-agent-first-batch-v4.json`（当前：预注册配对统计门禁）
+- `bench/protocols/multi-agent-first-batch-v5-local.json`（本地正式批次已验收）
+- `bench/protocols/multi-agent-first-batch-v6-local.json`（失败并冻结）
+- `bench/protocols/multi-agent-first-batch-v7-local.json`（失败并冻结）
+- `bench/protocols/multi-agent-first-batch-v8-local.json`（当前正式批次协议）
 - `bench/experiment/protocol.py`
 - `tests/unit/test_experiment_protocol.py`
 - ADR-026
@@ -179,7 +184,8 @@ attempt。该缺口已单独修复并以单测锁定；M5 只作为单次工程�
 
 ### M6：正式重复实验
 
-状态：阻塞于上游端点容量
+状态：部分完成；v5 B1/B3 已完成，v7 pilot 未通过门禁，v8 正式 B1 运行中，
+v4 受上游容量阻塞
 
 交付：
 
@@ -226,12 +232,64 @@ attempt。该缺口已单独修复并以单测锁定；M5 只作为单次工程�
   容量门禁返回 `ready=false`，证明判定已经能只依赖不可变 Run Record；
 - `capacity-v4-l2-pilot-live-r2` 与 `capacity-v4-l0-pilot-live-r6` 连续通过，
   L2 为 45 次调用、4 个子任务，两轮均无 429；容量门禁返回 `ready=true`；
+- `capacity-v4-l2-pilot-live-r3` 未出现 429，但 45 次调用后仍因单次 completion
+  上限截断记为 `error`，共使用 399,261 token；报告 SHA256 为
+  `77D2C37C117F89EF64D4DB2C071DB8FD8E7BD40C8B852A426F59639EE3A1322D`；
+- `capacity-v4-l2-pilot-live-r4` 再次遇到 429，Run Record 记录 6 次内部重试事件，
+  最终为 `error`，共使用 268,232 token；报告 SHA256 为
+  `FE0A0DBD3715D7DAD6694CB917099451785B9B23DA65EF104D65C1152EC49C5C`；
 - 恢复 `m6-m9-formal-b1-v4-live-r1` 后，`0896629__L0` 与
   `0896629__L1` 的 trial-001 均为 `pass`；随后 L2 持续 429 约 10 分钟，
   runner 已停止并把批次恢复为 `paused`，当前为 5 / 96 Trials、0 / 32 完整单元；
 - 容量门禁改用 Manifest `updated_at` 排序；恢复后的批次必须作为最后一条门禁输入，
   使旧 pilot 资格在该批次再次暂停后失效；
-- 正式 `8 × 4 × 3` B1 与派生 B3 尚未完成，因此 M6 未完成。
+- 两次新的 v4 恢复尝试均失败后，已新增独立 `v6-local-qwen25-7b` 协议和
+  `protocol_hash`；模型、批量结果与 v4/v5 分开落盘，不用它回写 NVIDIA 结论；
+- v6 mock pilot `m9-local-qwen25-7b-pilot-mock-r1` 已完成 `4/4`，只证明协议、
+  批量入口和报告链路；
+- v6 live pilot `m9-local-qwen25-7b-pilot-live-r1` 已完成 `4/4` 并通过全量对账，
+  用时 1.237 小时，正式 B1 投影 29.697 小时；报告 SHA256 为
+  `C24DBA7F07775E6F3F0A0FE4781101C80AD970F58F978E2A24883F1F43F577B8`；
+- 上述 v6 live pilot 结果为 3 个 `fail`、1 个 `error`，未通过
+  `verify_pilot_runtime.py`：L2 的两次 attempt 各重问 planner 三次，6 次都只返回
+  不可解析的计划形状，最终 0 次工具调用；因此 v6 不能启动正式 B1；
+- 不写 Run Record 的 planner 诊断显示，同一模型在同一规划提示下把温度改为 0.0 后，
+  独立采样 3 次均得到可解析计划；这只支持建立 v7，不替代 v7 pilot；
+- 新增独立 v7 协议 `7-local-qwen25-7b-temp0`，除协议身份和温度 0.0 外保持 v6
+  的任务、arm、预算与统计口径不变，不复用或覆盖 v6 结果；
+- v7 mock pilot `m9-local-qwen25-7b-temp0-pilot-mock-r1` 已完成 `4/4` 并通过
+  全量对账，`protocol_hash` 为 `e7e2d4e5...be53f`，报告 SHA256 为
+  `810D9A291118EF0F0CF21E555E92141B534DFA0726C623645C728DFE9E3F584E`；
+- v7 live pilot `m9-local-qwen25-7b-temp0-pilot-live-r1` 已完成 `4/4` 和全量对账，
+  `protocol_hash` 为 `e7e2d4e5...be53f`，报告 SHA256 为
+  `16C8FF3553FD59784CAA7FB5452358956815D2DAD4C0A88F80E2CD38FBCBB5A9`；
+- v7 pilot 用时 2.875 小时、96-Trial 投影 68.994 小时，但结果为 2 个 `fail`、
+  2 个 `error`；L0 与 L3 没有工具轨迹，L1 与 L3 记录 `error`，因此运行门禁
+  `ready=false`。v7 保留为失败证据并冻结，不启动正式 B1；
+- v8 协议 `8-local-qwen25-3b-temp0-512` 改用可在 4 GB 显存上运行的
+  `qwen2.5:3b`，保留 temperature 0.0，并把单次输出上限固定为 512；
+- v8 mock 与 live pilot 使用独立批次身份。live pilot 完成 `4/4`，全量对账通过；
+  4 条结果均为真实 `fail`、0 `error`，四个 arm 都有模型调用和工具轨迹；
+- v8 live pilot 用时 0.261 小时，96-Trial 投影 6.258 小时，运行门禁
+  `ready=true`；报告 SHA256 为
+  `cfb20634587f3e0139eca209dba368e3d8f5c74f83d81f00ef086a409421195a`；
+- v8 正式 B1 `m9-local-qwen25-3b-temp0-512-formal-b1-live-r1` 已完成
+  `96/96` Trial、`32/32` 单元、0 缺口，全量对账通过；`protocol_hash` 为
+  `bff4f983...33d6`，报告 SHA256 为
+  `dc534e0a6182d4293b16dad4c36d15f219efd4db7ca5c8ba76591b29811d4955`；
+  96 条结果均为真实 `fail`、0 `error`，四个 arm 各 24 个有效样本，通过率
+  均为 0%，因此 `analysis_authorized=false` 是样本无区分度下的正确门禁；
+- v8 派生 B3 `m9-local-qwen25-3b-temp0-512-formal-b3-live-r1` 已完成
+  `96/96` Trial、`32/32` 单元、0 缺口，全量对账通过；报告 SHA256 为
+  `be9d8c4489252fc2ac681bf280bf91ac66a74afced037fec923a68188afbaefd`；
+  结果为 76 `fail`、0 `pass`、17 `error`（14 个单次 completion 512 上限
+  截断，3 个 Critic 未产出终局），全部集中在 L1/L2/L3，L0 为 0 `error`；
+  该 512 上限是多智能体输出的结构性约束，不能把 `error` 改写成 `fail`；
+- v5 × v8 显式跨配置比较已生成：
+  `cross-model-20261024T123015Z-c5d7fb84`。两个批次按模型配置身份分别做
+  预注册分析，`cross_model_inferential_claim=false`；v5 分析授权且结论为
+  `no_significant_difference`，v8 B1 因 L3 部分单元有效样本不足而保持
+  `blocked`。报告并列描述，不挑选“最佳配置”。
 
 下一步：
 
@@ -242,7 +300,9 @@ attempt。该缺口已单独修复并以单测锁定；M5 只作为单次工程�
 3. 正式 B1 达到 96 条连续 Run Record 后，才允许从其最终 `fail` /
    `budget_exhausted` 单元派生 B3；
 4. 若改用其他模型，必须生成新的协议版本和 `protocol_hash`，不能把跨模型结果混入
-   当前 v4 批次。
+   当前 v4 批次；v6/v7/v8 均按此边界建立；
+5. v8 的 B1/B3 与 v5 × v8 比较已冻结；若要让 v8 恢复统计授权，需要新协议
+   版本解决 512 上限截断，不能修改既有批次。
 
 ### M7：报告与只读 UI
 
@@ -346,13 +406,19 @@ attempt。该缺口已单独修复并以单测锁定；M5 只作为单次工程�
   真实 `fail`，0 `error`；四条 Run Record 均含模型调用与工具轨迹；
 - v5 正式批次 `m9-local-qwen25-3b-formal-b1-live-r1` 完成 `96/96`，
   32 个单元全部完成，0 error；四个 arm 各 24 个有效样本，通过率均为 0%；
+- v5 派生 B3 `m9-local-qwen25-3b-formal-b3-live-r1` 完成 `96/96`，
+  32 个单元全部完成，0 error；放宽到 120 steps / 1.2M token 后仍是
+  96 个 `fail`、0 个 `pass`，报告 SHA256 为
+  `3C87D4F34E5EADCCAF8BEA2E4F0F47707621311CA11139AE3911F9797B5C4AEA`；
 - 预注册分析门禁已通过并给出 `no_significant_difference`：L3 - L0 平均配对差
   `0.0`，95% 区间 `[0.0, 0.0]`，符号翻转 `p=1.0`；这不是 L3 优于 L0 的证据；
   该批次 `analysis_authorized=true`，`statistical_claims=false`；
 - ADR-029 与统计单测已落地。
 
-剩余：端点容量恢复后，用 v4 协议完成 NVIDIA 第一模型确认性 live 批次；只有它和
-本地 v5 正式批次都完成后，才能生成有真实数据的跨模型报告。不能用 v3 B1 批次
+剩余：v7 pilot 证明 planner 契约仍会失败；v8 通过改用能力与显存更匹配的 3B 模型
+完成了 pilot 门禁，正在执行正式 B1，之后还需派生 B3。只有两个模型各自矩阵一致且
+拥有已完成批次，才能生成 v5 与 v8 的跨模型描述报告。NVIDIA v4 第一模型
+确认性批次只在容量恢复门禁重新返回 `ready=true` 后另行推进。不能用 v3 B1 批次
 回写成 v4 结论，也不能把 M5 的单次方向性曲线升级为统计声明。
 
 ### M10：部署与交付
@@ -406,3 +472,35 @@ M1 → M2 → M3 → M4 → M5 → M7（代码收口）→ M8 → M6 → M7（�
 M7 必须读取稳定的 Run Record 和聚合报告，不得先于 M2/M3 固化错误语义。
 M9 不得用当前 8 个任务的单次结果替代预注册实验。
 并发与持久化恢复属于正式实验的执行契约，因此 M8 必须在 M6 大规模 live 批次前冻结。
+
+## 未完成项台账
+
+这张表只列尚未达到最终验收条件的事项。“代码存在”不等于完成；每一行都必须有
+对应的不可变 Run Record、确定性对账结果或发布验收证据。
+
+| 项目 | 当前状态 | 完成证据 | 下一步 |
+| --- | --- | --- | --- |
+| v6 live pilot | 未通过门禁 | `4/4` 与批次对账已完成，运行时间和投影达标；L2 的 6 次 planner 输出均不可解析且没有工具轨迹 | 保留为 v6 失败证据，不启动 v6 B1 |
+| v6 正式 B1 | 禁止启动 | `8 × 4 × 3 = 96` 条 Trial、`32/32` 完整单元，全量 Run Record 对账通过 | 必须使用能通过 `verify_pilot_runtime.py` 的新协议；不能复用当前 v6 pilot 资格 |
+| v7 live pilot | 未通过门禁，已冻结 | `4/4` 与全量对账完成；结果为 2 `fail`、2 `error`，L0/L3 无工具轨迹，运行门禁 `ready=false` | 保留 `m9-local-qwen25-7b-temp0-pilot-live-r1`，不启动 v7 B1 |
+| v7 正式 B1/B3 | 禁止启动 | v7 pilot 门禁必须通过 | 不补跑；失败根因由 v8 新协议隔离验证 |
+| v8 live pilot | 已通过门禁 | `4/4`、0 `error`、四 arm 均有真实调用和工具轨迹；0.261h，96-Trial 投影 6.258h | 作为 `m9-local-qwen25-3b-temp0-512-formal-b1-live-r1` 的启动资格 |
+| v8 正式 B1/B3 | 已完成并冻结 | B1 `96/96`、B3 `96/96`、`32/32` 单元、0 缺口，均全量对账通过；报告哈希已登记 | 不修改批次；若需恢复 v8 统计授权，另建新协议版本 |
+| v6 派生 B3 | 不可执行 | v6 B1 未获准启动，因此不存在可供派生的完整 B1 | 不补跑；保留 v6 pilot 失败证据，后续推进 v7 |
+| v5 × v8 跨模型报告 | 已生成并冻结 | `cross-model-20261024T123015Z-c5d7fb84`；两个批次独立分析，`cross_model_inferential_claim=false` | 保留描述性结论；不自动挑选“最佳模型” |
+| NVIDIA v4 确认性批次 | 容量阻塞 | 新的连续真实 pilot 满足恢复门槛，且之后 B1/B3 全量对账通过 | 保持暂停；只有 `verify_capacity_gate.py` 返回 `ready=true` 才另案恢复 |
+| 统计声明 | 机制已完成，等待有区分度的数据 | 单一模型达到预注册样本量，`analysis_authorized=true`，区间和检验支持明确方向 | 下一个通过 pilot 门禁的协议完成正式批次后按协议分析；`no_significant_difference` 不升级成优劣结论 |
+| 最终发布验收 | 已通过 | 2026-10-24：单测 1610 passed / 4 skipped；集成 37 passed / 16 skipped；Ruff、`uv lock --check`、Bandit（app）、离线 eval、红队 200 例 100%/100%、`import app.main`、`check_no_source_patch`、v8 B1/B3 批次对账、Compose 重建后 `/dashboard/api/experiments` 与 Run Record 200 且数字一致 | 已冻结；后续改动需重新验收 |
+| 提交与交付 | 工作区未收口 | 实验台改动单独提交，不夹带用户既有飞书修改；提交后工作区状态可复核 | 发布验收通过后提交，不 push、不合并、不公网发布，除非另行授权 |
+
+以下事项已有实现和回归证据，不再列为待办：
+
+- 只读实验 UI、批次详情和 Run Record 链接；
+- 预注册配对统计、区间估计、敏感性分析和声明门禁；
+- LangGraph SQLite 持久化 checkpointer 与 HITL 恢复；
+- 跨 Experiment 并发 Trial、并发/速率写入 Manifest 与恢复漂移拒绝；
+- 同一路径并发写冲突检测、不同路径确定性合并和 Run Record 证据。
+
+“自动跨模型跑分”不是默认待办。跨模型执行会消耗真实模型预算，也可能把未完成或
+不同协议的批次混在一起；当前保留为人工显式 `compare`，并要求每个模型先独立完成
+自己的 B1/B3。自动选择“分数最高的模型”会违反 ADR-029 的单模型分析边界。

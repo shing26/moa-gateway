@@ -141,11 +141,15 @@ async def test_planner_retries_after_a_truncated_first_output(
             return ScriptedTurn(final=_critic_json(True))
         return worker.turn(messages)
 
-    agent = build_l2(llm=_ScriptLLM(script), workspace=tmp_path, tools=tools)
+    llm = _ScriptLLM(script)
+    agent = build_l2(llm=llm, workspace=tmp_path, tools=tools)
     run = await agent.run(workspace=tmp_path, goal="让验证通过", budget=Budget(5.0, 30))
 
     assert run.status == "completed"
     assert planner_calls["count"] == 2
+    # A retry gets a fresh transcript, not the failed assistant reply compressed
+    # on top of an already large planner prompt.
+    assert all(message.get("role") != "assistant" for message in llm.seen[1])
 
 
 @pytest.mark.asyncio
@@ -464,6 +468,7 @@ async def test_planner_parse_failure_is_asked_again(tmp_path: Path) -> None:
     # 重问带上了上一次的解析错误原文，而不是把同一个问题原样再发一遍。
     retry_prompt = _user_text(llm.seen[1])
     assert "读不出子任务" in retry_prompt
+    assert all(message.get("role") != "assistant" for message in llm.seen[1])
 
 
 @pytest.mark.asyncio

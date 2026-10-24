@@ -89,6 +89,7 @@ Mock 结果只能证明矩阵、落盘、恢复、报告和 UI 契约，不能�
 ```powershell
 $env:CI = ""
 .\.venv\Scripts\python.exe bench/run_batch.py batch `
+  --protocol <frozen-protocol-json> `
   --phase formal `
   --mode live `
   --max-concurrency 1 `
@@ -117,6 +118,89 @@ $env:CI = ""
 
 该协议固定 `qwen2.5:3b` 与 `http://127.0.0.1:11434/v1`。pilot 只验证真实工具链，
 不进入能力比较；正式批次必须使用自己的批次 ID，且不能与 NVIDIA 批次混写。
+
+v5 正式 B1 完成后，B3 已按失败单元派生并完成 `96/96`、`32/32` 个完整单元，
+0 error；宽松预算下仍是 96 个 `fail`。报告 SHA256 为
+`3C87D4F34E5EADCCAF8BEA2E4F0F47707621311CA11139AE3911F9797B5C4AEA`。
+
+`multi-agent-first-batch-v6-local.json` 固定 `qwen2.5:7b`，必须先用自己的 pilot
+验证真实工具链。该模型在当前 4GB 显存上会部分回退 CPU；在 pilot 证明运行时间可接受
+前，不得直接启动正式 `96` Trial 批次。
+
+进入任何正式 B1 前同时满足：
+
+1. pilot 在 4 小时内达到 `4/4`；
+2. 四个 arm 都有真实模型调用和工具轨迹，且没有不可解释的 `error`；
+3. pilot 通过 `verify_experiment_batch.py` 全量对账；
+4. 用 pilot 的平均 Trial 耗时投影 96-Trial B1；投影超过 72 小时时先换模型或硬件，
+   不用修改协议预算、删除 `error` 或降低重复次数来“跑完”。
+
+运行时间门禁可执行：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/verify_pilot_runtime.py `
+  --batch-id m9-local-qwen25-7b-pilot-live-r1 `
+  --protocol bench/protocols/multi-agent-first-batch-v6-local.json `
+  --out .bench-experiments
+```
+
+只有输出 `"ready": true` 才能启动正式 B1。脚本会同时检查 pilot 完成度、协议 arm
+覆盖、真实模型调用、工具轨迹、`error`、4 小时 pilot 上限和 72 小时正式批次投影。
+
+当前 v6 pilot `m9-local-qwen25-7b-pilot-live-r1` 虽然完成 `4/4`、用时 1.237 小时、
+投影 29.697 小时，但结果是 3 个 `fail`、1 个 `error`，门禁返回 `ready=false`：
+L2 的两次 attempt 各重问 planner 三次，6 次输出都无法解析为计划，工具路径未启动。
+报告 SHA256 为
+`C24DBA7F07775E6F3F0A0FE4781101C80AD970F58F978E2A24883F1F43F577B8`。
+该批次必须保留为失败证据，不能启动 v6 正式 B1。
+
+`multi-agent-first-batch-v7-local.json` 固定同一模型与 `temperature=0.0`。v7 mock
+用于验证协议和落盘；live pilot `m9-local-qwen25-7b-temp0-pilot-live-r1` 完成
+`4/4` 和全量对账后仍为 2 个 `fail`、2 个 `error`，L0/L3 没有工具轨迹，
+运行门禁返回 `ready=false`。该协议和批次已冻结，不能启动 v7 正式 B1。
+
+v7 mock `m9-local-qwen25-7b-temp0-pilot-mock-r1` 已通过全量对账，报告 SHA256 为
+`810D9A291118EF0F0CF21E555E92141B534DFA0726C623645C728DFE9E3F584E`。
+v7 live pilot 报告 SHA256 为
+`16C8FF3553FD59784CAA7FB5452358956815D2DAD4C0A88F80E2CD38FBCBB5A9`，
+不得把 mock 的 `pass` 或诊断输出解释成能力证据。
+
+`multi-agent-first-batch-v8-local.json` 使用 `qwen2.5:3b`、temperature 0.0 和
+512-token 输出上限。v8 live pilot
+`m9-local-qwen25-3b-temp0-512-pilot-live-r1` 完成 `4/4`、0 `error`，四个 arm
+均有真实模型调用和工具轨迹；运行门禁返回 `ready=true`，用时 0.261 小时，
+96-Trial 投影 6.258 小时。正式 B1 固定使用
+`m9-local-qwen25-3b-temp0-512-formal-b1-live-r1`。
+
+复验 v8 pilot：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/verify_experiment_batch.py `
+  --batch-id m9-local-qwen25-3b-temp0-512-pilot-live-r1 `
+  --protocol bench/protocols/multi-agent-first-batch-v8-local.json `
+  --out .bench-experiments
+
+.\.venv\Scripts\python.exe scripts/verify_pilot_runtime.py `
+  --batch-id m9-local-qwen25-3b-temp0-512-pilot-live-r1 `
+  --protocol bench/protocols/multi-agent-first-batch-v8-local.json `
+  --out .bench-experiments
+```
+
+只有两条命令分别返回 `"ok": true` 和 `"ready": true`，才可启动或恢复 v8 B1。
+
+`--max-concurrency 1` 的语义是全局最多一个 Trial 正在调用模型和执行工具，不保证
+arm 按 `L0 → L1 → L2 → L3` 的启动顺序完成。各单元会先准备独立工作区，再竞争同一个
+执行槽，因此 Manifest 中可能出现后续 arm 先运行、较早 arm 仍为 `pending` 的状态。
+只要没有两个 Trial 同时越过执行槽，时间投影采用的串行并发契约仍成立。
+
+本地大模型可能长时间占用 GPU 而没有 Python CPU 增长或日志更新。判断 runner 是否
+仍然存活时，不能只看 Manifest 的 `updated_at`：
+
+1. 确认 wrapper、runner 和 Python 子进程仍存在，并核对命令行指向当前批次；
+2. 用 `netstat -ano` 确认 runner 与 `127.0.0.1:11434` 仍有 `ESTABLISHED` 连接；
+3. 用 `ollama ps` 和 `nvidia-smi` 核对模型已加载且 GPU 正在工作；
+4. 只有进程已经消失，或连接与 GPU 长时间均无活动且超过协议 `timeout`，才按暂停
+   与恢复流程处理，不得因为观察窗口内没有新增 Trial 就重启。
 
 容量阻塞的判定与处理：
 
@@ -165,6 +249,11 @@ Run Record 会保留被内部重试吸收的 `llm_retry_events`。旧记录如�
   与下一轮 L0 共同满足连续恢复门槛。
 - `capacity-v4-l0-pilot-live-r6`：L0 `pass`，17 次调用、0 次重试；门禁返回
   `ready=true` 后恢复 v4 正式批次。
+- `capacity-v4-l2-pilot-live-r3`：未出现 429，但 planner completion 被 4096
+  上限截断，L2 最终为 `error`；45 次调用、399,261 token，不能作为恢复证据。
+- `capacity-v4-l2-pilot-live-r4`：再次出现 429，Run Record 记录 6 次内部重试事件，
+  最终为 `error`；39 次调用、268,232 token。两次新的恢复尝试都失败后，不再恢复
+  v4 正式批次，改由独立 v6 协议验证其他模型。
 - `m6-m9-formal-b1-v4-live-r1`：恢复后新增 `0896629__L0` 与
   `0896629__L1` 的 trial-001，均为 `pass` 且无 429；随后 L2 持续 429 约
   10 分钟没有新增 Run Record，runner 已停止，批次回到 `paused`：
@@ -175,10 +264,32 @@ B3 只能从完整 B1 派生，并且只选择最终为 `fail` / `budget_exhaust
 
 ```powershell
 .\.venv\Scripts\python.exe bench/run_batch.py b3 `
+  --protocol <frozen-protocol-json> `
   --source-batch <completed-formal-b1-batch-id> `
   --phase formal `
   --mode live `
+  --max-concurrency 1 `
+  --rate-limit-per-minute 30 `
   --batch-id <new-formal-b3-batch-id> `
+  --out .bench-experiments
+```
+
+v8 B3 固定使用：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/verify_experiment_batch.py `
+  --batch-id m9-local-qwen25-3b-temp0-512-formal-b1-live-r1 `
+  --protocol bench/protocols/multi-agent-first-batch-v8-local.json `
+  --out .bench-experiments
+
+.\.venv\Scripts\python.exe bench/run_batch.py b3 `
+  --protocol bench/protocols/multi-agent-first-batch-v8-local.json `
+  --source-batch m9-local-qwen25-3b-temp0-512-formal-b1-live-r1 `
+  --phase formal `
+  --mode live `
+  --max-concurrency 1 `
+  --rate-limit-per-minute 30 `
+  --batch-id m9-local-qwen25-3b-temp0-512-formal-b3-live-r1 `
   --out .bench-experiments
 ```
 
@@ -186,15 +297,28 @@ B3 只能从完整 B1 派生，并且只选择最终为 `fail` / `budget_exhaust
 
 ```powershell
 .\.venv\Scripts\python.exe bench/run_batch.py compare `
-  --protocol bench/protocols/multi-agent-first-batch-v4.json `
-  --batch-id <completed-model-a-batch> `
-  --batch-id <completed-model-b-batch> `
+  --protocol bench/protocols/multi-agent-first-batch-v8-local.json `
+  --batch-id m9-local-qwen25-3b-formal-b1-live-r1 `
+  --batch-id m9-local-qwen25-3b-temp0-512-formal-b1-live-r1 `
   --out .bench-experiments
 ```
 
 产物写入 `.bench-experiments/_comparisons/<comparison-id>/`。报告并列显示
 `model × arm` 的描述性指标，并分别运行每个模型的预注册配对分析；
 `cross_model_inferential_claim` 固定为 `false`，不能把不同模型合并后宣称显著性。
+
+v8 B3 与 v5 × v8 比较的实测结果：
+
+- v8 B1：`96/96`、`32/32`、0 缺口，0 `error`，报告 SHA256
+  `dc534e0a6182d4293b16dad4c36d15f219efd4db7ca5c8ba76591b29811d4955`；
+- v8 B3：`96/96`、`32/32`、0 缺口，76 `fail`、17 `error`，报告 SHA256
+  `be9d8c4489252fc2ac681bf280bf91ac66a74afced037fec923a68188afbaefd`；
+  17 个 `error` 中 14 个是单次 completion 512 上限截断、3 个是 Critic 未产出
+  终局，均发生在 L1/L2/L3；这是如实记录，不允许改写成 `fail`；
+- v5 × v8 比较：`cross-model-20261024T123015Z-c5d7fb84`。两个批次按
+  “模型名 + temperature + max_tokens” 的配置身份分别分析；v5 授权分析并得到
+  `no_significant_difference`，v8 B1 因部分 L3 单元有效样本不足保持 `blocked`。
+  同名模型的不同协议配置不会被合并。
 
 ## 5. 错误与恢复
 
@@ -222,6 +346,8 @@ B3 只能从完整 B1 派生，并且只选择最终为 `fail` / `budget_exhaust
   不得静默按最新版解释。
 - 修改协议任务、arm、模型、预算、重复、重试、排除或报告口径时，必须产生新协议
   文件和新的 `protocol_hash`。
+- `multi-agent-first-batch-v6-local.json` 固定本机 `qwen2.5:7b`，用于 v4 端点
+  持续失败后的独立验证；它不是 v4 的替代样本，也不能与 v4 合并成同一个模型结论。
 
 ## 7. 发布验收
 

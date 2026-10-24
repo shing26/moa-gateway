@@ -364,25 +364,38 @@ class L2PlannerWorkerCritic:
         planner_steps = min(self._policy.planner_steps, budget.max_steps)
         if planner_steps <= 0:
             return _PlanResult(None, "step_limit", Usage(), 0, (), "")
-        session = self._planner.session(
-            workspace=workspace,
-            goal=goal,
-            budget=Budget(
-                max_cost_usd=budget.max_cost_usd,
-                max_steps=planner_steps,
-                max_tokens=budget.max_tokens,
-            ),
-        )
-        session.add_user_message(
-            build_plan_message(goal=goal, max_subtasks=self._policy.max_subtasks)
-        )
-        # 同一会话里重问：planner 看得见自己上一次的原文与那句解析错误，而不是被
-        # 当成两个无关的问题各问一次。
         attempts = max(1, self._policy.planner_attempts)
         last_error = ""
+        usage = Usage()
+        turns = 0
+        steps: list[Step] = []
+        model = ""
         for attempt in range(1, attempts + 1):
+            # Each retry starts from the original compact prompt plus the parser
+            # error. Reusing one transcript grows the request past small local
+            # context windows and makes a formatting retry more expensive than
+            # the original plan request.
+            session = self._planner.session(
+                workspace=workspace,
+                goal=goal,
+                budget=Budget(
+                    max_cost_usd=budget.max_cost_usd,
+                    max_steps=planner_steps,
+                    max_tokens=budget.max_tokens,
+                ),
+            )
+            session.add_user_message(
+                build_plan_message(
+                    goal=goal, max_subtasks=self._policy.max_subtasks
+                )
+            )
+            if attempt > 1:
+                session.add_user_message(build_plan_retry_message(error=last_error))
             status = await session.advance(max_turns=planner_steps)
-            steps = tuple(session.steps)
+            usage = usage + session.usage
+            turns += session.turns
+            steps.extend(session.steps)
+            model = session.model or model
             if status != "completed":
                 if (
                     status == "error"
@@ -396,17 +409,14 @@ class L2PlannerWorkerCritic:
                         attempt,
                         attempts,
                     )
-                    session.add_user_message(
-                        build_plan_retry_message(error=last_error)
-                    )
                     continue
                 return _PlanResult(
                     None,
                     status,
-                    session.usage,
-                    session.turns,
-                    steps,
-                    session.model,
+                    usage,
+                    turns,
+                    tuple(steps),
+                    model,
                     error=session.error,
                 )
             try:
@@ -426,7 +436,6 @@ class L2PlannerWorkerCritic:
                     attempts,
                     last_error,
                 )
-                session.add_user_message(build_plan_retry_message(error=last_error))
                 continue
             self._active_plan = tuple(
                 {
@@ -438,15 +447,15 @@ class L2PlannerWorkerCritic:
                 for subtask in plan.subtasks
             )
             return _PlanResult(
-                plan, status, session.usage, session.turns, steps, session.model
+                plan, status, usage, turns, tuple(steps), model
             )
         return _PlanResult(
             None,
             "error",
-            session.usage,
-            session.turns,
-            tuple(session.steps),
-            session.model,
+            usage,
+            turns,
+            tuple(steps),
+            model,
             error=last_error,
         )
 

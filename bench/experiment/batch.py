@@ -1020,6 +1020,7 @@ def load_batch_rows(
 ) -> list[RunRow]:
     origins = {cell.task_id: cell.task_origin for cell in manifest.cells}
     rows: list[RunRow] = []
+    model_identities: set[str] = set()
     for cell in manifest.cells:
         if cell.status != "completed":
             continue
@@ -1039,6 +1040,8 @@ def load_batch_rows(
             experiment.spec.config.get("baseline_tokens", 0) or 0
         )
         for record in experiment_store.load_experiment_records(cell.experiment_id):
+            model_identity = _model_identity(record.model)
+            model_identities.add(model_identity)
             rows.append(
                 RunRow(
                     task_id=cell.task_id,
@@ -1049,6 +1052,7 @@ def load_batch_rows(
                     completion_tokens=record.metrics.completion_tokens,
                     budget_tier=tier,
                     model=str(record.model.get("model", "") or ""),
+                    model_config=model_identity,
                     wall_clock_s=record.duration_ms / 1000,
                     source=str(record.path or ""),
                     task_origin=origins.get(cell.task_id, "E1"),  # type: ignore[arg-type]
@@ -1056,7 +1060,23 @@ def load_batch_rows(
                     baseline_tokens=baseline_tokens,
                 )
             )
+    if len(model_identities) > 1:
+        raise ValueError(
+            f"批次 {manifest.batch_id} 包含多个模型配置: "
+            f"{sorted(model_identities)}"
+        )
     return rows
+
+
+def _model_identity(model: Mapping[str, Any]) -> str:
+    name = str(model.get("model", "") or "")
+    if not name:
+        return ""
+    parts = [name]
+    for key in ("temperature", "max_tokens"):
+        if key in model:
+            parts.append(f"{key}={model[key]}")
+    return "|".join(str(item) for item in parts)
 
 
 __all__ = [

@@ -32,6 +32,15 @@ STATS_PROTOCOL_PATH = (
 LOCAL_PROTOCOL_PATH = (
     DEFAULT_PROTOCOL_PATH.parent / "multi-agent-first-batch-v5-local.json"
 )
+LOCAL_7B_PROTOCOL_PATH = (
+    DEFAULT_PROTOCOL_PATH.parent / "multi-agent-first-batch-v6-local.json"
+)
+LOCAL_7B_TEMP0_PROTOCOL_PATH = (
+    DEFAULT_PROTOCOL_PATH.parent / "multi-agent-first-batch-v7-local.json"
+)
+LOCAL_3B_TEMP0_512_PROTOCOL_PATH = (
+    DEFAULT_PROTOCOL_PATH.parent / "multi-agent-first-batch-v8-local.json"
+)
 
 
 def test_default_protocol_freezes_the_first_batch() -> None:
@@ -219,3 +228,75 @@ def test_local_second_model_protocol_has_an_independent_identity() -> None:
     assert local.model.max_tokens == 4096
     assert local.model.cost_signal is False
     assert local.statistics == confirmatory.statistics
+
+
+def test_local_third_model_protocol_has_an_independent_identity() -> None:
+    confirmatory = load_protocol(STATS_PROTOCOL_PATH)
+    local_3b = load_protocol(LOCAL_PROTOCOL_PATH)
+    local_7b = load_protocol(LOCAL_7B_PROTOCOL_PATH)
+
+    assert local_7b.version == "6-local-qwen25-7b"
+    assert local_7b.config_hash not in {
+        confirmatory.config_hash,
+        local_3b.config_hash,
+    }
+    assert tuple((task.task_id, task.origin) for task in local_7b.tasks) == EXPECTED_TASKS
+    assert tuple(arm.name for arm in local_7b.arms) == arm_names()
+    assert local_7b.model.provider == "local"
+    assert local_7b.model.model == "qwen2.5:7b"
+    assert local_7b.model.base_url == "http://127.0.0.1:11434/v1"
+    assert local_7b.model.timeout == 300.0
+    assert local_7b.model.max_tokens == 4096
+    assert local_7b.model.cost_signal is False
+    assert local_7b.budget == local_3b.budget
+    assert local_7b.statistics == confirmatory.statistics
+
+
+def test_local_7b_temp0_protocol_is_independent_and_locks_deterministic_sampling() -> None:
+    confirmatory = load_protocol(STATS_PROTOCOL_PATH)
+    local_7b = load_protocol(LOCAL_7B_PROTOCOL_PATH)
+    local_7b_temp0 = load_protocol(LOCAL_7B_TEMP0_PROTOCOL_PATH)
+
+    assert local_7b_temp0.version == "7-local-qwen25-7b-temp0"
+    assert local_7b_temp0.config_hash not in {
+        confirmatory.config_hash,
+        local_7b.config_hash,
+    }
+    assert tuple(
+        (task.task_id, task.origin) for task in local_7b_temp0.tasks
+    ) == EXPECTED_TASKS
+    assert tuple(arm.name for arm in local_7b_temp0.arms) == arm_names()
+    assert local_7b_temp0.model.provider == "local"
+    assert local_7b_temp0.model.model == "qwen2.5:7b"
+    assert local_7b_temp0.model.base_url == "http://127.0.0.1:11434/v1"
+    assert local_7b_temp0.model.temperature == 0.0
+    assert local_7b_temp0.model.timeout == 300.0
+    assert local_7b_temp0.model.max_tokens == 4096
+    assert local_7b_temp0.model.cost_signal is False
+    assert local_7b_temp0.budget == local_7b.budget
+    assert local_7b_temp0.statistics == confirmatory.statistics
+
+
+def test_local_3b_temp0_512_protocol_is_independent_and_context_safe() -> None:
+    confirmatory = load_protocol(STATS_PROTOCOL_PATH)
+    local_7b_temp0 = load_protocol(LOCAL_7B_TEMP0_PROTOCOL_PATH)
+    local_3b_temp0_512 = load_protocol(LOCAL_3B_TEMP0_512_PROTOCOL_PATH)
+
+    assert local_3b_temp0_512.version == "8-local-qwen25-3b-temp0-512"
+    assert local_3b_temp0_512.config_hash not in {
+        confirmatory.config_hash,
+        local_7b_temp0.config_hash,
+    }
+    assert tuple(
+        (task.task_id, task.origin) for task in local_3b_temp0_512.tasks
+    ) == EXPECTED_TASKS
+    assert tuple(arm.name for arm in local_3b_temp0_512.arms) == arm_names()
+    assert local_3b_temp0_512.model.provider == "local"
+    assert local_3b_temp0_512.model.model == "qwen2.5:3b"
+    assert local_3b_temp0_512.model.base_url == "http://127.0.0.1:11434/v1"
+    assert local_3b_temp0_512.model.temperature == 0.0
+    assert local_3b_temp0_512.model.timeout == 120.0
+    assert local_3b_temp0_512.model.max_tokens == 512
+    assert local_3b_temp0_512.model.cost_signal is False
+    assert local_3b_temp0_512.budget == local_7b_temp0.budget
+    assert local_3b_temp0_512.statistics == confirmatory.statistics

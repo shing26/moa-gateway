@@ -40,9 +40,13 @@ class CrossModelReport:
     paired: tuple[PairedComparison, ...]
 
     def to_dict(self) -> dict[str, Any]:
-        analysis = {item.model: item.authorized for item in self.paired}
+        analysis = {
+            item.model or f"batch-{index}": item.authorized
+            for index, item in enumerate(self.paired)
+        }
         claims = {
-            item.model: item.significant_difference for item in self.paired
+            item.model or f"batch-{index}": item.significant_difference
+            for index, item in enumerate(self.paired)
         }
         return {
             "comparison_id": self.comparison_id,
@@ -51,6 +55,9 @@ class CrossModelReport:
             "budget_tier": self.budget_tier,
             "batch_ids": list(self.batch_ids),
             "models": list(self.models),
+            "batch_analysis_authorized": [
+                item.authorized for item in self.paired
+            ],
             "cross_model_inferential_claim": False,
             "analysis_authorized_by_model": analysis,
             "statistical_claims_by_model": claims,
@@ -128,7 +135,7 @@ def build_cross_model_report(
                 f"批次 {manifest.batch_id} 状态为 {manifest.status!r}，不能比较"
             )
         current = load_batch_rows(manifest, experiments)
-        models = {row.model for row in current if row.model}
+        models = {row.model_identity for row in current if row.model_identity}
         if len(models) != 1:
             raise ValueError(
                 f"批次 {manifest.batch_id} 必须只包含一个模型；观察到 {sorted(models)}"
@@ -148,20 +155,26 @@ def build_cross_model_report(
         paired_pass_rate_comparison(
             rows,
             protocol.statistics,
-            model=model,
+            model=model_identity,
             expected_tasks=expected_tasks,
             expected_task_origins=expected_task_origins,
         )
-        for model in model_names
+        for model_identity in model_names
     )
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    identity_display = {
+        row.model_identity: row.model for row in rows if row.model_identity
+    }
+    display_models = tuple(
+        identity_display.get(identity, identity) for identity in model_names
+    )
     return CrossModelReport(
         comparison_id=f"cross-model-{stamp}-{uuid.uuid4().hex[:8]}",
         protocol_id=protocol.protocol_id,
         phase=manifests[0].phase,
         budget_tier=manifests[0].budget_tier,
         batch_ids=batch_ids,
-        models=model_names,
+        models=display_models,
         matrix=model_arm_matrix(rows),
         paired=paired,
     )

@@ -307,9 +307,13 @@ class LLMClient:
             "max_tokens": max_tokens or self.config.max_tokens,
             "temperature": temperature if temperature is not None else self.config.temperature,
             "stream": False,
+            # Retries are owned by LLMClient's fallback and the agent loop. Letting
+            # LiteLLM retry as well multiplies latency and hides the real attempt
+            # count (for example, 300s becomes roughly 900s before we see failure).
+            "num_retries": 0,
             # 调用方可覆盖单次超时（意图路由用它把超时"传进去"而不是从外部取消——
             # 外部取消会让 litellm 留下未 await 的内部协程，见 ADR-016/第十二轮）。
-            # 注意语义：timeout 是**每次尝试**的上限，fallback 链最坏 (1+N)*timeout。
+            # 注意语义：timeout 是**每个候选模型**的上限，fallback 链最坏 (1+N)*timeout。
             "timeout": timeout if timeout is not None else self.config.timeout,
         }
         custom_provider = self._custom_provider_for(model)

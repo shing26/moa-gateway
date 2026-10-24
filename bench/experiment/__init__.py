@@ -47,6 +47,10 @@ from bench.experiment.capacity import (
     load_capacity_gate,
     observe_capacity_pilot,
 )
+from bench.experiment.pilot_runtime import (
+    PilotRuntimeGate,
+    load_pilot_runtime_gate,
+)
 
 __all__ = [
     "BATCH_SCHEMA_VERSION",
@@ -69,6 +73,7 @@ __all__ = [
     "ExperimentRunner",
     "ExperimentSpec",
     "ExperimentStore",
+    "PilotRuntimeGate",
     "RunMetrics",
     "RunRecord",
     "TrialEvidence",
@@ -81,6 +86,7 @@ __all__ = [
     "fingerprint_workspace",
     "load_protocol",
     "load_capacity_gate",
+    "load_pilot_runtime_gate",
     "observe_capacity_pilot",
     "protocol_from_dict",
     "write_cross_model_report",

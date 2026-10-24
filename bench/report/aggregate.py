@@ -108,6 +108,9 @@ class RunRow:
     completion_tokens: int = 0
     budget_tier: str = B1_TIER
     model: str = ""
+    #: 模型配置身份（模型名 + 关键采样参数）。跨模型比较用它区分同名模型下
+    #: 的不同协议配置；为空时回落到 ``model``，兼容旧报告数据。
+    model_config: str = ""
     wall_clock_s: float = 0.0
     #: 这份 run 来自哪个文件——报告里的数字靠它追回具体 run。
     source: str = ""
@@ -123,6 +126,10 @@ class RunRow:
     @property
     def total_tokens(self) -> int:
         return self.prompt_tokens + self.completion_tokens
+
+    @property
+    def model_identity(self) -> str:
+        return self.model_config or self.model
 
     @property
     def incremental_cost_usd(self) -> float:

@@ -173,7 +173,7 @@ def paired_pass_rate_comparison(
     expected_task_origins: Mapping[str, str] | None = None,
 ) -> PairedComparison:
     all_rows = list(rows)
-    models = sorted({row.model for row in all_rows if row.model})
+    models = sorted({row.model_identity for row in all_rows if row.model_identity})
     selected_model = model or (models[0] if len(models) == 1 else "")
     block_reasons: list[str] = []
     if len(models) != 1 and model is None:
@@ -186,7 +186,7 @@ def paired_pass_rate_comparison(
     selected = [
         row
         for row in all_rows
-        if selected_model and row.model == selected_model
+        if selected_model and row.model_identity == selected_model
     ]
     wanted_arms = {
         preregistration.candidate_arm,
@@ -308,11 +308,15 @@ def paired_pass_rate_comparison(
             decision = "no_significant_difference"
 
     sensitivity = _sensitivity(tasks, preregistration)
+    display_model = next(
+        (row.model for row in selected if row.model_identity == selected_model),
+        selected_model,
+    )
     return PairedComparison(
         authorized=authorized,
         decision=decision,
         block_reasons=tuple(dict.fromkeys(block_reasons)),
-        model=selected_model,
+        model=display_model,
         candidate_arm=preregistration.candidate_arm,
         baseline_arm=preregistration.baseline_arm,
         primary_metric=preregistration.primary_metric,
@@ -394,10 +398,11 @@ class ModelArmSummary:
 def model_arm_matrix(rows: Iterable[RunRow]) -> tuple[ModelArmSummary, ...]:
     grouped: dict[tuple[str, str], list[RunRow]] = defaultdict(list)
     for row in rows:
-        grouped[(row.model or "<unknown>", row.arm)].append(row)
+        grouped[(row.model_identity or "<unknown>", row.arm)].append(row)
     output = []
-    for (model, arm), chosen in sorted(grouped.items()):
+    for (_, arm), chosen in sorted(grouped.items()):
         valid = [row for row in chosen if row.outcome in _VALID_OUTCOMES]
+        display_model = next((row.model for row in chosen if row.model), "")
         passes = sum(row.outcome == "pass" for row in valid)
         costs = [row.cost_usd for row in chosen]
         if all(cost == 0 for cost in costs):
@@ -408,7 +413,7 @@ def model_arm_matrix(rows: Iterable[RunRow]) -> tuple[ModelArmSummary, ...]:
             cost_signal = "available"
         output.append(
             ModelArmSummary(
-                model=model,
+                model=display_model,
                 arm=arm,
                 runs=len(chosen),
                 valid_runs=len(valid),

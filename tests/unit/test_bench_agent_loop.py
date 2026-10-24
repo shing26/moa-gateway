@@ -67,6 +67,18 @@ class _RateLimitedOnceLLM(ScriptedLLM):
         return await super().chat_with_tools(messages, tools, **kwargs)
 
 
+class _ContextWindowLLM(ScriptedLLM):
+    def __init__(self) -> None:
+        super().__init__([], model="context-limited")
+        self.calls = 0
+
+    async def chat_with_tools(self, messages, tools, **kwargs):  # type: ignore[override]
+        self.calls += 1
+        exc = RuntimeError("request exceeds the available context size")
+        exc.status_code = 400  # type: ignore[attr-defined]
+        raise exc
+
+
 @pytest.mark.asyncio
 async def test_terminal_turn_is_completed(tmp_path: Path) -> None:
     agent = make_agent(tmp_path, [ScriptedTurn(final="做完了")])
@@ -111,6 +123,22 @@ async def test_llm_failure_is_error(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert "boom" in run.error
     # 重试是有限的：尝试次数就是常量本身，不是无限重试。
     assert len(llm._calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_deterministic_context_error_is_not_retried(tmp_path: Path) -> None:
+    llm = _ContextWindowLLM()
+    tools = build_toolset(workspace=tmp_path, verify_command=FAILING_VERIFY)
+
+    run = await LLMBackedAgent(llm, tools).run(
+        workspace=tmp_path,
+        goal="目标",
+        budget=Budget(1.0, 5),
+    )
+
+    assert run.status == "error"
+    assert llm.calls == 1
+    assert run.usage.retry_events == ()
 
 
 @pytest.mark.asyncio

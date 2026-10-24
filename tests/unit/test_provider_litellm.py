@@ -47,6 +47,7 @@ async def test_chat_forwards_expected_kwargs(monkeypatch: pytest.MonkeyPatch) ->
     assert kwargs["max_tokens"] == 128
     assert kwargs["temperature"] == 0.2
     assert kwargs["stream"] is False
+    assert kwargs["num_retries"] == 0
     assert kwargs["api_key"] == "key"
     assert kwargs["api_base"] == "http://localhost:0"
 

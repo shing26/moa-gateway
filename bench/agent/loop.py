@@ -76,6 +76,45 @@ def _rate_limit_status(exc: BaseException) -> int | None:
     return 429 if "ratelimit" in label or "too many requests" in label else None
 
 
+def _http_status(exc: BaseException) -> int | None:
+    for value in (
+        getattr(exc, "status_code", None),
+        getattr(exc, "http_status", None),
+        getattr(exc, "code", None),
+    ):
+        try:
+            status = int(value)
+        except (TypeError, ValueError):
+            continue
+        if status > 0:
+            return status
+    return None
+
+
+def _is_retryable_llm_error(exc: BaseException) -> bool:
+    """Only retry transient provider failures.
+
+    Bad requests, context-window overflow, auth failures and missing models are
+    deterministic for the same request. Retrying them only multiplies latency
+    and can stack unconsumed Ollama generations behind the client timeout.
+    """
+    status = _http_status(exc)
+    if status is not None:
+        return status in {408, 409, 425, 429} or status >= 500
+    name = type(exc).__name__.lower()
+    return not any(
+        marker in name
+        for marker in (
+            "badrequest",
+            "contextwindow",
+            "authentication",
+            "permissiondenied",
+            "notfound",
+            "unprocessable",
+        )
+    )
+
+
 class _ToolRunner(Protocol):
     """会话驱动的循环机制（§5.0 决策 3 的原生 tool-calling）。
 
@@ -306,6 +345,9 @@ class LoopSession:
                 raise
             except Exception as exc:  # noqa: BLE001 - 任何调用故障都可重试
                 last = exc
+                if not _is_retryable_llm_error(exc):
+                    logger.warning("agent llm call failed without retry: %s", exc)
+                    break
                 delay_ms = (
                     0
                     if attempt >= LLM_RETRY_ATTEMPTS
