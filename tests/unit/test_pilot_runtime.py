@@ -19,6 +19,7 @@ from bench.experiment import (
     load_pilot_runtime_gate,
     load_protocol,
 )
+from bench.experiment.protocol import protocol_from_dict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = PROJECT_ROOT / "scripts" / "verify_pilot_runtime.py"
@@ -454,3 +455,31 @@ def test_pilot_runtime_gate_replays_frozen_v8_pilot_as_not_distinct(
     assert any(
         "基线 L0 有效样本 1 < 3" in reason for reason in result.block_reasons
     )
+
+
+def test_pilot_runtime_gate_reports_discrimination_before_validity(
+    tmp_path: Path,
+) -> None:
+    """区分度失败优先报告：基线还在地板时，证据缺失只是衍生现象。"""
+    root = tmp_path / "experiments"
+    protocol_path = tmp_path / "protocol.json"
+    _build_baseline_pilot(
+        root,
+        protocol_path,
+        pilot_repeats=3,
+        statuses_by_arm={"L0": "fail", "L1": "fail", "L2": "fail", "L3": "fail"},
+    )
+
+    result = load_pilot_runtime_gate(
+        root,
+        batch_id="pilot-runtime",
+        protocol=protocol_from_dict(
+            json.loads(protocol_path.read_text(encoding="utf-8"))
+        ),
+    )
+
+    assert result.discrimination_block_reasons
+    assert result.block_reasons[: len(result.discrimination_block_reasons)] == (
+        result.discrimination_block_reasons
+    )
+    assert "地板" in result.discrimination_block_reasons[0]

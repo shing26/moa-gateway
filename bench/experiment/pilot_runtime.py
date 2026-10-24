@@ -27,6 +27,8 @@ class PilotRuntimeGate:
     outcomes: dict[str, int]
     arms: tuple[str, ...]
     block_reasons: tuple[str, ...]
+    discrimination_block_reasons: tuple[str, ...]
+    validity_block_reasons: tuple[str, ...]
     warnings: tuple[str, ...]
     baseline_arm: str
     baseline_valid_trials: int
@@ -51,6 +53,10 @@ class PilotRuntimeGate:
             "outcomes": dict(sorted(self.outcomes.items())),
             "arms": list(self.arms),
             "block_reasons": list(self.block_reasons),
+            "discrimination_block_reasons": list(
+                self.discrimination_block_reasons
+            ),
+            "validity_block_reasons": list(self.validity_block_reasons),
             "warnings": list(self.warnings),
             "baseline_arm": self.baseline_arm,
             "baseline_valid_trials": self.baseline_valid_trials,
@@ -110,6 +116,7 @@ def load_pilot_runtime_gate(
     updated = _timestamp(manifest.updated_at, "updated_at")
     elapsed_hours = max(0.0, (updated - created).total_seconds() / 3600.0)
     reasons: list[str] = []
+    discrimination_reasons: list[str] = []
     if manifest.phase != "pilot":
         reasons.append(f"批次 phase={manifest.phase!r}，不是 pilot")
     if manifest.status != "completed":
@@ -193,19 +200,19 @@ def load_pilot_runtime_gate(
     )
     warnings: list[str] = []
     if len(baseline_valid) < min_baseline_trials:
-        reasons.append(
+        discrimination_reasons.append(
             f"基线 {baseline_arm} 有效样本 {len(baseline_valid)} "
             f"< {min_baseline_trials}，无法评估区分度"
         )
     elif baseline_pass_rate is not None:
         if baseline_pass_rate <= floor:
-            reasons.append(
+            discrimination_reasons.append(
                 f"基线 {baseline_arm} 通过率 {baseline_pass_rate:.1%} "
                 f"<= {baseline_pass_rate_floor:.0%}（地板），无法区分编排增益"
                 "与基线能力不足"
             )
         elif baseline_pass_rate >= ceiling:
-            reasons.append(
+            discrimination_reasons.append(
                 f"基线 {baseline_arm} 通过率 {baseline_pass_rate:.1%} "
                 f">= {baseline_pass_rate_ceiling:.0%}（天花板），"
                 "增益空间不足，配对检验功效受限"
@@ -222,8 +229,9 @@ def load_pilot_runtime_gate(
                 "配对检验功效可能不足"
             )
 
+    ordered_reasons = [*discrimination_reasons, *reasons]
     return PilotRuntimeGate(
-        ready=not reasons,
+        ready=not ordered_reasons,
         batch_id=manifest.batch_id,
         batch_status=manifest.status,
         elapsed_hours=round(elapsed_hours, 3),
@@ -235,7 +243,9 @@ def load_pilot_runtime_gate(
         max_projected_formal_hours=max_projected_formal_hours,
         outcomes=outcomes,
         arms=tuple(sorted(set(manifest_arms))),
-        block_reasons=tuple(reasons),
+        block_reasons=tuple(ordered_reasons),
+        discrimination_block_reasons=tuple(discrimination_reasons),
+        validity_block_reasons=tuple(reasons),
         warnings=tuple(warnings),
         baseline_arm=baseline_arm,
         baseline_valid_trials=len(baseline_valid),
