@@ -1,0 +1,8 @@
+{
+  "task_id": "t7-unclear-crash-report",
+  "issue_text": "用了两天突然崩了。没什么规律，重启就好。附件是个截图，看不清报错。不知道怎么复现。",
+  "expected_category": "question",
+  "expected_priority": "P3",
+  "expected_route": "human",
+  "note": "无复现步骤、无报错文本、无法归类 → question + human（无法自动归类）。P3 因为没有可行动的信息。"
+}

@@ -1,0 +1,8 @@
+{
+  "task_id": "t6-funding-deduct-error",
+  "issue_text": "计费模块重复扣费。用户反馈被扣了两次月费，账单记录里有两条同金额同时间戳的扣费记录。涉及真实资金。",
+  "expected_category": "bug",
+  "expected_priority": "P0",
+  "expected_route": "human",
+  "note": "资金问题 → route=human；重复扣费是高严重性缺陷 → P0。"
+}

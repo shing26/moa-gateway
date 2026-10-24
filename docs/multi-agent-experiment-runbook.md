@@ -414,6 +414,7 @@ v8 B3 与 v5 × v8 比较的实测结果：
 
 ## 7. 发布验收
 
+
 1. 新环境按本手册启动服务；
 2. `/dashboard/api/experiments` 返回至少一个已完成批次；
 3. 批次详情中的数字与持久化 `report.json` 一致；
@@ -422,3 +423,37 @@ v8 B3 与 v5 × v8 比较的实测结果：
 
 本地 Compose 的参考入口是 `http://127.0.0.1:18081/dashboard/experiments`。共享或生产
 环境必须把同一镜像和只读实验卷部署到受控主机，并记录实际外部 URL。
+
+## 8. Issue 分诊场景
+
+Issue 分诊复用同一条 pilot 门禁轨道，任务定义在
+`bench/triage/tasks/*.triage.json`，协议为
+`bench/protocols/issue-triage-v1-local.json`。判定口径：**category + route
+全对为 pass，priority 仅记录不判决**——优先级标注带强主观性，把它放进
+判决会让任务退化为"复现标注者直觉"，r1 轮四 arm 全 0% 正是栽在这。
+
+三轮 pilot 的实测演进（批次均已冻结，不修改）：
+
+- `issue-triage-v1-pilot-live-r1`：分诊 workspace 为空目录，只读工具全部
+  空转（"扫描 0 个文件"），四 arm 0/32。区分度门禁以"基线 L0 通过率
+  0% 地板"拦截。修复：workspace 物化为仓库 HEAD 快照，与代码任务同构。
+- `issue-triage-v1-pilot-live-r2`：三字段全对口径下仍 0/32，但逐字段
+  分解显示 category 7/8、route 5/8、priority 仅 1/8——失败集中在
+  priority。据此把判定改为 category + route，priority 降为记录字段。
+- `issue-triage-v2-pilot-live-r1`：基线 L0 = 3/8（37.5%），脱离地板、
+  落入 20%–80% 建议区间；门禁这次拦截在 **t1 L2 无工具轨迹**（planner
+  在 512 token 上限下 11 次 LLM 调用未产出可执行计划，0 次工具调用）。
+  L1/L2/L3 均 0/8 且全部"未找到可解析分诊 JSON"。
+
+当前结论：**该协议不授权正式批次**。处置方向按优先级：
+
+1. 提高模型档位或放宽单次 completion 上限，使 L2 planner 能产出计划
+   （t1 L2 的 11 次调用 0 工具是结构性失败，不是随机噪声）；
+2. 若维持 qwen2.5:3b + 512，则 Issue 分诊场景只保留 L0 通路，多智能体
+   档位不进入正式对比——并在协议中显式声明该边界，而不是让它空转烧
+   token；
+3. 换更强模型重跑 pilot 前不改任务集——基线已在带内，任务难度校准完成。
+
+预算口径：v1 协议 B1 = 12 步 / 60k token、B3 = 36 步 / 180k token。
+v2 轮实测 L0 ≈ 2.1k token/任务，L1 ≈ 13.6k，L2 ≈ 23.8k，L3 ≈ 13.6k，
+多档为 L0 的 6–11 倍，与 PR 审查场景的 7.9–14.8 倍同量级。

@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "protocol_id": "issue-triage",
+  "version": "v1-local-qwen25-3b-temp0-512",
+  "frozen_at": "2026-10-25",
+  "tasks": [
+    {"task_id": "t1-crash-on-startup", "origin": "E3", "task_file": "bench/triage/tasks/t1-crash-on-startup.triage.json"},
+    {"task_id": "t2-feature-dark-mode", "origin": "E3", "task_file": "bench/triage/tasks/t2-feature-dark-mode.triage.json"},
+    {"task_id": "t3-question-api-auth", "origin": "E3", "task_file": "bench/triage/tasks/t3-question-api-auth.triage.json"},
+    {"task_id": "t4-docs-broken-link", "origin": "E3", "task_file": "bench/triage/tasks/t4-docs-broken-link.triage.json"},
+    {"task_id": "t5-privacy-data-leak", "origin": "E3", "task_file": "bench/triage/tasks/t5-privacy-data-leak.triage.json"},
+    {"task_id": "t6-funding-deduct-error", "origin": "E3", "task_file": "bench/triage/tasks/t6-funding-deduct-error.triage.json"},
+    {"task_id": "t7-unclear-crash-report", "origin": "E3", "task_file": "bench/triage/tasks/t7-unclear-crash-report.triage.json"},
+    {"task_id": "t8-docs-api-reference-outdated", "origin": "E3", "task_file": "bench/triage/tasks/t8-docs-api-reference-outdated.triage.json"}
+  ],
+  "arms": [
+    {"name": "L0", "version": "v1", "description": "单体 ReAct 循环"},
+    {"name": "L1", "version": "v1", "description": "串行角色分工与 Critic 回边"},
+    {"name": "L2", "version": "v1", "description": "依赖感知并行分工"},
+    {"name": "L3", "version": "v1", "description": "并行分工加共享审查闭环"}
+  ],
+  "model": {
+    "provider": "local",
+    "model": "qwen2.5:3b",
+    "base_url": "http://127.0.0.1:11434/v1",
+    "temperature": 0.0,
+    "timeout": 120.0,
+    "max_tokens": 512,
+    "cost_signal": false
+  },
+  "budget": {
+    "axis": "tokens",
+    "b1": {
+      "max_cost_usd": null,
+      "max_steps": 12,
+      "max_tokens": 60000
+  },
+    "b3": {
+      "max_cost_usd": null,
+      "max_steps": 36,
+      "max_tokens": 180000
+    }
+  },
+  "repeats": {"pilot": 1, "baseline": 1, "formal": 3},
+  "retry": {
+    "max_error_retries": 1,
+    "retry_on": ["error"],
+    "do_not_retry_on": ["fail", "budget_exhausted"]
+  },
+  "exclusions": {
+    "excluded_outcomes": ["error"],
+    "exclude_from_pass_rate": ["error"],
+    "invalid_task_fails_first": true
+  },
+  "reporting": {
+    "statistical_claims": true,
+    "directional_until_samples": 3,
+    "primary_metric": "pass_rate",
+    "cost_unavailable_reason": "本地 Ollama 端点没有美元成本信号，报告使用 token 轴",
+    "group_by": ["task_origin", "arm"]
+  },
+  "statistics": {
+    "unit": "task",
+    "primary_metric": "pass_rate",
+    "candidate_arm": "L3",
+    "baseline_arm": "L0",
+    "planned_task_count": 8,
+    "planned_repeats_per_cell": 3,
+    "min_valid_repeats_per_cell": 3,
+    "confidence_level": 0.95,
+    "bootstrap_resamples": 10000,
+    "random_seed": 20261025,
+    "alpha": 0.05,
+    "sensitivity": ["leave_one_task_out", "origin_stratified"]
+  }
+}

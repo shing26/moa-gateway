@@ -1,0 +1,8 @@
+{
+  "task_id": "t4-docs-broken-link",
+  "issue_text": "README 的快速开始链接 404 了。点击 Quick Start 跳到 https://example.com/quickstart 返回 404。",
+  "expected_category": "docs",
+  "expected_priority": "P2",
+  "expected_route": "auto",
+  "note": "文档链接失效 → docs；影响上手但无功能损害 → P2；不触发人工条件 → auto。"
+}

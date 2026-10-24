@@ -582,7 +582,14 @@ class ExperimentProtocol:
             "phase": phase,
             "batch_id": batch_id,
             "task_id": task.task_id,
-            "tasks_dir": "bench/tasks",
+            "tasks_dir": (
+                "bench/triage/tasks"
+                if all(
+                    task.task_file.endswith(".triage.json")
+                    for task in self.tasks
+                )
+                else "bench/tasks"
+            ),
             "arm": arm.name,
             "arm_version": arm.version,
             "budget_tier": B1_TIER,

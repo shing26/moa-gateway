@@ -1,0 +1,8 @@
+{
+  "task_id": "t5-privacy-data-leak",
+  "issue_text": "发现 /api/logs 接口把用户的邮箱和手机号明文返回了。任何登录用户都能看到其他人的联系方式。这可能违反 GDPR。",
+  "expected_category": "bug",
+  "expected_priority": "P0",
+  "expected_route": "human",
+  "note": "隐私泄露 + 合规风险 → bug/P0；涉及隐私 → route=human。"
+}

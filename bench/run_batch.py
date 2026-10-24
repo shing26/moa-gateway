@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,10 @@ from bench.experiment import (  # noqa: E402
     load_protocol,
 )
 from bench.experiment.adapters import BenchExperimentAdapter  # noqa: E402
+from bench.triage.runner import (  # noqa: E402
+    load_triage_task,
+    run_triage_task,
+)
 from bench.experiment.cross_model import (  # noqa: E402
     build_cross_model_report,
     write_cross_model_report,
@@ -173,6 +178,56 @@ def _live_executor(spec: ExperimentSpec, *, output_root: Path):
     return BenchExperimentAdapter(run_one)
 
 
+def _triage_live_executor(spec: ExperimentSpec, *, output_root: Path):
+    client = _model_client(spec)
+    factory = resolve_arm(str(spec.config["arm"]), llm=client)
+    task_path = ROOT / str(spec.config["tasks_dir"]) / (
+        f"{spec.config['task_id']}.triage.json"
+    )
+    task = load_triage_task(task_path)
+    budget_payload = dict(spec.config.get("budget") or {})
+    max_cost = budget_payload.get("max_cost_usd")
+    budget = Budget(
+        max_cost_usd=(
+            float(max_cost) if max_cost is not None else NO_COST_LIMIT
+        ),
+        max_steps=int(budget_payload["max_steps"]),
+        max_tokens=int(budget_payload.get("max_tokens", 0) or 0),
+    )
+
+    async def run_one(current: ExperimentSpec, trial_index: int):
+        workdir = _trial_attempt_workdir(
+            output_root,
+            batch_id=str(current.config["batch_id"]),
+            experiment_id=current.experiment_id,
+            trial_index=trial_index,
+            task_id=task.task_id,
+        )
+        result = await run_triage_task(
+            task=task,
+            agent_factory=factory,
+            workdir=workdir,
+            arm=str(current.config["arm"]),
+            budget=budget,
+            budget_tier=str(current.config.get("budget_tier", "B1")),
+            baseline_cost_usd=float(
+                current.config.get("baseline_cost_usd", 0.0) or 0.0
+            ),
+            baseline_tokens=int(
+                current.config.get("baseline_tokens", 0) or 0
+            ),
+        )
+        verdict = dict(result.verdict)
+        verdict["parsed_output"] = result.parsed_output
+        result = replace(
+            result,
+            verdict=verdict,
+        )
+        return result, workdir / task.task_id
+
+    return BenchExperimentAdapter(run_one)
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="可恢复的多智能体实验批次")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -224,7 +279,11 @@ async def _run(args: argparse.Namespace) -> int:
     if args.mode == "mock":
         factory = lambda spec: MockBatchExecutor()
     else:
-        factory = lambda spec: _live_executor(spec, output_root=output_root)
+        factory = lambda spec: (
+            _triage_live_executor(spec, output_root=output_root)
+            if str(spec.config.get("tasks_dir", "")).endswith("triage/tasks")
+            else _live_executor(spec, output_root=output_root)
+        )
 
     outcome = await BatchRunner(store, protocol).run(
         phase=args.phase,
@@ -252,7 +311,11 @@ async def _run_b3(args: argparse.Namespace) -> int:
     if args.mode == "mock":
         factory = lambda spec: MockBatchExecutor()
     else:
-        factory = lambda spec: _live_executor(spec, output_root=output_root)
+        factory = lambda spec: (
+            _triage_live_executor(spec, output_root=output_root)
+            if str(spec.config.get("tasks_dir", "")).endswith("triage/tasks")
+            else _live_executor(spec, output_root=output_root)
+        )
 
     outcome = await BatchRunner(store, protocol).run_b3(
         source_batch_id=args.source_batch,
