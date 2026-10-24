@@ -71,6 +71,59 @@ def _build_pilot(root: Path, protocol_path: Path, *, status: str = "pass"):
     return protocol
 
 
+def _baseline_pilot_protocol(path: Path, *, pilot_repeats: int):
+    base = load_protocol(PROTOCOL)
+    protocol = replace(
+        base,
+        repeats=replace(base.repeats, pilot=pilot_repeats),
+    )
+    path.write_text(
+        json.dumps(protocol.to_dict(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return protocol
+
+
+def _build_baseline_pilot(
+    root: Path,
+    protocol_path: Path,
+    *,
+    pilot_repeats: int,
+    statuses_by_arm: dict[str, str],
+):
+    protocol = _baseline_pilot_protocol(
+        protocol_path,
+        pilot_repeats=pilot_repeats,
+    )
+
+    class StatusByArmExecutor:
+        async def execute(self, spec, trial_index: int):
+            status = statuses_by_arm.get(spec.config["arm"], "fail")
+            return TrialEvidence(
+                status=status,
+                node_path=("step:0:run_tests",),
+                final_text="pilot",
+                metrics=RunMetrics(
+                    llm_calls=1,
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                    tool_calls=1,
+                ),
+                evidence={"steps": [{"action": "call_tool", "tool": "run_tests"}]},
+                error="executor failed" if status == "error" else "",
+            )
+
+    asyncio.run(
+        BatchRunner(ExperimentStore(root), protocol).run(
+            phase="pilot",
+            task_ids=(protocol.tasks[0].task_id,),
+            batch_id="pilot-runtime",
+            executor_factory=lambda spec: StatusByArmExecutor(),
+        )
+    )
+    return protocol
+
+
 def _run_script(root: Path, protocol_path: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -86,11 +139,77 @@ def _run_script(root: Path, protocol_path: Path) -> subprocess.CompletedProcess[
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+def _run_script_with_baseline_args(
+    root: Path,
+    protocol_path: Path,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT),
+            "--batch-id",
+            "pilot-runtime",
+            "--protocol",
+            str(protocol_path),
+            "--out",
+            str(root),
+            "--min-baseline-trials",
+            "1",
+            "--baseline-pass-rate-floor",
+            "-0.01",
+            "--baseline-pass-rate-ceiling",
+            "1.01",
+            "--baseline-preferred-min",
+            "0",
+            "--baseline-preferred-max",
+            "1",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
 
 
 def test_pilot_runtime_gate_accepts_complete_evidence_and_covers_all_arms(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "experiments"
+    protocol_path = tmp_path / "protocol.json"
+    protocol = _build_baseline_pilot(
+        root,
+        protocol_path,
+        pilot_repeats=1,
+        statuses_by_arm={"L0": "pass", "L1": "pass", "L2": "pass", "L3": "pass"},
+    )
+
+    result = load_pilot_runtime_gate(
+        root,
+        batch_id="pilot-runtime",
+        protocol=protocol,
+        min_baseline_trials=1,
+            baseline_pass_rate_floor=-0.01,
+            baseline_pass_rate_ceiling=1.01,
+            baseline_preferred_range=(0.0, 1.0),
+    )
+
+    assert result.ready is True
+    assert result.observed_trials == 4
+    assert result.arms == ("L0", "L1", "L2", "L3")
+    assert result.outcomes == {"pass": 4}
+    assert result.projected_formal_trials == 96
+    # 该 pilot 的 L0 只有 1 条有效样本，区分度信息本身在专用测试中验证。
+
+
+def test_pilot_runtime_gate_requires_minimum_baseline_distinction_samples(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "experiments"
@@ -103,11 +222,109 @@ def test_pilot_runtime_gate_accepts_complete_evidence_and_covers_all_arms(
         protocol=protocol,
     )
 
+    assert result.ready is False
+    assert result.baseline_arm == "L0"
+    assert result.baseline_valid_trials == 1
+    assert any("无法评估区分度" in reason for reason in result.block_reasons)
+
+
+def test_pilot_runtime_gate_rejects_baseline_floor(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "experiments"
+    protocol_path = tmp_path / "protocol.json"
+    protocol = _build_baseline_pilot(
+        root,
+        protocol_path,
+        pilot_repeats=3,
+        statuses_by_arm={arm: "fail" for arm in ("L0", "L1", "L2", "L3")},
+    )
+
+    result = load_pilot_runtime_gate(
+        root,
+        batch_id="pilot-runtime",
+        protocol=protocol,
+    )
+
+    assert result.ready is False
+    assert result.baseline_valid_trials == 3
+    assert result.baseline_pass_rate == 0.0
+    assert any("地板" in reason for reason in result.block_reasons)
+
+
+def test_pilot_runtime_gate_rejects_baseline_ceiling(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "experiments"
+    protocol_path = tmp_path / "protocol.json"
+    protocol = _build_baseline_pilot(
+        root,
+        protocol_path,
+        pilot_repeats=3,
+        statuses_by_arm={arm: "pass" for arm in ("L0", "L1", "L2", "L3")},
+    )
+
+    result = load_pilot_runtime_gate(
+        root,
+        batch_id="pilot-runtime",
+        protocol=protocol,
+    )
+
+    assert result.ready is False
+    assert result.baseline_pass_rate == 1.0
+    assert any("天花板" in reason for reason in result.block_reasons)
+
+
+def test_pilot_runtime_gate_accepts_mid_range_baseline_with_soft_warning(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "experiments"
+    protocol_path = tmp_path / "protocol.json"
+    protocol = _build_baseline_pilot(
+        root,
+        protocol_path,
+        pilot_repeats=5,
+        statuses_by_arm={"L0": "fail"},  # 其他 arm 默认 fail，L0 也是 fail
+    )
+    # 重新构造：L0 通过 1/5 = 20%，在建议区间边界内
+    class OnePassInFiveExecutor:
+        calls = 0
+
+        async def execute(self, spec, trial_index: int):
+            type(self).calls += 1
+            status = "pass" if self.calls == 1 else "fail"
+            return TrialEvidence(
+                status=status,
+                node_path=("step:0:run_tests",),
+                final_text="pilot",
+                metrics=RunMetrics(
+                    llm_calls=1,
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                    tool_calls=1,
+                ),
+                evidence={"steps": [{"action": "call_tool", "tool": "run_tests"}]},
+            )
+
+    asyncio.run(
+        BatchRunner(ExperimentStore(root / "mid"), protocol).run(
+            phase="pilot",
+            task_ids=(protocol.tasks[0].task_id,),
+            batch_id="pilot-mid",
+            executor_factory=lambda spec: OnePassInFiveExecutor(),
+        )
+    )
+
+    result = load_pilot_runtime_gate(
+        root / "mid",
+        batch_id="pilot-mid",
+        protocol=protocol,
+    )
+
     assert result.ready is True
-    assert result.observed_trials == 4
-    assert result.arms == ("L0", "L1", "L2", "L3")
-    assert result.outcomes == {"pass": 4}
-    assert result.projected_formal_trials == 96
+    assert result.baseline_valid_trials == 5
+    assert result.baseline_pass_rate == 0.2
+    assert result.warnings == ()
 
 
 def test_pilot_runtime_gate_rejects_slow_pilot(tmp_path: Path) -> None:
@@ -178,9 +395,14 @@ def test_verify_pilot_runtime_cli_returns_machine_readable_decision(
 ) -> None:
     root = tmp_path / "experiments"
     protocol_path = tmp_path / "protocol.json"
-    _build_pilot(root, protocol_path)
+    _build_baseline_pilot(
+        root,
+        protocol_path,
+        pilot_repeats=3,
+        statuses_by_arm={"L0": "pass", "L1": "fail", "L2": "fail", "L3": "fail"},
+    )
 
-    completed = _run_script(root, protocol_path)
+    completed = _run_script_with_baseline_args(root, protocol_path)
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     payload = json.loads(completed.stdout)

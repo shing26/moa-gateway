@@ -27,6 +27,14 @@ class PilotRuntimeGate:
     outcomes: dict[str, int]
     arms: tuple[str, ...]
     block_reasons: tuple[str, ...]
+    warnings: tuple[str, ...]
+    baseline_arm: str
+    baseline_valid_trials: int
+    baseline_pass_rate: float | None
+    min_baseline_trials: int
+    baseline_pass_rate_floor: float
+    baseline_pass_rate_ceiling: float
+    baseline_preferred_range: tuple[float, float]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +51,14 @@ class PilotRuntimeGate:
             "outcomes": dict(sorted(self.outcomes.items())),
             "arms": list(self.arms),
             "block_reasons": list(self.block_reasons),
+            "warnings": list(self.warnings),
+            "baseline_arm": self.baseline_arm,
+            "baseline_valid_trials": self.baseline_valid_trials,
+            "baseline_pass_rate": self.baseline_pass_rate,
+            "min_baseline_trials": self.min_baseline_trials,
+            "baseline_pass_rate_floor": self.baseline_pass_rate_floor,
+            "baseline_pass_rate_ceiling": self.baseline_pass_rate_ceiling,
+            "baseline_preferred_range": list(self.baseline_preferred_range),
         }
 
 
@@ -63,9 +79,24 @@ def load_pilot_runtime_gate(
     protocol: ExperimentProtocol,
     max_pilot_hours: float = 4.0,
     max_projected_formal_hours: float = 72.0,
+    min_baseline_trials: int = 3,
+    baseline_pass_rate_floor: float = 0.0,
+    baseline_pass_rate_ceiling: float = 1.0,
+    baseline_preferred_range: tuple[float, float] = (0.2, 0.8),
 ) -> PilotRuntimeGate:
     if max_pilot_hours <= 0 or max_projected_formal_hours <= 0:
         raise ValueError("运行时间门禁必须是正数")
+    if min_baseline_trials < 1:
+        raise ValueError("基线最小有效样本数必须 >= 1")
+    floor = float(baseline_pass_rate_floor)
+    ceiling = float(baseline_pass_rate_ceiling)
+    if not -0.02 <= floor < ceiling <= 1.02:
+        raise ValueError("基线通过率硬线必须满足 0 <= floor < ceiling <= 1")
+    if not (
+        floor <= baseline_preferred_range[0]
+        < baseline_preferred_range[1] <= ceiling
+    ):
+        raise ValueError("基线建议区间必须落在硬线区间内")
 
     root = Path(output_root).resolve()
     manifest = BatchStore(root).load(batch_id)
@@ -98,6 +129,12 @@ def load_pilot_runtime_gate(
         reasons.append("pilot arm 数量或身份与协议不一致")
 
     records = []
+    baseline_arm = (
+        protocol.statistics.baseline_arm
+        if protocol.statistics is not None
+        else "L0"
+    )
+    baseline_records = []
     experiments = ExperimentStore(root)
     for cell in manifest.cells:
         if cell.status != "completed":
@@ -118,6 +155,8 @@ def load_pilot_runtime_gate(
             if record.metrics.tool_calls <= 0 or not record.node_path:
                 reasons.append(f"{label} 没有工具轨迹")
             records.append(record)
+            if cell.arm == baseline_arm:
+                baseline_records.append(record)
 
     outcomes: dict[str, int] = {}
     for record in records:
@@ -141,6 +180,48 @@ def load_pilot_runtime_gate(
             f"超过 {max_projected_formal_hours:.3f}h"
         )
 
+    # 区分度门禁：基线若贴地板/天花板，配对差无法区分"编排无增益"与
+    # "基线能力不足/任务过易"，正式批次的 pass_rate 比较会空转。
+    baseline_valid = [
+        record for record in baseline_records if record.status != "error"
+    ]
+    baseline_passes = sum(
+        record.status == "pass" for record in baseline_valid
+    )
+    baseline_pass_rate = (
+        baseline_passes / len(baseline_valid) if baseline_valid else None
+    )
+    warnings: list[str] = []
+    if len(baseline_valid) < min_baseline_trials:
+        reasons.append(
+            f"基线 {baseline_arm} 有效样本 {len(baseline_valid)} "
+            f"< {min_baseline_trials}，无法评估区分度"
+        )
+    elif baseline_pass_rate is not None:
+        if baseline_pass_rate <= floor:
+            reasons.append(
+                f"基线 {baseline_arm} 通过率 {baseline_pass_rate:.1%} "
+                f"<= {baseline_pass_rate_floor:.0%}（地板），无法区分编排增益"
+                "与基线能力不足"
+            )
+        elif baseline_pass_rate >= ceiling:
+            reasons.append(
+                f"基线 {baseline_arm} 通过率 {baseline_pass_rate:.1%} "
+                f">= {baseline_pass_rate_ceiling:.0%}（天花板），"
+                "增益空间不足，配对检验功效受限"
+            )
+        elif (
+            baseline_pass_rate < baseline_preferred_range[0]
+            or baseline_pass_rate > baseline_preferred_range[1]
+        ):
+            warnings.append(
+                f"基线 {baseline_arm} 通过率 {baseline_pass_rate:.1%} "
+                "在建议区间 "
+                f"[{baseline_preferred_range[0]:.0%}, "
+                f"{baseline_preferred_range[1]:.0%}] 之外，"
+                "配对检验功效可能不足"
+            )
+
     return PilotRuntimeGate(
         ready=not reasons,
         batch_id=manifest.batch_id,
@@ -155,6 +236,14 @@ def load_pilot_runtime_gate(
         outcomes=outcomes,
         arms=tuple(sorted(set(manifest_arms))),
         block_reasons=tuple(reasons),
+        warnings=tuple(warnings),
+        baseline_arm=baseline_arm,
+        baseline_valid_trials=len(baseline_valid),
+        baseline_pass_rate=baseline_pass_rate,
+        min_baseline_trials=min_baseline_trials,
+        baseline_pass_rate_floor=baseline_pass_rate_floor,
+        baseline_pass_rate_ceiling=baseline_pass_rate_ceiling,
+        baseline_preferred_range=baseline_preferred_range,
     )
 
 

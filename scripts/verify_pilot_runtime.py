@@ -25,6 +25,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", default=".bench-experiments")
     parser.add_argument("--max-pilot-hours", type=float, default=4.0)
     parser.add_argument("--max-projected-formal-hours", type=float, default=72.0)
+    parser.add_argument("--min-baseline-trials", type=int, default=3)
+    parser.add_argument("--baseline-pass-rate-floor", type=float, default=0.0)
+    parser.add_argument("--baseline-pass-rate-ceiling", type=float, default=1.0)
+    parser.add_argument("--baseline-preferred-min", type=float, default=0.2)
+    parser.add_argument("--baseline-preferred-max", type=float, default=0.8)
     return parser.parse_args()
 
 
@@ -38,6 +43,13 @@ def main() -> int:
             protocol=protocol,
             max_pilot_hours=args.max_pilot_hours,
             max_projected_formal_hours=args.max_projected_formal_hours,
+            min_baseline_trials=args.min_baseline_trials,
+            baseline_pass_rate_floor=args.baseline_pass_rate_floor,
+            baseline_pass_rate_ceiling=args.baseline_pass_rate_ceiling,
+            baseline_preferred_range=(
+                args.baseline_preferred_min,
+                args.baseline_preferred_max,
+            ),
         )
     except (FileNotFoundError, OSError, TypeError, ValueError) as exc:
         print(json.dumps({"ready": False, "error": str(exc)}, ensure_ascii=False))

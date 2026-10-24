@@ -132,10 +132,12 @@ v5 正式 B1 完成后，B3 已按失败单元派生并完成 `96/96`、`32/32` 
 1. pilot 在 4 小时内达到 `4/4`；
 2. 四个 arm 都有真实模型调用和工具轨迹，且没有不可解释的 `error`；
 3. pilot 通过 `verify_experiment_batch.py` 全量对账；
-4. 用 pilot 的平均 Trial 耗时投影 96-Trial B1；投影超过 72 小时时先换模型或硬件，
+4. 基线 arm（协议 `statistics.baseline_arm`）至少有 3 条有效 Trial，且通过率
+   不贴 0% 地板或 100% 天花板；落在 20%–80% 建议区间之外会输出功效 warning；
+5. 用 pilot 的平均 Trial 耗时投影 96-Trial B1；投影超过 72 小时时先换模型或硬件，
    不用修改协议预算、删除 `error` 或降低重复次数来“跑完”。
 
-运行时间门禁可执行：
+区分度门禁与运行时间门禁由同一个脚本执行：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/verify_pilot_runtime.py `
@@ -145,7 +147,23 @@ v5 正式 B1 完成后，B3 已按失败单元派生并完成 `96/96`、`32/32` 
 ```
 
 只有输出 `"ready": true` 才能启动正式 B1。脚本会同时检查 pilot 完成度、协议 arm
-覆盖、真实模型调用、工具轨迹、`error`、4 小时 pilot 上限和 72 小时正式批次投影。
+覆盖、真实模型调用、工具轨迹、`error`、基线区分度、4 小时 pilot 上限和
+72 小时正式批次投影。
+
+基线样本量与区间可通过参数调整（默认 3 条、0%/100% 硬线、20%–80% 建议
+区间）：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/verify_pilot_runtime.py `
+  --batch-id <pilot-batch-id> `
+  --protocol <protocol-json> `
+  --min-baseline-trials 3 `
+  --baseline-pass-rate-floor 0 `
+  --baseline-pass-rate-ceiling 1 `
+  --baseline-preferred-min 0.2 `
+  --baseline-preferred-max 0.8 `
+  --out .bench-experiments
+```
 
 当前 v6 pilot `m9-local-qwen25-7b-pilot-live-r1` 虽然完成 `4/4`、用时 1.237 小时、
 投影 29.697 小时，但结果是 3 个 `fail`、1 个 `error`，门禁返回 `ready=false`：
@@ -171,6 +189,12 @@ v7 live pilot 报告 SHA256 为
 均有真实模型调用和工具轨迹；运行门禁返回 `ready=true`，用时 0.261 小时，
 96-Trial 投影 6.258 小时。正式 B1 固定使用
 `m9-local-qwen25-3b-temp0-512-formal-b1-live-r1`。
+
+> [!IMPORTANT]
+> 上段描述的是区分度门禁加入前的历史判定，v8 批次已冻结不重跑。按当前
+> 门禁复验，该 pilot 的 L0 只有 1 条有效 Trial 且通过率为 0%，会返回
+> `ready=false`（"基线 L0 有效样本 1 < 3"）。这正是 v8 正式批次四个 arm
+> 全 0%、数据无区分力的源头；新协议必须先补足基线样本并让基线脱离地板。
 
 复验 v8 pilot：
 
