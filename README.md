@@ -211,9 +211,10 @@ $verify = @("python", "-m", "pytest", "-q") | ConvertTo-Json -Compress
 
 复现：`uv run python bench/run_curve.py --tasks 988fccb a746b81 --repeats 3`（**真花钱、不进 CI**），归档在 `.bench-work/`（不入库）。
 
-### 正式批次结论（2026-10-24）
+### 正式批次结论（结论日期 2026-10-24）
 
-**口径**：v5 B1 授权分析 + v5/v8 B1/B3 四批次 384 条 Run Record 全量对账。
+**口径**：v5 B1（采集 2026-10-23）授权分析 + v5/v8 B1/B3 四批次
+（2026-10-23 至 2026-10-24）384 条 Run Record 全量对账。
 只有 v5 B1 满足 `analysis_authorized=true`；v8 B1 被 L3 有效样本门禁挡住，
 v8 B3 存在 17 个截断 `error`。四批次全部对账通过，但对账 ≠ 授权分析。
 

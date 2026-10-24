@@ -490,7 +490,7 @@ M9 不得用当前 8 个任务的单次结果替代预注册实验。
 | v5 × v8 跨模型报告 | 已生成并冻结 | `cross-model-20261024T123015Z-c5d7fb84`；两个批次独立分析，`cross_model_inferential_claim=false` | 保留描述性结论；不自动挑选“最佳模型” |
 | NVIDIA v4 确认性批次 | 容量阻塞 | 新的连续真实 pilot 满足恢复门槛，且之后 B1/B3 全量对账通过 | 保持暂停；只有 `verify_capacity_gate.py` 返回 `ready=true` 才另案恢复 |
 | 统计声明 | 机制已完成，等待有区分度的数据 | 单一模型达到预注册样本量，`analysis_authorized=true`，区间和检验支持明确方向 | 下一个通过 pilot 门禁的协议完成正式批次后按协议分析；`no_significant_difference` 不升级成优劣结论 |
-| 基线区分度门禁 | 已实现并回溯生效 | `verify_pilot_runtime.py` 检查基线 arm 有效样本 ≥3、通过率不贴 0%/100%，并对 20%–80% 建议区间输出功效 warning；v8 历史 pilot 复验返回 `ready=false` | 新协议 pilot 必须先通过该门禁；失败时调任务难度、模型或任务集，不消耗正式 Run Record 配额 |
+| 基线区分度门禁 | 已实现并回溯生效 | `verify_pilot_runtime.py` 检查基线 arm 有效样本 ≥3、通过率不贴 0%/100%，并对 20%–80% 建议区间输出功效 warning；v8 历史 pilot 复验返回 `ready=false`，且该输入输出对已固化为 `test_pilot_runtime.py` 回归测试（归档缺失时 skip） | 新协议 pilot 必须先通过该门禁；失败时调任务难度、模型或任务集，不消耗正式 Run Record 配额 |
 | 最终发布验收 | 已通过 | 2026-10-24：单测 1610 passed / 4 skipped；集成 37 passed / 16 skipped；Ruff、`uv lock --check`、Bandit（app）、离线 eval、红队 200 例 100%/100%、`import app.main`、`check_no_source_patch`、v8 B1/B3 批次对账、Compose 重建后 `/dashboard/api/experiments` 与 Run Record 200 且数字一致 | 已冻结；后续改动需重新验收 |
 | 提交与交付 | 工作区未收口 | 实验台改动单独提交，不夹带用户既有飞书修改；提交后工作区状态可复核 | 发布验收通过后提交，不 push、不合并、不公网发布，除非另行授权 |
 

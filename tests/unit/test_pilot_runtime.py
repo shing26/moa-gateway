@@ -8,6 +8,8 @@ from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from bench.experiment import (
     BatchRunner,
     BatchStore,
@@ -21,6 +23,11 @@ from bench.experiment import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = PROJECT_ROOT / "scripts" / "verify_pilot_runtime.py"
 PROTOCOL = PROJECT_ROOT / "bench/protocols/multi-agent-first-batch-v6-local.json"
+ARCHIVE_ROOT = PROJECT_ROOT / ".bench-experiments"
+ARCHIVE_V8_PILOT = "m9-local-qwen25-3b-temp0-512-pilot-live-r1"
+ARCHIVE_V8_PROTOCOL = (
+    PROJECT_ROOT / "bench/protocols/multi-agent-first-batch-v8-local.json"
+)
 
 
 class PilotExecutor:
@@ -409,3 +416,25 @@ def test_verify_pilot_runtime_cli_returns_machine_readable_decision(
     assert payload["ready"] is True
     assert payload["batch_id"] == "pilot-runtime"
     assert payload["block_reasons"] == []
+
+
+def test_pilot_runtime_gate_replays_frozen_v8_pilot_as_not_distinct(
+) -> None:
+    """回溯资产：v8 历史 pilot 只有 1 条 L0 且全 fail，门禁必须挡下。"""
+
+    if not (ARCHIVE_ROOT / "_batches" / ARCHIVE_V8_PILOT).is_dir():
+        pytest.skip("本地实验归档不可用")
+
+    result = load_pilot_runtime_gate(
+        ARCHIVE_ROOT,
+        batch_id=ARCHIVE_V8_PILOT,
+        protocol=load_protocol(ARCHIVE_V8_PROTOCOL),
+    )
+
+    assert result.ready is False
+    assert result.baseline_arm == "L0"
+    assert result.baseline_valid_trials == 1
+    assert result.baseline_pass_rate == 0.0
+    assert any(
+        "基线 L0 有效样本 1 < 3" in reason for reason in result.block_reasons
+    )
