@@ -352,6 +352,111 @@ class GitHubClient:
             sha=str(body.get("sha") or ""),
         )
 
+    # ── 写侧（ADR-030）：只做建分支 / 建 commit / 开 PR ───────────────────
+
+    async def create_ref(
+        self,
+        repo: GitHubRepo,
+        branch: str,
+        base_sha: str,
+    ) -> dict[str, Any]:
+        """从 ``base_sha`` 建一个分支。已存在时 GitHub 返回 422，如实抛出。"""
+        resp = await self._client.post(
+            f"/repos/{repo.owner}/{repo.name}/git/refs",
+            json={"ref": f"refs/heads/{branch}", "sha": base_sha},
+        )
+        resp.raise_for_status()
+        return dict(resp.json())
+
+    async def create_commit(
+        self,
+        repo: GitHubRepo,
+        *,
+        base_sha: str,
+        branch: str,
+        message: str,
+        files: list[dict[str, str]],
+    ) -> str:
+        """用 Git Data API 建一个 commit，返回新 commit sha。
+
+        ``files`` 每项含 ``path`` / ``content_b64``；删除的文件用 ``sha=None``
+        表达。这里**不**走 Contents API：它一次只能写一个文件，多文件改动会变成
+        多个 commit，而"一次变更一个 commit"是变更包可复核的前提。
+        """
+        base_commit = await self._client.get(
+            f"/repos/{repo.owner}/{repo.name}/git/commits/{base_sha}"
+        )
+        base_commit.raise_for_status()
+        base_tree = str(dict(base_commit.json()).get("tree", {}).get("sha") or "")
+        if not base_tree:
+            raise RuntimeError(f"无法读取 base commit 的 tree: {base_sha}")
+
+        entries: list[dict[str, Any]] = []
+        for item in files:
+            path = str(item.get("path") or "")
+            content = item.get("content_b64")
+            if content is None:
+                # 删除：tree 项不带 sha 即表示该路径不存在
+                entries.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
+                continue
+            blob = await self._client.post(
+                f"/repos/{repo.owner}/{repo.name}/git/blobs",
+                json={"content": content, "encoding": "base64"},
+            )
+            blob.raise_for_status()
+            entries.append(
+                {
+                    "path": path,
+                    "mode": "100644",
+                    "type": "blob",
+                    "sha": str(dict(blob.json()).get("sha") or ""),
+                }
+            )
+
+        tree_resp = await self._client.post(
+            f"/repos/{repo.owner}/{repo.name}/git/trees",
+            json={"base_tree": base_tree, "tree": entries},
+        )
+        tree_resp.raise_for_status()
+        tree_sha = str(dict(tree_resp.json()).get("sha") or "")
+
+        commit_resp = await self._client.post(
+            f"/repos/{repo.owner}/{repo.name}/git/commits",
+            json={"message": message, "tree": tree_sha, "parents": [base_sha]},
+        )
+        commit_resp.raise_for_status()
+        commit_sha = str(dict(commit_resp.json()).get("sha") or "")
+
+        # 分支 ref 推进到新 commit（非 force：GitHub 要求 fast-forward）
+        ref_resp = await self._client.patch(
+            f"/repos/{repo.owner}/{repo.name}/git/refs/heads/{branch}",
+            json={"sha": commit_sha, "force": False},
+        )
+        ref_resp.raise_for_status()
+        return commit_sha
+
+    async def create_pull_request(
+        self,
+        repo: GitHubRepo,
+        *,
+        branch: str,
+        base_branch: str,
+        title: str,
+        body: str,
+    ) -> str:
+        """开 PR，返回 html_url。默认不创建 draft：是否 ready 由人决定。"""
+        resp = await self._client.post(
+            f"/repos/{repo.owner}/{repo.name}/pulls",
+            json={
+                "head": branch,
+                "base": base_branch,
+                "title": title,
+                "body": body,
+            },
+        )
+        resp.raise_for_status()
+        return str(dict(resp.json()).get("html_url") or "")
+
     @staticmethod
     def from_env() -> GitHubClient:
         from app.config import settings

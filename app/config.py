@@ -255,6 +255,22 @@ class Settings:
             os.getenv("CODE_REVIEW_FINDING_FEEDBACK_ENABLED"), True
         )
 
+        # ── 变更管线（ADR-030）────────────────────────────────────────────
+        # 默认关：推送分支/开 PR 是外部写操作，必须显式开启且经人工审批。
+        self.change_agent_push_enabled: bool = _parse_bool(
+            os.getenv("CHANGE_AGENT_PUSH_ENABLED"), False
+        )
+        # 变更 agent 的模型。留空则管线以 model_not_configured 终止，
+        # 不会静默降级成本机小模型（ADR-030 决策 8）。
+        self.change_agent_model: str = os.getenv("CHANGE_AGENT_MODEL", "")
+        self.change_agent_verify_command: str = os.getenv(
+            "CHANGE_AGENT_VERIFY_COMMAND",
+            self.code_review_verify_command,
+        )
+        self.change_agent_base_branch: str = os.getenv(
+            "CHANGE_AGENT_BASE_BRANCH", "main"
+        )
+
         # ── 合并通道（ADR-021）────────────────────────────────────────────
         # 默认关：合并是有外部后果的写操作，必须显式开启才生效。
         self.code_review_merge_enabled: bool = _parse_bool(

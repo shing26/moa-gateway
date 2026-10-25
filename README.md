@@ -373,6 +373,24 @@ moa-gateway/
 - 审查 finding 以候选、最终发布、Critic 丢弃和 superseded 状态落库；飞书逐条卡固定提供 `accepted_actionable` / `accepted_non_actionable` / `false_positive` / `duplicate` / `already_known` 五态。所有 finding 完成人工标注后，审批卡才允许写回 GitHub；写回固定为 `COMMENT`，不会自动批准或合并。
 - 固定评测语料、R0/R1/R1+I runner 与报告器见 [review-value-loop.md](docs/review-value-loop.md) 与 [review_pr_corpus.json](evals/datasets/review_pr_corpus.json)。当前尚未产生质量结论；这些离线历史样本也不是持续用户规模。
 
+### 写侧：受治理的变更 agent（ADR-030）
+
+审查链路只读，agent 改完的代码出不了工作区。`apps/code_review_pipeline/change/`
+补上了出口，顺序固定为**验证 → 审批 → 推送**：
+
+- 变更包（`ChangeBundle`）是纯数据：base sha、分支名、文件级 diff、patch 哈希、
+  验证命令与退出码。生成过程不触碰远端。
+- 验证失败、无改动、未配置验证命令、未配置模型，任一成立即终止，不产出可推送的包。
+- `CHANGE_AGENT_PUSH_ENABLED` 默认 false：默认路径只产出变更包，不建分支、不开 PR。
+- 开启推送后仍需人工审批；远端写入只做建分支、建 commit、开 PR，不删分支、不 force push。
+
+```powershell
+.venv\Scripts\python.exe scripts\run_change_demo.py          # 验证通过，产出变更包
+.venv\Scripts\python.exe scripts\run_change_demo.py --fail   # 验证失败，出口被挡住
+```
+
+CI 排障与 issue 修复共用这条管线，只差输入采集器——不是两套实现。
+
 ---
 
 ## 🧪 质量保障与门禁
