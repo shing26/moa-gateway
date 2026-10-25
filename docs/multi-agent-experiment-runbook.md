@@ -463,6 +463,57 @@ Issue 分诊复用同一条 pilot 门禁轨道，任务定义在
    token；
 3. 换更强模型重跑 pilot 前不改任务集——基线已在带内，任务难度校准完成。
 
+### v3 L0-only 协议（已冻结）
+
+按处置方向 2 建立独立协议 `bench/protocols/issue-triage-v3-l0-local.json`
+（`protocol_hash=24e74eab36cb3d487f95110a5bbdc1c922e17da6c95584b0ac1546b052cfd6d5`）：
+任务集、模型、预算与判定口径与 v1 完全一致；唯一差异是 arms 只声明 L0，
+并省略 statistics 块——L0-only 没有比较对象，`analysis_authorized` 恒为
+false 是正确输出，不是缺陷。多档重进须建新协议并重过 pilot 门禁，不得在
+v3 上加 arm。
+协议另带 `scope` 块（`multi_arm_comparison=false`、判定字段 category+route、
+priority 仅记录），随每条 Run Record 的 metadata 落盘，下游报告无须回读
+runbook 就能看到结论边界。
+
+pilot 与门禁命令：
+
+```powershell
+.venv\Scripts\python.exe bench\run_batch.py batch `
+  --protocol bench\protocols\issue-triage-v3-l0-local.json `
+  --phase pilot --batch-id issue-triage-v3-l0-pilot-live-r1 `
+  --mode live --out .bench-experiments
+.venv\Scripts\python.exe scripts\verify_pilot_runtime.py `
+  --batch-id issue-triage-v3-l0-pilot-live-r1 `
+  --protocol bench\protocols\issue-triage-v3-l0-local.json
+```
+
+门禁判据不变：L0 有效样本 ≥3、通过率不贴地板/天花板、每条记录有真实模型
+调用与工具轨迹。pilot 通过后直接跑 formal（8 任务 × 1 arm × 3 重复 = 24
+Trial）；结论口径固定为"该配置下 Issue 分诊 L0 基线通过率与成本"，
+不生成任何多档比较声明。
+
+### v3 批次结果（2026-10-25）
+
+- `issue-triage-v3-l0-pilot-live-r2`：8/8 Trial、0 error，基线 L0 = 3/8
+  （37.5%，与 v2-r1 一致，在 20%–80% 建议区间内）；
+  `verify_pilot_runtime.py` 返回 `ready=true`，零拦截、零警告，formal 投影
+  0.101h。（r1 批次号被一次 mock 冒烟占用且协议哈希为加 scope 块前的旧值，
+  按不可覆盖规则顺延为 r2；不是隐藏失败。）
+- `issue-triage-v3-l0-formal-b1-live-r1`：24/24 Trial、8/8 单元、0 缺口、
+  0 error，全量对账通过，报告 SHA256 为
+  `63f20e71d9641766d77472818ff1405f859c8c661d62067830f6313b3e2fcbe8`。
+  L0 通过率 6/24 = **25%**，平均 1,938.7 token/次，总 46,529 token。
+  `analysis_authorized=false`、`statistical_claims=false`——L0-only 无比较
+  对象，这是 scope 块声明的正确输出。
+- 逐字段归因（category/route 判决，priority 仅记录）：category 20/24
+  （83.3%）、route 9/24（37.5%）、priority 8/24（记录值）。失败集中在
+  route：t2/t8 各 3 次把可自动处理的 docs/feature 误路由 `human`；t7 三次
+  category 误判（bug → 其他）。温度 0 下同任务内输出高度一致（t7/t8 九条
+  结果字段完全相同），25% 是该配置的稳定行为，不是采样噪声。
+- 结论口径（与 scope.claim 一致）：**qwen2.5:3b + 512 上限下，Issue 分诊
+  L0 基线通过率 25%、单次约 1.9k token**；route 判别是当前主要失败面。
+  该结论不外推到其它模型，也不构成任何多档比较声明。
+
 ### 换模型的预注册假设
 
 换模型是可证伪实验，不是调参。执行前先写死以下三条，pilot 结果对照裁决：

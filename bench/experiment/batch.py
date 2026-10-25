@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
@@ -244,22 +245,31 @@ class BatchStore:
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        try:
-            os.replace(temp, path)
-        finally:
-            if temp.exists():
-                temp.unlink()
+        _replace_with_windows_retry(temp, path)
 
     @staticmethod
     def _atomic_text(path: Path, text: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         temp.write_text(text.rstrip() + "\n", encoding="utf-8")
-        try:
-            os.replace(temp, path)
-        finally:
-            if temp.exists():
-                temp.unlink()
+        _replace_with_windows_retry(temp, path)
+
+
+def _replace_with_windows_retry(temp: Path, path: Path) -> None:
+    # Windows 上目标文件若被杀毒/索引器短暂占用，os.replace 会抛
+    # PermissionError；短重试保持原子语义，超时才让真实错误冒出。
+    try:
+        for attempt in range(20):
+            try:
+                os.replace(temp, path)
+                return
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.01)
+    finally:
+        if temp.exists():
+            temp.unlink()
 
 
 @dataclass(frozen=True)

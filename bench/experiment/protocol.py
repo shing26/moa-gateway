@@ -386,6 +386,50 @@ class ProtocolReporting:
 
 
 @dataclass(frozen=True)
+class ProtocolScope:
+    """协议级的结论边界声明，随 Run Record 落盘，防止 L0-only 被读成多档比较。"""
+
+    claim: str
+    decision_fields: tuple[str, ...]
+    recorded_only: tuple[str, ...]
+    multi_arm_comparison: bool
+
+    def __post_init__(self) -> None:
+        if not self.claim.strip():
+            raise ValueError("scope.claim 不能为空")
+        if not self.decision_fields:
+            raise ValueError("scope.decision_fields 不能为空")
+        overlap = set(self.decision_fields) & set(self.recorded_only)
+        if overlap:
+            raise ValueError(
+                f"scope 字段不能同时判决和仅记录: {', '.join(sorted(overlap))}"
+            )
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ProtocolScope":
+        return cls(
+            claim=_text(payload, "claim"),
+            decision_fields=tuple(
+                _text_item(item, "decision_fields")
+                for item in _sequence(payload, "decision_fields")
+            ),
+            recorded_only=tuple(
+                _text_item(item, "recorded_only")
+                for item in _sequence(payload, "recorded_only")
+            ),
+            multi_arm_comparison=_boolean(payload, "multi_arm_comparison"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "claim": self.claim,
+            "decision_fields": list(self.decision_fields),
+            "recorded_only": list(self.recorded_only),
+            "multi_arm_comparison": self.multi_arm_comparison,
+        }
+
+
+@dataclass(frozen=True)
 class ProtocolStatistics:
     """Statistical analysis contract frozen before the confirmatory batch."""
 
@@ -482,6 +526,7 @@ class ExperimentProtocol:
     exclusions: ProtocolExclusions
     reporting: ProtocolReporting
     statistics: ProtocolStatistics | None = None
+    scope: ProtocolScope | None = None
 
     def __post_init__(self) -> None:
         task_ids = [task.task_id for task in self.tasks]
@@ -494,9 +539,18 @@ class ExperimentProtocol:
         unknown = tuple(name for name in declared_arm_names if name not in registered)
         if unknown:
             raise ValueError(f"protocol 包含未登记 arm: {', '.join(unknown)}")
-        missing = tuple(name for name in arm_names() if name not in declared_arm_names)
-        if missing:
-            raise ValueError(f"protocol 缺少已登记 arm: {', '.join(missing)}")
+        # 协议允许只登记 arm 子集：L0-only 批次用于比较对象被有效样本
+        # 门禁移除后，单独建立基线证据（issue-triage v3）。其余调用方以
+        # 本协议的 arms 为矩阵边界，而不是注册表全量。
+        if not declared_arm_names:
+            raise ValueError("protocol.arms 不能为空")
+        if self.scope is not None:
+            # 声明了边界就必须自洽：不做多档比较的协议不得携带 statistics，
+            # 反之亦然——两者并存会让报告层出现互相矛盾的授权信号。
+            if self.scope.multi_arm_comparison != (self.statistics is not None):
+                raise ValueError(
+                    "scope.multi_arm_comparison 与 statistics 块必须同真或同缺"
+                )
 
     def identity_payload(self) -> dict[str, Any]:
         payload = {
@@ -515,6 +569,8 @@ class ExperimentProtocol:
         }
         if self.statistics is not None:
             payload["statistics"] = self.statistics.to_dict()
+        if self.scope is not None:
+            payload["scope"] = self.scope.to_dict()
         return payload
 
     @property
@@ -603,6 +659,8 @@ class ExperimentProtocol:
             "exclusions": self.exclusions.to_dict(),
             "reporting": self.reporting.to_dict(),
         }
+        if self.scope is not None:
+            metadata["scope"] = self.scope.to_dict()
         if budget_tier == B3_TIER:
             config.update(
                 {
@@ -640,6 +698,10 @@ class ExperimentProtocol:
             if statistics_payload is not None
             else None
         )
+        scope_payload = payload.get("scope")
+        if scope_payload is not None and not isinstance(scope_payload, dict):
+            raise TypeError("protocol.scope 必须是对象")
+        scope = ProtocolScope.from_dict(scope_payload) if scope_payload is not None else None
         protocol = cls(
             schema_version=schema_version,
             protocol_id=_text(payload, "protocol_id"),
@@ -660,6 +722,7 @@ class ExperimentProtocol:
             exclusions=ProtocolExclusions.from_dict(_mapping(payload, "exclusions")),
             reporting=ProtocolReporting.from_dict(_mapping(payload, "reporting")),
             statistics=statistics,
+            scope=scope,
         )
         if not protocol.tasks:
             raise ValueError("protocol.tasks 不能为空")

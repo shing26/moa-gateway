@@ -12,6 +12,7 @@ from bench.triage import (
     run_triage_task,
     verify_triage_output,
 )
+from bench.experiment import load_protocol
 
 TASKS_DIR = (
     Path(__file__).resolve().parents[2] / "bench" / "triage" / "tasks"
@@ -71,6 +72,32 @@ def test_verify_rejects_unparseable_output() -> None:
     passed, verdict = verify_triage_output("我认为这是 bug", _task())
     assert passed is False
     assert "error" in verdict
+
+
+def test_triage_verdict_semantics_are_identical_across_v1_and_v3() -> None:
+    """runbook、v1、v3 共用同一判定实现：category+route 判决，priority 仅记录。"""
+    root = TASKS_DIR.parents[1] / "protocols"
+    for name in (
+        "issue-triage-v1-local.json",
+        "issue-triage-v3-l0-local.json",
+    ):
+        protocol = load_protocol(root / name)
+        assert protocol.scope is None or protocol.scope.decision_fields == (
+            "category",
+            "route",
+        )
+        assert protocol.scope is None or protocol.scope.recorded_only == (
+            "priority",
+        )
+    for path in sorted(TASKS_DIR.glob("*.triage.json")):
+        task = load_triage_task(path)
+        passed, verdict = verify_triage_output(
+            f'{{"category": "{task.expected_category}", "priority": "WRONG", '
+            f'"route": "{task.expected_route}"}}',
+            task,
+        )
+        assert passed is True
+        assert verdict["checks"]["priority"] is False
 
 
 @pytest.mark.asyncio

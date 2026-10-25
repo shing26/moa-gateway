@@ -295,6 +295,12 @@ v4 受上游容量阻塞
   JSON 字段中被隐藏；叙述口径（v5 授权、v8 blocked）依据批次自身报告，
   不受影响。修复后字段按批次 ID 键控，重建工件为
   `cross-model-20261024T195243Z-c50fe00e`。
+- Issue 分诊按处置方向 2 冻结 v3 L0-only 协议
+  （`issue-triage-v3-l0-local.json`，含 `scope` 块，`multi_arm_comparison=false`）。
+  `issue-triage-v3-l0-pilot-live-r2` 以基线 37.5% 通过门禁（`ready=true`）；
+  formal `issue-triage-v3-l0-formal-b1-live-r1` 完成 24/24、0 error、全量对账
+  通过，L0 通过率 25%、平均 1,938.7 token/次。失败集中在 route 判别；
+  该结论按 scope 声明仅限当前模型配置，不构成多档比较。
 
 下一步：
 

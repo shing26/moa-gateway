@@ -41,6 +41,9 @@ LOCAL_7B_TEMP0_PROTOCOL_PATH = (
 LOCAL_3B_TEMP0_512_PROTOCOL_PATH = (
     DEFAULT_PROTOCOL_PATH.parent / "multi-agent-first-batch-v8-local.json"
 )
+TRIAGE_L0_PROTOCOL_PATH = (
+    DEFAULT_PROTOCOL_PATH.parent / "issue-triage-v3-l0-local.json"
+)
 
 
 def test_default_protocol_freezes_the_first_batch() -> None:
@@ -99,6 +102,44 @@ def test_protocol_hash_is_stable_and_covers_semantic_changes() -> None:
     changed_payload["tasks"].reverse()
     changed_task_order = protocol_from_dict(changed_payload)
     assert changed_task_order.config_hash != baseline.config_hash
+
+
+def test_protocol_allows_declared_arm_subset_for_l0_only_track() -> None:
+    protocol = load_protocol(TRIAGE_L0_PROTOCOL_PATH)
+
+    assert tuple(arm.name for arm in protocol.arms) == ("L0",)
+    assert protocol.statistics is None
+
+    payload = json.loads(TRIAGE_L0_PROTOCOL_PATH.read_text(encoding="utf-8"))
+    payload["arms"] = []
+    with pytest.raises(ValueError, match="protocol.arms 不能为空"):
+        protocol_from_dict(payload)
+
+    payload["arms"] = [
+        {"name": "L9", "version": "v1", "description": "未登记的档位"}
+    ]
+    with pytest.raises(ValueError, match="未登记 arm"):
+        protocol_from_dict(payload)
+
+
+def test_protocol_scope_must_match_statistics_presence() -> None:
+    payload = json.loads(TRIAGE_L0_PROTOCOL_PATH.read_text(encoding="utf-8"))
+    payload["scope"]["multi_arm_comparison"] = True
+    with pytest.raises(ValueError, match="statistics"):
+        protocol_from_dict(payload)
+
+    payload = json.loads(TRIAGE_L0_PROTOCOL_PATH.read_text(encoding="utf-8"))
+    payload["scope"]["recorded_only"] = ["route"]
+    with pytest.raises(ValueError, match="不能同时判决和仅记录"):
+        protocol_from_dict(payload)
+
+    changed = load_protocol(TRIAGE_L0_PROTOCOL_PATH)
+    assert changed.scope is not None
+    assert changed.scope.multi_arm_comparison is False
+    spec = changed.experiment_spec(
+        "t1-crash-on-startup", "L0", batch_id="scope-spec"
+    )
+    assert spec.metadata["scope"]["multi_arm_comparison"] is False
 
 
 def test_protocol_builds_cell_specs_with_hash_bound_identity() -> None:

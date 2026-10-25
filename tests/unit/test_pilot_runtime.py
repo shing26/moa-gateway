@@ -29,6 +29,7 @@ ARCHIVE_V8_PILOT = "m9-local-qwen25-3b-temp0-512-pilot-live-r1"
 ARCHIVE_V8_PROTOCOL = (
     PROJECT_ROOT / "bench/protocols/multi-agent-first-batch-v8-local.json"
 )
+TRIAGE_L0_PROTOCOL = PROJECT_ROOT / "bench/protocols/issue-triage-v3-l0-local.json"
 
 
 class PilotExecutor:
@@ -226,6 +227,58 @@ def test_pilot_runtime_gate_accepts_complete_evidence_and_covers_all_arms(
     assert result.outcomes == {"pass": 10, "fail": 2}
     assert result.projected_formal_trials == 96
     # 该 pilot 的 L0 只有 1 条有效样本，区分度信息本身在专用测试中验证。
+
+
+def test_pilot_runtime_gate_supports_l0_only_protocol(tmp_path: Path) -> None:
+    root = tmp_path / "experiments"
+    protocol_path = tmp_path / "protocol.json"
+    protocol = load_protocol(TRIAGE_L0_PROTOCOL)
+    protocol = replace(protocol, repeats=replace(protocol.repeats, pilot=3))
+    protocol_path.write_text(
+        json.dumps(protocol.to_dict(), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    class MixedBaselineExecutor:
+        async def execute(self, spec, trial_index: int):
+            status = "pass" if trial_index == 0 else "fail"
+            return TrialEvidence(
+                status=status,
+                node_path=("step:0:run_tests",),
+                final_text="pilot",
+                metrics=RunMetrics(
+                    llm_calls=1,
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                    tool_calls=1,
+                ),
+                evidence={"steps": [{"action": "call_tool", "tool": "run_tests"}]},
+                error="",
+            )
+
+    asyncio.run(
+        BatchRunner(ExperimentStore(root), protocol).run(
+            phase="pilot",
+            task_ids=(protocol.tasks[0].task_id,),
+            batch_id="pilot-runtime",
+            executor_factory=lambda spec: MixedBaselineExecutor(),
+        )
+    )
+
+    result = load_pilot_runtime_gate(
+        root,
+        batch_id="pilot-runtime",
+        protocol=protocol,
+        min_baseline_trials=1,
+        baseline_pass_rate_floor=0.0,
+        baseline_pass_rate_ceiling=1.0,
+        baseline_preferred_range=(0.2, 0.8),
+    )
+
+    assert result.ready is True
+    assert result.arms == ("L0",)
+    assert result.observed_trials == 3
+    assert result.baseline_pass_rate == pytest.approx(1 / 3)
 
 
 def test_pilot_runtime_gate_requires_minimum_baseline_distinction_samples(
