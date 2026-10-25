@@ -17,7 +17,7 @@
 [![Security: Bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
 
 <p align="center">
-自动化测试门禁 · <b>24</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
+自动化测试门禁 · <b>28</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
 </p>
 
 <p align="center">
@@ -192,6 +192,11 @@ $verify = @("python", "-m", "pytest", "-q") | ConvertTo-Json -Compress
 `--compare-to <baseline>/experiment.json`。完整 schema、比较语义与适配器边界见
 [multi-agent-experiment-bench.md](docs/multi-agent-experiment-bench.md)。
 
+"可验证"指机制（不可变 Run Record、预注册分析、全量对账）可被任何人复跑检查，
+不等于结论已在多配置下验证：正式批次结论目前只覆盖两个本地模型配置
+（v5/v8 均为 qwen2.5:3b，差异在 temperature 与单次输出上限），NVIDIA 端点
+批次因容量阻塞未形成可分析样本，跨模型报告固定为描述性并列、不作推断。
+
 ### 第一轮真实曲线（2026-10-19）
 
 模型 `nvidia/nemotron-3-super-120b-a12b`（免费端点，`temperature=1.0`），2 题 × 4 档 × 1 次：
@@ -234,6 +239,23 @@ v8 B3 存在 17 个截断 `error`。四批次全部对账通过，但对账 ≠ 
 落在 20%–80% 建议区间外会产生功效警告。v8 当年的 pilot 只有 1 条 L0
 样本且全 fail，若该门禁当时存在，正式批次会在授权阶段被挡下，而不是
 跑满 96 条后才发现数据没有区分力。
+
+### 第二任务域：Issue 分诊（2026-10-25 收口）
+
+分诊轨道复用同一条 pilot 门禁与 Run Record 契约，任务判定为 category+route
+全对（priority 仅记录）。三轮 pilot 各拦截一个根因（workspace 空转 → 判定口径
+含主观字段 → L2 planner 结构性失败），第四轮按 runbook 处置方向 2 冻结
+**v3 L0-only 协议**（`scope.multi_arm_comparison=false`，无比较对象时
+`analysis_authorized=false` 是正确输出）：
+
+- pilot `issue-triage-v3-l0-pilot-live-r2`：基线 37.5%，门禁 `ready=true`；
+- formal `issue-triage-v3-l0-formal-b1-live-r1`：24/24、0 error、全量对账通过，
+  **L0 通过率 25%**，平均 1,938.7 token/次；逐字段归因 category 83.3% / route 37.5%，
+  失败集中在 route 误路由 human。
+
+读法：这是**方法迁移与基线建立**，不是分诊能力宣称——25% 只属于
+qwen2.5:3b + 512 这一配置。多档重进须新协议重过门禁；主线编码任务的多智能体
+结论以 v5 B1 授权分析为终稿，不再用当前配置追加批次。
 
 ---
 
@@ -305,7 +327,7 @@ moa-gateway/
 ├── bench/       # §5.0 agent 原语 + §5.1 带工具专家 + harness + 预算 B1/B3 + 报告聚合 + 任务定义（剂量曲线实验）
 ├── delivery/    # 定位与减法清单（对外口径的单一来源）+ 交付材料摘要
 ├── docs/
-│   ├── adr/                           # ADR-002 ~ ADR-025
+│   ├── adr/                           # ADR-002 ~ ADR-029
 │   ├── archive/                       # 历史文档 9 份（未按此实施，见 archive/README.md）
 │   ├── multi-agent-collaboration.md # 协作链路架构与并发写治理说明
 │   ├── multi-agent-experiment-bench.md # Experiment/Trial/Run Record 契约与复跑语义
@@ -319,7 +341,7 @@ moa-gateway/
 
 ## 📑 核心架构决策记录 (ADR)
 
-项目所有核心演化遵循「决策先行、代码在后」原则，完整归档于 `docs/adr/`（adr-002 ~ adr-025）：
+项目所有核心演化遵循「决策先行、代码在后」原则，完整归档于 `docs/adr/`（adr-002 ~ adr-029）：
 
 | ADR 编号 | 核心决策主题 | 关键设计与约束 |
 | :---: | :--- | :--- |
@@ -377,7 +399,7 @@ GitHub Actions CI（Python 3.12）依次执行：pytest → ruff → 防源码�
 - **HITL 不跨重启**：会话状态在进程内、挂起记录在 Redis，重启后未决审批按 ADR-012 惰性作废（审计 `hitl_expired`）并告知用户——这是有意为之，要么接外部状态存储，要么承认它只在进程生命周期内有效。
 - **同会话是排队的，不是并行的**：`MoAPipeline.run` 整个请求生命周期独占该会话（先到先处理，跨会话完全并行）——同会话并发投喂过去会撞出 `invalid_state_transition` 500，现在改为排队。代价是同一会话里一条慢请求会挡住下一条（LLM 超时上限之内）；不限流的匿名请求共用同一把锁（ADR-016 §五）。
 - **OTel 是预留接口，不是链路**：全仓只有 2 个 span、未声明 exporter 依赖，设了端点也只落到 console。
-- **协作链路边界**（ADR-022）：不进意图路由、不驱动会话 FSM、checkpointer 是进程内 `InMemorySaver`、`COLLAB_LLM=litellm` 解析失败会降级规则式 mock；`depends_on` 已按依赖波次真实调度，工作区工具必须显式配置 `COLLAB_WORKSPACE_ROOT`。
+- **协作链路边界**（ADR-022）：不进意图路由、不驱动会话 FSM；checkpointer 默认是单机 SQLite（`COLLAB_CHECKPOINT_PATH`，显式注入其它实现或 `:memory:` 可覆盖），CLI 的 mock 快捷路径仍用进程内 `InMemorySaver`；`COLLAB_LLM=litellm` 解析失败会降级规则式 mock；`depends_on` 已按依赖波次真实调度，工作区工具必须显式配置 `COLLAB_WORKSPACE_ROOT`。
 - **成本量化本地不可验**：`avg_cost_usd` 恒 0（本地 Ollama 不计费）；`hitl_feedback` 4 条全是本地模拟种子，介入率无统计意义。
 - **评测没有"本次 vs 上次"的基线对比**：报告覆盖写且不入库，结论目前不回流到任何决策点——这是"改进闭环"缺失的如实记录。
 - 更完整的边界与残留项见各 ADR 的「后果 / 残留」节与 `delivery/` 文档；所有密钥经环境变量注入，`.env` / `logs/` / `data/` / `evals/reports/` 不入库。
@@ -387,5 +409,5 @@ GitHub Actions CI（Python 3.12）依次执行：pytest → ruff → 防源码�
 <div align="center">
 <sub><b>Python 3.12 · FastAPI · LangGraph · Redis · pgvector · Elasticsearch · uv</b></sub>
 <br>
-<sub>本 README 的每个定量声明都可用上文命令在本地复现（bench 曲线那条真花钱） · 架构决策归档于 docs/adr/（24 份）</sub>
+<sub>本 README 的每个定量声明都可用上文命令在本地复现（bench 曲线那条真花钱） · 架构决策归档于 docs/adr/（28 份）</sub>
 </div>
