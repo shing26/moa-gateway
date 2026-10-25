@@ -179,6 +179,38 @@ def test_push_calls_only_three_write_operations(repo: Path) -> None:
     assert result.audit["approver"] == "alice"
 
 
+def test_push_rejects_base_sha_missing_from_remote(repo: Path) -> None:
+    """本地临时 HEAD 不是远端 commit 时必须明确报错，而不是让它变成 422。"""
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    class NoCommitGitHub:
+        async def commit_exists(self, repo, sha):
+            return False
+
+        async def create_commit(self, *args, **kwargs):
+            raise AssertionError("不应在校验前建 commit")
+
+        async def create_pull_request(self, *args, **kwargs):
+            raise AssertionError("不应在校验前开 PR")
+
+        async def create_ref(self, *args, **kwargs):
+            raise AssertionError("不应在 base_sha 校验前建分支")
+
+    pipeline = ChangePipeline(
+        github=NoCommitGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+    )
+
+    import asyncio
+
+    with pytest.raises(ValueError, match="不存在于远端仓库"):
+        asyncio.run(pipeline.run(_request(), approved=True, approver="alice"))
+
+
 def test_missing_verify_command_refuses_to_export(repo: Path) -> None:
     pipeline = ChangePipeline(
         github=object(),

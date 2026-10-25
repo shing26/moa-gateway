@@ -354,6 +354,16 @@ class GitHubClient:
 
     # ── 写侧（ADR-030）：只做建分支 / 建 commit / 开 PR ───────────────────
 
+    async def commit_exists(self, repo: GitHubRepo, sha: str) -> bool:
+        """远端是否存在该 commit。404 = 不存在；其它错误照常抛出。"""
+        resp = await self._client.get(
+            f"/repos/{repo.owner}/{repo.name}/git/commits/{sha}"
+        )
+        if resp.status_code == 404:
+            return False
+        resp.raise_for_status()
+        return True
+
     async def create_ref(
         self,
         repo: GitHubRepo,

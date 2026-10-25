@@ -62,3 +62,18 @@
 - 验证命令由部署方提供（`CHANGE_AGENT_VERIFY_COMMAND`）。没有配置验证命令时，
   管线拒绝产出可推送的包——"没验证过就推"不在允许范围内。
 - 变更包只保存 diff 与哈希，不保存完整仓库快照；重建依赖受控复跑。
+
+## 落地记录（2026-10-25）
+
+在私有仓库 `shing26/aircontrol-next` 上跑通真实写侧（探针 PR 已关闭、分支已删除，
+仓库恢复原状）：
+
+- 变更包 → 验证通过 → 审批 → `create_ref` → `create_commit` → `create_pull_request`
+  全部成功，PR #1 状态 open、`mergeable=true`、1 文件 +6 行、commit message 与
+  base sha 均正确。
+- **真环境暴露了一个单测发现不了的缺陷**：首次推送用本地临时仓库的 HEAD 当
+  `base_sha`，GitHub 返回 `422`，而错误信息看起来像权限或分支问题。修复为推送前
+  用 `commit_exists` 校验远端存在性，并给出明确报错；新增回归测试
+  `test_push_rejects_base_sha_missing_from_remote`。
+- 该 token 缺 `Checks: read` 权限，`get_ci_status` 返回 403。这与写侧无关，但意味着
+  合并通道在当前 token 下读不到 CI 结论；需要补权限后才能跑通 ADR-021 的完整闭环。

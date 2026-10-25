@@ -200,6 +200,13 @@ class ChangePipeline:
                 "GitHub 客户端缺少写侧方法；dry-run 之外的操作尚不可用"
             )
         repo = _split_repo(self._repo)
+        # base_sha 必须是远端真实 commit。本地工作区的 HEAD 可能是临时克隆的
+        # 提交，GitHub 建 ref 时只会回一个 422，让人误以为是权限或分支问题。
+        if not await self._remote_has_commit(repo, bundle.base_sha):
+            raise ValueError(
+                f"base_sha 不存在于远端仓库 {self._repo}: {bundle.base_sha[:12]}…；"
+                "变更必须基于远端 commit，而不是本地临时 HEAD"
+            )
         await create_ref(repo, bundle.branch, bundle.base_sha)
         files = self._file_payload(bundle)
         await create_commit(
@@ -216,6 +223,12 @@ class ChangePipeline:
             title=bundle.title,
             body=bundle.body,
         )
+
+    async def _remote_has_commit(self, repo: Any, sha: str) -> bool:
+        probe = getattr(self._github, "commit_exists", None)
+        if probe is None:
+            return True  # 客户端不支持探测时不阻断，交给远端校验
+        return bool(await probe(repo, sha))
 
     def _file_payload(self, bundle: ChangeBundle) -> list[dict[str, str]]:
         """把变更包里的路径读成 Git Data API 需要的 base64 内容。"""
