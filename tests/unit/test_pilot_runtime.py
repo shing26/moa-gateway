@@ -483,3 +483,37 @@ def test_pilot_runtime_gate_reports_discrimination_before_validity(
         result.discrimination_block_reasons
     )
     assert "地板" in result.discrimination_block_reasons[0]
+
+
+def test_block_reasons_concatenates_discrimination_before_validity(
+    tmp_path: Path,
+) -> None:
+    """兼容字段的不变量：区分度段在前、有效性段在后，缺一不可误导。"""
+    root = tmp_path / "experiments"
+    protocol_path = tmp_path / "protocol.json"
+    protocol = _build_baseline_pilot(
+        root,
+        protocol_path,
+        pilot_repeats=3,
+        statuses_by_arm={
+            "L0": "fail",
+            "L1": "fail",
+            "L2": "error",
+            "L3": "fail",
+        },
+    )
+
+    result = load_pilot_runtime_gate(
+        root,
+        batch_id="pilot-runtime",
+        protocol=protocol,
+    )
+
+    assert result.ready is False
+    assert result.discrimination_block_reasons
+    assert result.validity_block_reasons
+    assert result.block_reasons == (
+        result.discrimination_block_reasons
+        + result.validity_block_reasons
+    )
+    assert result.block_reasons[0] == result.discrimination_block_reasons[0]
