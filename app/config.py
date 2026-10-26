@@ -271,6 +271,25 @@ class Settings:
             "CHANGE_AGENT_BASE_BRANCH", "main"
         )
 
+        # ── 受治理仓库交付（ADR-031）────────────────────────────────────
+        self.delivery_topology: str = (
+            os.getenv("DELIVERY_TOPOLOGY", "single") or "single"
+        ).strip().lower()
+        self.delivery_max_steps: int = _parse_int(
+            os.getenv("DELIVERY_MAX_STEPS"),
+            40,
+            name="DELIVERY_MAX_STEPS",
+        )
+        self.delivery_max_tokens: int = _parse_int(
+            os.getenv("DELIVERY_MAX_TOKENS"),
+            400_000,
+            name="DELIVERY_MAX_TOKENS",
+        )
+        self.delivery_run_record_dir: str = (
+            os.getenv("DELIVERY_RUN_RECORD_DIR", "data/delivery-runs")
+            or "data/delivery-runs"
+        ).strip()
+
         # ── 合并通道（ADR-021）────────────────────────────────────────────
         # 默认关：合并是有外部后果的写操作，必须显式开启才生效。
         self.code_review_merge_enabled: bool = _parse_bool(
@@ -400,6 +419,21 @@ class Settings:
                 f"CODE_REVIEW_MERGE_POLL_INTERVAL_S 必须为正整数，"
                 f"得到 {self.code_review_merge_poll_interval_s}"
             )
+        if self.delivery_topology not in {"single", "verified"}:
+            raise ValueError(
+                "DELIVERY_TOPOLOGY 只允许 single 或 verified，"
+                f"得到 {self.delivery_topology!r}"
+            )
+        if self.delivery_max_steps <= 0:
+            raise ValueError(
+                f"DELIVERY_MAX_STEPS 必须为正整数，得到 {self.delivery_max_steps}"
+            )
+        if self.delivery_max_tokens <= 0:
+            raise ValueError(
+                f"DELIVERY_MAX_TOKENS 必须为正整数，得到 {self.delivery_max_tokens}"
+            )
+        if not self.delivery_run_record_dir:
+            raise ValueError("DELIVERY_RUN_RECORD_DIR 不能为空")
         # 合并通道由**独立 worker 进程**轮询（app/merge_worker.py），网关与 worker
         # 各建一份 merge_store。无共享 DSN 时两边都是进程内存，worker 看不到网关
         # 建的记录，通道永远不动、也不报错。这是"配了却静默不生效"，所以在启动时

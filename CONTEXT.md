@@ -209,3 +209,21 @@ _Avoid_: trace_id（它不能区分同一 head 的重试）
 所有最终 Finding 都有人工 disposition 后，审批人才能批准写回。写回固定为 GitHub
 `COMMENT` review；它不是自动合并门禁，也不调用 merge API。
 _Avoid_: 自动批准、自动合并
+
+## 仓库交付
+
+**交付请求 (DeliveryRequest)**:
+一次受治理仓库交付的冻结输入，包含 repo、base SHA、分支、目标与来源引用。
+_Avoid_: prompt、任务消息
+
+**交付运行 (DeliveryRun)**:
+从实现到 PR/CI/合并证据的一次不可变运行记录。`run_id` 标识执行，`trace_id` 标识业务来源。
+_Avoid_: 日志、Trello 卡片
+
+**实现体 (Implementer)**:
+唯一默认可写工作区的 LLM 执行体。它不能推送、审批或合并。
+_Avoid_: 全权 Agent、自动合并器
+
+**复核体 (Verifier)**:
+只在 S1 实验中出现的只读执行体。它的 `approved` 只表示可进入人工推送审批。
+_Avoid_: 判决者、第二 Implementer

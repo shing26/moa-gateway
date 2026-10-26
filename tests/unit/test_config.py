@@ -33,6 +33,10 @@ def _clean_env(monkeypatch):
         "GATEWAY_ALLOW_INSECURE",
         "CODE_REVIEW_MERGE_ENABLED",
         "CODE_REVIEW_MERGE_CHANNEL",
+        "DELIVERY_TOPOLOGY",
+        "DELIVERY_MAX_STEPS",
+        "DELIVERY_MAX_TOKENS",
+        "DELIVERY_RUN_RECORD_DIR",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -265,3 +269,39 @@ def test_merge_enabled_with_shared_db_boots(monkeypatch):
 def test_merge_disabled_without_db_still_boots(monkeypatch):
     """默认关闭时不该因为没配库就拒绝启动。"""
     assert Settings().code_review_merge_enabled is False
+
+
+def test_delivery_defaults_are_single_and_bounded() -> None:
+    s = Settings()
+    assert s.delivery_topology == "single"
+    assert s.delivery_max_steps == 40
+    assert s.delivery_max_tokens == 400_000
+    assert s.delivery_run_record_dir == "data/delivery-runs"
+
+
+def test_delivery_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DELIVERY_TOPOLOGY", "verified")
+    monkeypatch.setenv("DELIVERY_MAX_STEPS", "12")
+    monkeypatch.setenv("DELIVERY_MAX_TOKENS", "9000")
+    monkeypatch.setenv("DELIVERY_RUN_RECORD_DIR", "tmp/runs")
+    s = Settings()
+    assert s.delivery_topology == "verified"
+    assert s.delivery_max_steps == 12
+    assert s.delivery_max_tokens == 9000
+    assert s.delivery_run_record_dir == "tmp/runs"
+
+
+def test_delivery_rejects_unknown_topology(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DELIVERY_TOPOLOGY", "swarm")
+    with pytest.raises(ValueError, match="DELIVERY_TOPOLOGY"):
+        Settings()
+
+
+def test_delivery_rejects_nonpositive_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DELIVERY_MAX_STEPS", "0")
+    with pytest.raises(ValueError, match="DELIVERY_MAX_STEPS"):
+        Settings()
+    monkeypatch.setenv("DELIVERY_MAX_STEPS", "40")
+    monkeypatch.setenv("DELIVERY_MAX_TOKENS", "0")
+    with pytest.raises(ValueError, match="DELIVERY_MAX_TOKENS"):
+        Settings()

@@ -3,7 +3,7 @@
 # MoA Gateway
 ### 可验证的 AI 工程：LLM 治理运行时 + 多智能体实验台
 
-仓库名保留历史写法（`Gateway` / `MoA` 两个词在正文口径里停用，理由见下）。项目本身是**一层 LLM 治理运行时**（`app/`）加**一个等预算的多智能体实验台**（`bench/`）；开发辅助（改 bug、审 PR）是任务载体，不是产品定位。
+仓库名保留历史写法（`Gateway` / `MoA` 两个词在正文口径里停用，理由见下）。项目本身是**一层 LLM 治理运行时**（`app/`）加**一个等预算的多智能体实验台**（`bench/`）；受治理的仓库交付 Agent 是当前产品负载，默认单 Implementer，只读 Verifier 是预注册实验 S1。
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688.svg)](https://fastapi.tiangolo.com/)
@@ -36,10 +36,11 @@
 > [!NOTE]
 > **这是什么、不是什么**：
 > 这个项目是**一层 LLM 治理运行时**（`app/`：拦截、审批、留痕、回归）加**一个等预算的多智能体实验台**（`bench/`：同一任务集、同一预算下把 agent 结构从 L0 加到 L3，看边际收益）。
-> 三个词在这里**停用**：
+> 这里**停用两个词**，并把“开发辅助类 Agent”收窄为受治理的交付负载：
 > - **网关**——设计文档 §2.1 判定不成立：请求进来之后是它在干活，不是转发给别人、也不替谁挡流量。"网关"会让人以为它只是中间层。仓库名是历史遗留。
 > - **多智能体系统**——PR 审查 R0 是 5 段顺序 LLM 调用；R1 再加入逐 finding 的 Critic，并把 `revise` 的一次回边送回 Report。它不是无边界 handoff 或并行调度。真有多个执行体并发分工的只有两处，且都不在产品主路径上：`app/orchestration/collaboration.py`（Supervisor + `Send` 扇出，`COLLAB_ENABLED=false`，显式入口，ADR-022）与 `bench/` 的剂量实验（L0–L3，人工跑，不进 CI，ADR-023）。
-> - **开发辅助类 Agent**——改 bug / 审 PR 是**任务载体**，它们的价值是给治理层和实验台提供真实负载，不是要做成产品。
+> - **开发辅助类 Agent**——这里指受治理的仓库交付 Agent。它默认是单 Implementer，
+>   负责改代码、验证、产出可审批的 PR；只读 Verifier 是预注册实验，不是默认拓扑。
 >
 > 对外一句话：**"我建了个实验台，测出多智能体协作在编码任务上的边际收益在第几档转负——并且我能证明我的 agent 没有在撒谎。"**
 
@@ -390,6 +391,12 @@ moa-gateway/
 ```
 
 CI 排障与 issue 修复共用这条管线，只差输入采集器——不是两套实现。
+
+### 受治理仓库交付 Agent
+
+产品入口是 `DeliveryRequest -> DeliveryRun`。S0 默认单 Implementer；所有推送仍经过
+bundle hash 与人工审批，PR 创建后进入现有合并通道。Verifier 是预注册实验 S1，
+默认关闭；CI 失败转人工，不自动修复。
 
 ---
 
