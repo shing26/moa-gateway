@@ -139,6 +139,9 @@ class ChangePipeline:
         agent: ChangeAgent | None = None,
         approval: ChangeApproval | None = None,
     ) -> ChangeResult:
+        rejected = self._preflight(request)
+        if rejected is not None:
+            return rejected
         if agent is not None:
             await agent.run(workspace=self._workspace, goal=request.goal)
         prepared = await self.prepare_bundle(request)
@@ -148,21 +151,9 @@ class ChangePipeline:
         return await self.publish_bundle(prepared.bundle, approval)
 
     async def prepare_bundle(self, request: ChangeRequest) -> ChangeResult:
-        if request.repo.strip() != self._repo:
-            raise ValueError(
-                f"request repo does not match pipeline repo: "
-                f"{request.repo!r} != {self._repo!r}"
-            )
-        if not self._verify_command:
-            return ChangeResult(
-                status=ChangeStatus.NO_VERIFY_COMMAND,
-                message="未配置验证命令；未验证的变更不允许出口（ADR-030 决策 4）",
-            )
-        if not self._model_name:
-            return ChangeResult(
-                status=ChangeStatus.MODEL_NOT_CONFIGURED,
-                message="未配置变更模型；拒绝静默降级成规则拼装（ADR-030 决策 8）",
-            )
+        rejected = self._preflight(request)
+        if rejected is not None:
+            return rejected
 
         verify = await self._verify()
         branch = _traceable_branch(request.branch, request.trace_id)
@@ -208,6 +199,24 @@ class ChangePipeline:
             message="验证通过，等待人工推送审批",
             audit=audit,
         )
+
+    def _preflight(self, request: ChangeRequest) -> ChangeResult | None:
+        if request.repo.strip() != self._repo:
+            raise ValueError(
+                f"request repo does not match pipeline repo: "
+                f"{request.repo!r} != {self._repo!r}"
+            )
+        if not self._verify_command:
+            return ChangeResult(
+                status=ChangeStatus.NO_VERIFY_COMMAND,
+                message="未配置验证命令；未验证的变更不允许出口（ADR-030 决策 4）",
+            )
+        if not self._model_name:
+            return ChangeResult(
+                status=ChangeStatus.MODEL_NOT_CONFIGURED,
+                message="未配置变更模型；拒绝静默降级成规则拼装（ADR-030 决策 8）",
+            )
+        return None
 
     async def publish_bundle(
         self,
@@ -384,7 +393,12 @@ class ChangePipeline:
                     )
                 payload.append({"path": change.path, "content_b64": None})
                 continue
-            content = target.read_bytes()
+            try:
+                content = target.read_bytes()
+            except FileNotFoundError as exc:
+                raise ChangeBundleChanged(
+                    f"file changed after bundle: {change.path}"
+                ) from exc
             digest = hashlib.sha256(content).hexdigest()
             if digest != change.after_hash:
                 raise ChangeBundleChanged(

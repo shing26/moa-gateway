@@ -812,6 +812,49 @@ def test_bundle_hash_covers_commit_metadata_and_trace(repo: Path) -> None:
     assert all(item.bundle_hash != bundle.bundle_hash for item in variants)
 
 
+@pytest.mark.parametrize(
+    ("verify_command", "model_name", "request_repo", "expected_status", "error_match"),
+    [
+        (_passing(), "test-model", "other/name", None, "request repo"),
+        ((), "test-model", "owner/name", ChangeStatus.NO_VERIFY_COMMAND, None),
+        (_passing(), "  ", "owner/name", ChangeStatus.MODEL_NOT_CONFIGURED, None),
+    ],
+)
+def test_agent_does_not_run_when_preflight_rejects(
+    repo: Path,
+    verify_command: tuple[str, ...],
+    model_name: str,
+    request_repo: str,
+    expected_status: ChangeStatus | None,
+    error_match: str | None,
+) -> None:
+    agent_calls: list[str] = []
+
+    class RecordingAgent:
+        async def run(self, *, workspace: Path, goal: str) -> str:
+            agent_calls.append(goal)
+            return ""
+
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=verify_command,
+        model_name=model_name,
+    )
+    request = replace(_request(), repo=request_repo)
+
+    import asyncio
+
+    if error_match is not None:
+        with pytest.raises(ValueError, match=error_match):
+            asyncio.run(pipeline.run(request, agent=RecordingAgent()))
+    else:
+        result = asyncio.run(pipeline.run(request, agent=RecordingAgent()))
+        assert result.status is expected_status
+    assert agent_calls == []
+
+
 def test_prepare_bundle_has_no_remote_side_effect(repo: Path) -> None:
     (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
     calls: list[str] = []
@@ -921,6 +964,45 @@ def test_publish_rejects_a_bundle_changed_after_prepare(repo: Path) -> None:
     prepared = asyncio.run(pipeline.prepare_bundle(_request()))
     assert prepared.bundle is not None
     (repo / "app.py").write_text("def add(a, b):\n    return 999\n", encoding="utf-8")
+
+    with pytest.raises(ChangeBundleChanged, match="changed after bundle"):
+        asyncio.run(
+            pipeline.publish_bundle(
+                prepared.bundle,
+                ChangeApproval(
+                    approver="alice",
+                    trace_id="trace-1",
+                    bundle_hash=prepared.bundle.bundle_hash,
+                ),
+            )
+        )
+
+
+def test_publish_rejects_a_bundle_file_deleted_after_prepare(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    class ExplodingGitHub:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"missing file must not touch GitHub: {name}")
+
+    async def record_approval(**kwargs):
+        return None
+
+    pipeline = ChangePipeline(
+        github=ExplodingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+        approval_recorder=record_approval,
+    )
+
+    import asyncio
+
+    prepared = asyncio.run(pipeline.prepare_bundle(_request()))
+    assert prepared.bundle is not None
+    (repo / "app.py").unlink()
 
     with pytest.raises(ChangeBundleChanged, match="changed after bundle"):
         asyncio.run(
