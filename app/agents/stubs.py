@@ -314,6 +314,25 @@ async def execute_tool_loop(
             current_messages = result.messages
             result = await chat_with_tools(current_messages, schemas)
             usage = usage.add_metrics(getattr(llm, "last_metrics", None))
+        if not result.tool_calls:
+            steps.append(
+                ToolLoopStep(
+                    index=len(steps) + 1,
+                    action="finish",
+                    tool="",
+                    arguments={},
+                    observation=str(result.content or "")[:200],
+                    outcome="",
+                    elapsed_ms=0.0,
+                )
+            )
+            return ToolLoopResult(
+                status="completed",
+                content=str(result.content or ""),
+                steps=tuple(steps),
+                usage=usage,
+                stop_reason="model finished",
+            )
         pending = ", ".join(
             str((call.get("function") or {}).get("name", ""))
             for call in result.tool_calls

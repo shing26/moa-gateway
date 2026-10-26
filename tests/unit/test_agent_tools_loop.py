@@ -90,6 +90,29 @@ async def test_tool_loop_caps_at_three_rounds(envelope) -> None:
 
 
 @pytest.mark.asyncio
+async def test_final_text_after_three_tool_rounds_has_no_step_limit_marker(
+    envelope,
+) -> None:
+    from app.agents.stubs import GeneralAgent
+
+    final_text = "finished after three rounds"
+    llm = FakeToolLLM(
+        [
+            [_tool_call("c1", "current_time", {})],
+            [_tool_call("c2", "current_time", {})],
+            [_tool_call("c3", "current_time", {})],
+            final_text,
+        ]
+    )
+
+    result = await GeneralAgent(llm=llm).execute(envelope)
+
+    assert result == final_text
+    assert llm.calls == 4
+    assert "工具调用已达上限" not in result
+
+
+@pytest.mark.asyncio
 async def test_unknown_tool_returns_error_through_tool_loop(envelope) -> None:
     from app.agents.stubs import CoderAgent
 

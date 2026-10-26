@@ -110,3 +110,44 @@ async def test_tool_loop_stops_on_token_budget(tmp_path: Path) -> None:
 
     assert result.status == "budget_exhausted"
     assert result.usage.total_tokens == 30
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_completes_when_final_text_arrives_after_max_steps(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLM(
+        [
+            [_call("1", "read_file", {"path": "x.txt"})],
+            [_call("2", "read_file", {"path": "x.txt"})],
+            [_call("3", "read_file", {"path": "x.txt"})],
+            "finished after three rounds",
+        ]
+    )
+    (tmp_path / "x.txt").write_text("x\n", encoding="utf-8")
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read three times"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=3,
+        max_tokens=100,
+    )
+
+    assert result.status == "completed"
+    assert result.content == "finished after three rounds"
+    assert result.stop_reason == "model finished"
+    assert result.usage.llm_calls == 4
+    assert [step.action for step in result.steps] == [
+        "call_tool",
+        "call_tool",
+        "call_tool",
+        "finish",
+    ]
