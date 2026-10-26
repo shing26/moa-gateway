@@ -25,10 +25,10 @@ class WalDeliveryAudit:
                 agent_output=current.value,
                 intent="delivery_lifecycle",
                 extra={
+                    **detail,
                     "run_id": run.run_id,
                     "from_state": previous.value if previous else "",
                     "to_state": current.value,
-                    **detail,
                 },
             )
         )

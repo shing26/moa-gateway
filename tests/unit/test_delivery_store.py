@@ -259,3 +259,37 @@ async def test_audit_adapter_writes_transition_fields(monkeypatch, tmp_path: Pat
     assert entry.extra["from_state"] == "implementing"
     assert entry.extra["to_state"] == "checking"
     assert entry.extra["action"] == "verify"
+
+
+@pytest.mark.asyncio
+async def test_audit_adapter_keeps_canonical_transition_fields_when_detail_collides(
+    monkeypatch,
+) -> None:
+    entries = []
+
+    async def capture(entry):
+        entries.append(entry)
+
+    monkeypatch.setattr("apps.code_review_pipeline.delivery.audit.record_audit", capture)
+    audit = WalDeliveryAudit()
+    previous = DeliveryRunState.IMPLEMENTING
+    current = DeliveryRunState.CHECKING
+
+    await audit.record(
+        run=_run(current),
+        previous=previous,
+        current=current,
+        detail={
+            "run_id": "forged-run",
+            "from_state": "forged-from",
+            "to_state": "forged-to",
+            "action": "verify",
+        },
+    )
+
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.extra["run_id"] == "run-1"
+    assert entry.extra["from_state"] == "implementing"
+    assert entry.extra["to_state"] == "checking"
+    assert entry.extra["action"] == "verify"
