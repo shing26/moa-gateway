@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,15 +78,27 @@ class ChangeBundle:
 
     @property
     def bundle_hash(self) -> str:
-        payload = (
-            self.base_sha,
-            self.branch,
-            self.title,
-            self.patch_hash,
-            str(self.verify_exit_code),
-            ",".join(self.verify_command),
+        # Approval binds the exported content and verification provenance.
+        # Canonical JSON avoids delimiter ambiguity and ordering-dependent hashes.
+        payload = {
+            "base_sha": self.base_sha,
+            "branch": self.branch,
+            "title": self.title,
+            "body": self.body,
+            "files": [item.to_dict() for item in self.files],
+            "patch_hash": self.patch_hash,
+            "verify_command": list(self.verify_command),
+            "verify_exit_code": self.verify_exit_code,
+            "model": self.model,
+            "trace_id": self.trace_id,
+        }
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
         )
-        return hashlib.sha256("\x00".join(payload).encode("utf-8")).hexdigest()
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -158,11 +171,12 @@ def build_change_bundle(
         _git(["add", "-N", "--", *untracked], cwd=root, check=False)
 
     # --no-color 保证 diff 可哈希；--binary 让二进制改动也出现在 patch 里。
-    diff = _git(
+    full_diff = _git(
         ["diff", "--no-color", "--binary", "HEAD"],
         cwd=root,
         check=False,
     ).stdout
+    diff = full_diff
     if len(diff) > _MAX_DIFF_CHARS:
         diff = diff[:_MAX_DIFF_CHARS] + "\n…（diff 已截断）"
 
@@ -210,7 +224,7 @@ def build_change_bundle(
         body=body,
         files=tuple(files),
         patch=diff,
-        patch_hash=_sha256_text(diff),
+        patch_hash=_sha256_text(full_diff),
         verify_command=verify_command,
         verify_exit_code=verify_exit_code,
         verify_output=verify_output,

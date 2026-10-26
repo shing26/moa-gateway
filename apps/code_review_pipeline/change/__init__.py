@@ -6,6 +6,8 @@ from apps.code_review_pipeline.change.bundle import (
     build_change_bundle,
 )
 from apps.code_review_pipeline.change.pipeline import (
+    ApprovalRecorder,
+    ChangeApproval,
     ChangePipeline,
     ChangeRequest,
     ChangeResult,
@@ -13,6 +15,8 @@ from apps.code_review_pipeline.change.pipeline import (
 )
 
 __all__ = [
+    "ApprovalRecorder",
+    "ChangeApproval",
     "ChangeBundle",
     "ChangePipeline",
     "ChangeRequest",

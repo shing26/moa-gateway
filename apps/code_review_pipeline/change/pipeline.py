@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import logging
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass, field
@@ -45,6 +47,14 @@ class ChangeRequest:
 
 
 @dataclass(frozen=True)
+class ChangeApproval:
+    approver: str
+    trace_id: str
+    bundle_hash: str
+    decision: str = "approve"
+
+
+@dataclass(frozen=True)
 class ChangeResult:
     status: ChangeStatus
     bundle: ChangeBundle | None = None
@@ -70,6 +80,17 @@ class ChangeAgent(Protocol):
     async def run(self, *, workspace: Path, goal: str) -> str: ...
 
 
+class ApprovalRecorder(Protocol):
+    async def __call__(
+        self,
+        *,
+        task_id: str,
+        repo: str,
+        operator: str,
+        decision: str,
+    ) -> None: ...
+
+
 class ChangePipeline:
     """把 agent 改动变成变更包；推送需要显式开关 + 审批记录。"""
 
@@ -83,6 +104,7 @@ class ChangePipeline:
         model_name: str,
         base_branch: str = "main",
         push_enabled: bool = False,
+        approval_recorder: ApprovalRecorder | None = None,
     ) -> None:
         self._github = github
         self._repo = repo
@@ -91,16 +113,21 @@ class ChangePipeline:
         self._model_name = model_name.strip()
         self._base_branch = base_branch.strip() or "main"
         self._push_enabled = bool(push_enabled)
+        self._approval_recorder = approval_recorder
 
     async def run(
         self,
         request: ChangeRequest,
         *,
         agent: ChangeAgent | None = None,
-        approved: bool = False,
-        approver: str = "",
+        approval: ChangeApproval | None = None,
     ) -> ChangeResult:
         """执行一次变更。agent 为 None 时视为"工作区已由外部改好"。"""
+        if request.repo.strip() != self._repo:
+            raise ValueError(
+                f"request repo does not match pipeline repo: "
+                f"{request.repo!r} != {self._repo!r}"
+            )
         if not self._verify_command:
             return ChangeResult(
                 status=ChangeStatus.NO_VERIFY_COMMAND,
@@ -116,10 +143,11 @@ class ChangePipeline:
             await agent.run(workspace=self._workspace, goal=request.goal)
 
         verify = await self._verify()
+        branch = _traceable_branch(request.branch, request.trace_id)
         bundle = build_change_bundle(
             workspace=self._workspace,
             base_sha=request.base_sha,
-            branch=request.branch,
+            branch=branch,
             title=request.title,
             body=request.body,
             verify_command=self._verify_command,
@@ -128,13 +156,14 @@ class ChangePipeline:
             model=self._model_name,
             trace_id=request.trace_id,
         )
+        approval_approver = approval.approver if approval is not None else ""
         audit = {
-            "repo": request.repo,
+            "repo": self._repo,
             "base_sha": request.base_sha,
             "bundle_hash": bundle.bundle_hash,
             "patch_hash": bundle.patch_hash,
             "verify_exit_code": verify.returncode,
-            "approver": approver,
+            "approver": approval_approver,
             "push_enabled": self._push_enabled,
         }
 
@@ -160,7 +189,33 @@ class ChangePipeline:
                 message="dry-run：变更包已生成，未写入远端",
                 audit=audit,
             )
-        if not approved:
+        if not bundle.trace_id.strip():
+            raise ValueError("trace_id is required for a traceable push")
+        approval_granted = approval is not None and (
+            approval.decision == "approve" and bool(approval.approver.strip())
+        )
+        if approval is not None and not approval.approver.strip():
+            return ChangeResult(
+                status=ChangeStatus.NOT_APPROVED,
+                bundle=bundle,
+                message="approval record requires a non-empty approver",
+                audit=audit,
+            )
+        if approval is not None and approval.trace_id != bundle.trace_id:
+            return ChangeResult(
+                status=ChangeStatus.NOT_APPROVED,
+                bundle=bundle,
+                message="approval record does not match the current trace_id",
+                audit=audit,
+            )
+        if approval is not None and approval.bundle_hash != bundle.bundle_hash:
+            return ChangeResult(
+                status=ChangeStatus.NOT_APPROVED,
+                bundle=bundle,
+                message="approval record does not match the current bundle hash",
+                audit=audit,
+            )
+        if not approval_granted:
             return ChangeResult(
                 status=ChangeStatus.NOT_APPROVED,
                 bundle=bundle,
@@ -168,6 +223,8 @@ class ChangePipeline:
                 audit=audit,
             )
 
+        assert approval is not None
+        await self._record_approval(bundle, approval)
         pr_url = await self._push(bundle)
         return ChangeResult(
             status=ChangeStatus.PUSHED,
@@ -190,6 +247,23 @@ class ChangePipeline:
             check=False,
         )
 
+    async def _record_approval(
+        self,
+        bundle: ChangeBundle,
+        approval: ChangeApproval,
+    ) -> None:
+        recorder = self._approval_recorder
+        if recorder is None:
+            from apps.code_review_pipeline.task_audit import record_human_decision
+
+            recorder = record_human_decision
+        await recorder(
+            task_id=bundle.trace_id,
+            repo=self._repo,
+            operator=approval.approver.strip(),
+            decision=f"approve_change:{bundle.bundle_hash}",
+        )
+
     async def _push(self, bundle: ChangeBundle) -> str:
         """只做三件事：建分支、建 commit、开 PR。不删分支、不 force push。"""
         create_ref = getattr(self._github, "create_ref", None)
@@ -207,13 +281,17 @@ class ChangePipeline:
                 f"base_sha 不存在于远端仓库 {self._repo}: {bundle.base_sha[:12]}…；"
                 "变更必须基于远端 commit，而不是本地临时 HEAD"
             )
-        await create_ref(repo, bundle.branch, bundle.base_sha)
         files = self._file_payload(bundle)
+        await create_ref(repo, bundle.branch, bundle.base_sha)
         await create_commit(
             repo,
             base_sha=bundle.base_sha,
             branch=bundle.branch,
-            message=f"{bundle.title}\n\n{bundle.body}".strip(),
+            message=(
+                f"{bundle.title}\n\n{bundle.body}\n\n"
+                f"MoA-Trace-Id: {bundle.trace_id}\n"
+                f"MoA-Bundle-Hash: {bundle.bundle_hash}"
+            ).strip(),
             files=files,
         )
         return await create_pr(
@@ -227,7 +305,9 @@ class ChangePipeline:
     async def _remote_has_commit(self, repo: Any, sha: str) -> bool:
         probe = getattr(self._github, "commit_exists", None)
         if probe is None:
-            return True  # 客户端不支持探测时不阻断，交给远端校验
+            raise RuntimeError(
+                "GitHub client does not implement commit_exists; refusing to push"
+            )
         return bool(await probe(repo, sha))
 
     def _file_payload(self, bundle: ChangeBundle) -> list[dict[str, str]]:
@@ -238,12 +318,20 @@ class ChangePipeline:
             if not target.is_relative_to(self._workspace):
                 raise ValueError(f"变更路径越界: {change.path}")
             if change.kind == "deleted":
+                if target.exists():
+                    raise ValueError(
+                        f"file changed after bundle: {change.path} was recreated"
+                    )
                 payload.append({"path": change.path, "content_b64": None})
                 continue
+            content = target.read_bytes()
+            digest = hashlib.sha256(content).hexdigest()
+            if digest != change.after_hash:
+                raise ValueError(f"file changed after bundle: {change.path}")
             payload.append(
                 {
                     "path": change.path,
-                    "content_b64": base64.b64encode(target.read_bytes()).decode("ascii"),
+                    "content_b64": base64.b64encode(content).decode("ascii"),
                 }
             )
         return payload
@@ -258,6 +346,14 @@ def _split_repo(repo: str) -> Any:
     return GitHubRepo(owner=owner, name=name)
 
 
+def _traceable_branch(branch: str, trace_id: str) -> str:
+    base = branch.strip().strip("/")
+    suffix = re.sub(r"[^A-Za-z0-9._-]+", "-", trace_id.strip()).strip("-")
+    if not suffix or base.endswith(f"-{suffix}"):
+        return base
+    return f"{base}-{suffix}"
+
+
 def verify_command_from_env(raw: str) -> tuple[str, ...]:
     """解析部署方提供的验证命令；空值表示未配置。"""
     text = (raw or "").strip()
@@ -266,9 +362,11 @@ def verify_command_from_env(raw: str) -> tuple[str, ...]:
 
 __all__ = [
     "ChangeAgent",
+    "ChangeApproval",
     "ChangePipeline",
     "ChangeRequest",
     "ChangeResult",
     "ChangeStatus",
+    "ApprovalRecorder",
     "verify_command_from_env",
 ]
