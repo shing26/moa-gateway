@@ -132,6 +132,18 @@ class ChangePipeline:
         self._push_enabled = bool(push_enabled)
         self._approval_recorder = approval_recorder
 
+    @property
+    def workspace(self) -> Path:
+        return self._workspace
+
+    @property
+    def repo(self) -> str:
+        return self._repo
+
+    @property
+    def verify_command(self) -> tuple[str, ...]:
+        return self._verify_command
+
     async def run(
         self,
         request: ChangeRequest,
