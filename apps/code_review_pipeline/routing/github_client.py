@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from apps.code_review_pipeline.archive import extract_repo_tarball
+from apps.code_review_pipeline.change.refs import PullRequestRef
 
 GITHUB_API = "https://api.github.com"
 
