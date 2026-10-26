@@ -1,7 +1,7 @@
 # 受治理仓库交付 Agent · 设计
 
 - 日期：2026-10-27
-- 状态：设计待用户审阅
+- 状态：已确认
 - 关联：ADR-021（审批合并）、ADR-023（Agent 原语）、ADR-027（工作区写隔离）、
   ADR-030（受治理变更 agent）
 - 落点：`apps/code_review_pipeline/delivery/`、`apps/code_review_pipeline/change/`、
@@ -152,6 +152,8 @@ class DeliveryPolicy:
 约束：
 
 - `max_revisions` 固定为 1；出现其他值视为配置错误。
+- `max_steps` 与 `max_tokens` 是整条 `DeliveryRun` 的硬上限；修复轮和 Verifier
+  共用剩余额度，不按角色各发一份。
 - `topology=verified` 时 Verifier 必须存在；不存在时直接失败。
 - 策略由部署配置或实验 harness 提供，不能由模型修改。
 
@@ -325,9 +327,9 @@ class DeliveryRun:
 | --- | --- |
 | `PREPARING` | `IMPLEMENTING`、`NEEDS_HUMAN` |
 | `IMPLEMENTING` | `CHECKING`、`BUDGET_EXHAUSTED`、`FAILED` |
-| `CHECKING` | `VERIFIER_REVIEW`、`READY_FOR_PUSH_APPROVAL`、`REVISING`、`NEEDS_HUMAN` |
-| `VERIFIER_REVIEW` | `READY_FOR_PUSH_APPROVAL`、`REVISING`、`NEEDS_HUMAN` |
-| `REVISING` | `CHECKING`、`NEEDS_HUMAN` |
+| `CHECKING` | `VERIFIER_REVIEW`、`READY_FOR_PUSH_APPROVAL`、`REVISING`、`NEEDS_HUMAN`、`BUDGET_EXHAUSTED` |
+| `VERIFIER_REVIEW` | `READY_FOR_PUSH_APPROVAL`、`REVISING`、`NEEDS_HUMAN`、`BUDGET_EXHAUSTED` |
+| `REVISING` | `CHECKING`、`NEEDS_HUMAN`、`BUDGET_EXHAUSTED` |
 | `READY_FOR_PUSH_APPROVAL` | `PUSHING`、`REJECTED` |
 | `PUSHING` | `WAITING_CI`、`FAILED` |
 | `WAITING_CI` | `AWAITING_MERGE_APPROVAL`、`NEEDS_HUMAN` |
