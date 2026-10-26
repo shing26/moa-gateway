@@ -1,3 +1,4 @@
+from apps.code_review_pipeline.delivery.audit import WalDeliveryAudit
 from apps.code_review_pipeline.delivery.models import (
     SCHEMA_VERSION,
     AgentAttempt,
@@ -15,6 +16,7 @@ from apps.code_review_pipeline.delivery.models import (
     VerifierVerdict,
 )
 from apps.code_review_pipeline.delivery.flow import DeliveryFlow
+from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
 from apps.code_review_pipeline.delivery.ports import (
     BundleChanged,
     ChangePreparation,
@@ -44,6 +46,7 @@ __all__ = [
     "DeliveryPolicy",
     "DeliveryRequest",
     "DeliveryRun",
+    "DeliveryRunStore",
     "DeliveryRunState",
     "DeliveryUsage",
     "DeliveryAuditPort",
@@ -59,5 +62,6 @@ __all__ = [
     "RunRecorderPort",
     "VerificationEvidence",
     "VerifierVerdict",
+    "WalDeliveryAudit",
     "assert_transition",
 ]
