@@ -8,20 +8,24 @@ from apps.code_review_pipeline.change.bundle import (
 from apps.code_review_pipeline.change.pipeline import (
     ApprovalRecorder,
     ChangeApproval,
+    ChangeBundleChanged,
     ChangePipeline,
     ChangeRequest,
     ChangeResult,
     ChangeStatus,
 )
+from apps.code_review_pipeline.change.refs import PullRequestRef
 
 __all__ = [
     "ApprovalRecorder",
     "ChangeApproval",
     "ChangeBundle",
+    "ChangeBundleChanged",
     "ChangePipeline",
     "ChangeRequest",
     "ChangeResult",
     "ChangeStatus",
     "FileChange",
+    "PullRequestRef",
     "build_change_bundle",
 ]

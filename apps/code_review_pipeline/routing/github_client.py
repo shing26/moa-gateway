@@ -454,8 +454,8 @@ class GitHubClient:
         base_branch: str,
         title: str,
         body: str,
-    ) -> str:
-        """开 PR，返回 html_url。默认不创建 draft：是否 ready 由人决定。"""
+    ) -> PullRequestRef:
+        """Open a PR and return the identity required by the merge channel."""
         resp = await self._client.post(
             f"/repos/{repo.owner}/{repo.name}/pulls",
             json={
@@ -466,7 +466,15 @@ class GitHubClient:
             },
         )
         resp.raise_for_status()
-        return str(dict(resp.json()).get("html_url") or "")
+        payload = dict(resp.json())
+        number = int(payload.get("number") or 0)
+        url = str(payload.get("html_url") or "")
+        head_sha = str(dict(payload.get("head") or {}).get("sha") or "")
+        if number <= 0 or not url or not head_sha:
+            raise RuntimeError(
+                "GitHub create_pull_request response lacks number/url/head.sha"
+            )
+        return PullRequestRef(number=number, url=url, head_sha=head_sha)
 
     @staticmethod
     def from_env() -> GitHubClient:

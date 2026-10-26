@@ -22,3 +22,42 @@ def test_explicit_argument_beats_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODE_REVIEW_GITHUB_TRUST_ENV", "1")
     client = GitHubClient(token="t", trust_env=False)
     assert client._client.trust_env is False  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_create_pull_request_returns_number_url_and_head_sha() -> None:
+    import httpx
+
+    from apps.code_review_pipeline.routing.github_client import GitHubRepo
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/repos/owner/name/pulls"
+        return httpx.Response(
+            201,
+            json={
+                "number": 17,
+                "html_url": "https://github.com/owner/name/pull/17",
+                "head": {"sha": "b" * 40},
+            },
+        )
+
+    client = GitHubClient(token="t")
+    await client._client.aclose()  # noqa: SLF001
+    client._client = httpx.AsyncClient(  # noqa: SLF001
+        base_url="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        ref = await client.create_pull_request(
+            GitHubRepo(owner="owner", name="name"),
+            branch="moa/fix",
+            base_branch="main",
+            title="fix",
+            body="body",
+        )
+    finally:
+        await client.aclose()
+
+    assert ref.number == 17
+    assert ref.url.endswith("/pull/17")
+    assert ref.head_sha == "b" * 40

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from apps.code_review_pipeline.change.bundle import ChangeBundle, build_change_bundle
+from apps.code_review_pipeline.change.refs import PullRequestRef
 
 logger = logging.getLogger("moa.change")
 
@@ -33,6 +34,10 @@ class ChangeStatus(str, Enum):
     NOT_APPROVED = "not_approved"
     PUSH_DISABLED = "push_disabled"
     PUSHED = "pushed"
+
+
+class ChangeBundleChanged(RuntimeError):
+    """The workspace no longer matches the bundle a human approved."""
 
 
 @dataclass(frozen=True)
@@ -60,6 +65,8 @@ class ChangeResult:
     bundle: ChangeBundle | None = None
     message: str = ""
     pr_url: str = ""
+    commit_sha: str = ""
+    pull_request: PullRequestRef | None = None
     audit: dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -71,6 +78,16 @@ class ChangeResult:
             "status": self.status.value,
             "message": self.message,
             "pr_url": self.pr_url,
+            "commit_sha": self.commit_sha,
+            "pull_request": (
+                {
+                    "number": self.pull_request.number,
+                    "url": self.pull_request.url,
+                    "head_sha": self.pull_request.head_sha,
+                }
+                if self.pull_request
+                else None
+            ),
             "bundle": self.bundle.to_dict() if self.bundle else None,
             "audit": dict(self.audit),
         }
@@ -122,7 +139,15 @@ class ChangePipeline:
         agent: ChangeAgent | None = None,
         approval: ChangeApproval | None = None,
     ) -> ChangeResult:
-        """执行一次变更。agent 为 None 时视为"工作区已由外部改好"。"""
+        if agent is not None:
+            await agent.run(workspace=self._workspace, goal=request.goal)
+        prepared = await self.prepare_bundle(request)
+        if prepared.status is not ChangeStatus.VERIFIED:
+            return prepared
+        assert prepared.bundle is not None
+        return await self.publish_bundle(prepared.bundle, approval)
+
+    async def prepare_bundle(self, request: ChangeRequest) -> ChangeResult:
         if request.repo.strip() != self._repo:
             raise ValueError(
                 f"request repo does not match pipeline repo: "
@@ -139,9 +164,6 @@ class ChangePipeline:
                 message="未配置变更模型；拒绝静默降级成规则拼装（ADR-030 决策 8）",
             )
 
-        if agent is not None:
-            await agent.run(workspace=self._workspace, goal=request.goal)
-
         verify = await self._verify()
         branch = _traceable_branch(request.branch, request.trace_id)
         bundle = build_change_bundle(
@@ -156,14 +178,13 @@ class ChangePipeline:
             model=self._model_name,
             trace_id=request.trace_id,
         )
-        approval_approver = approval.approver if approval is not None else ""
         audit = {
             "repo": self._repo,
             "base_sha": request.base_sha,
             "bundle_hash": bundle.bundle_hash,
             "patch_hash": bundle.patch_hash,
             "verify_exit_code": verify.returncode,
-            "approver": approval_approver,
+            "approver": "",
             "push_enabled": self._push_enabled,
         }
 
@@ -181,7 +202,34 @@ class ChangePipeline:
                 message="工作区没有改动",
                 audit=audit,
             )
+        return ChangeResult(
+            status=ChangeStatus.VERIFIED,
+            bundle=bundle,
+            message="验证通过，等待人工推送审批",
+            audit=audit,
+        )
 
+    async def publish_bundle(
+        self,
+        bundle: ChangeBundle,
+        approval: ChangeApproval | None,
+    ) -> ChangeResult:
+        audit = {
+            "repo": self._repo,
+            "base_sha": bundle.base_sha,
+            "bundle_hash": bundle.bundle_hash,
+            "patch_hash": bundle.patch_hash,
+            "verify_exit_code": bundle.verify_exit_code,
+            "approver": approval.approver if approval is not None else "",
+            "push_enabled": self._push_enabled,
+        }
+        if not bundle.is_verified:
+            return ChangeResult(
+                status=ChangeStatus.VERIFY_FAILED,
+                bundle=bundle,
+                message="bundle is not verified or contains no changes",
+                audit=audit,
+            )
         if not self._push_enabled:
             return ChangeResult(
                 status=ChangeStatus.PUSH_DISABLED,
@@ -225,12 +273,14 @@ class ChangePipeline:
 
         assert approval is not None
         await self._record_approval(bundle, approval)
-        pr_url = await self._push(bundle)
+        commit_sha, pull_request = await self._push(bundle)
         return ChangeResult(
             status=ChangeStatus.PUSHED,
             bundle=bundle,
             message="已推送并创建 PR",
-            pr_url=pr_url,
+            pr_url=pull_request.url,
+            commit_sha=commit_sha,
+            pull_request=pull_request,
             audit=audit,
         )
 
@@ -264,8 +314,9 @@ class ChangePipeline:
             decision=f"approve_change:{bundle.bundle_hash}",
         )
 
-    async def _push(self, bundle: ChangeBundle) -> str:
+    async def _push(self, bundle: ChangeBundle) -> tuple[str, PullRequestRef]:
         """只做三件事：建分支、建 commit、开 PR。不删分支、不 force push。"""
+        files = self._file_payload(bundle)
         create_ref = getattr(self._github, "create_ref", None)
         create_commit = getattr(self._github, "create_commit", None)
         create_pr = getattr(self._github, "create_pull_request", None)
@@ -281,26 +332,35 @@ class ChangePipeline:
                 f"base_sha 不存在于远端仓库 {self._repo}: {bundle.base_sha[:12]}…；"
                 "变更必须基于远端 commit，而不是本地临时 HEAD"
             )
-        files = self._file_payload(bundle)
         await create_ref(repo, bundle.branch, bundle.base_sha)
-        await create_commit(
-            repo,
-            base_sha=bundle.base_sha,
-            branch=bundle.branch,
-            message=(
-                f"{bundle.title}\n\n{bundle.body}\n\n"
-                f"MoA-Trace-Id: {bundle.trace_id}\n"
-                f"MoA-Bundle-Hash: {bundle.bundle_hash}"
-            ).strip(),
-            files=files,
+        commit_sha = str(
+            await create_commit(
+                repo,
+                base_sha=bundle.base_sha,
+                branch=bundle.branch,
+                message=(
+                    f"{bundle.title}\n\n{bundle.body}\n\n"
+                    f"MoA-Trace-Id: {bundle.trace_id}\n"
+                    f"MoA-Bundle-Hash: {bundle.bundle_hash}"
+                ).strip(),
+                files=files,
+            )
         )
-        return await create_pr(
+        pull_request = await create_pr(
             repo,
             branch=bundle.branch,
             base_branch=self._base_branch,
             title=bundle.title,
             body=bundle.body,
         )
+        if not isinstance(pull_request, PullRequestRef):
+            raise TypeError("create_pull_request must return PullRequestRef")
+        if pull_request.head_sha != commit_sha:
+            raise RuntimeError(
+                "GitHub PR head SHA does not match the created commit: "
+                f"{pull_request.head_sha!r} != {commit_sha!r}"
+            )
+        return commit_sha, pull_request
 
     async def _remote_has_commit(self, repo: Any, sha: str) -> bool:
         probe = getattr(self._github, "commit_exists", None)
@@ -319,7 +379,7 @@ class ChangePipeline:
                 raise ValueError(f"变更路径越界: {change.path}")
             if change.kind == "deleted":
                 if target.exists():
-                    raise ValueError(
+                    raise ChangeBundleChanged(
                         f"file changed after bundle: {change.path} was recreated"
                     )
                 payload.append({"path": change.path, "content_b64": None})
@@ -327,7 +387,9 @@ class ChangePipeline:
             content = target.read_bytes()
             digest = hashlib.sha256(content).hexdigest()
             if digest != change.after_hash:
-                raise ValueError(f"file changed after bundle: {change.path}")
+                raise ChangeBundleChanged(
+                    f"file changed after bundle: {change.path}"
+                )
             payload.append(
                 {
                     "path": change.path,
@@ -363,6 +425,7 @@ def verify_command_from_env(raw: str) -> tuple[str, ...]:
 __all__ = [
     "ChangeAgent",
     "ChangeApproval",
+    "ChangeBundleChanged",
     "ChangePipeline",
     "ChangeRequest",
     "ChangeResult",

@@ -15,6 +15,8 @@ from apps.code_review_pipeline.change import (
     ChangeStatus,
     build_change_bundle,
 )
+from apps.code_review_pipeline.change.pipeline import ChangeBundleChanged
+from apps.code_review_pipeline.change.refs import PullRequestRef
 
 
 def _git(args: list[str], cwd: Path) -> str:
@@ -58,6 +60,14 @@ def _passing() -> tuple[str, ...]:
 
 def _failing() -> tuple[str, ...]:
     return (sys.executable, "-c", "raise SystemExit(1)")
+
+
+def _pr_ref(number: int = 1) -> PullRequestRef:
+    return PullRequestRef(
+        number=number,
+        url=f"https://example.com/pr/{number}",
+        head_sha="b" * 40,
+    )
 
 
 def test_verify_failure_blocks_export(repo: Path) -> None:
@@ -273,7 +283,7 @@ def test_push_records_approval_before_any_remote_write(repo: Path) -> None:
 
         async def create_pull_request(self, repo, **kwargs):
             events.append(("pr", {"branch": kwargs["branch"]}))
-            return "https://example.com/pr/1"
+            return _pr_ref()
 
     common = {
         "repo": "owner/name",
@@ -335,7 +345,7 @@ def test_push_calls_only_three_write_operations(repo: Path) -> None:
 
         async def create_pull_request(self, repo, **kwargs):
             calls.append(("pr", kwargs))
-            return "https://example.com/pr/1"
+            return _pr_ref()
 
     pipeline = ChangePipeline(
         github=RecordingGitHub(),
@@ -571,7 +581,7 @@ def test_push_rejects_workspace_content_changed_after_bundle(repo: Path) -> None
     )
     assert dry_run.bundle is not None
 
-    with pytest.raises(ValueError, match="changed after bundle"):
+    with pytest.raises(ChangeBundleChanged, match="changed after bundle"):
         asyncio.run(
             ChangePipeline(
                 github=NoRemoteWriteGitHub(),
@@ -607,7 +617,7 @@ def test_push_uses_traceable_branch_and_commit_message(repo: Path) -> None:
 
         async def create_pull_request(self, repo, **kwargs):
             calls["pr"] = kwargs
-            return "https://example.com/pr/1"
+            return _pr_ref()
 
     async def record_approval(**kwargs: str) -> None:
         return None
@@ -800,3 +810,126 @@ def test_bundle_hash_covers_commit_metadata_and_trace(repo: Path) -> None:
     )
 
     assert all(item.bundle_hash != bundle.bundle_hash for item in variants)
+
+
+def test_prepare_bundle_has_no_remote_side_effect(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    calls: list[str] = []
+
+    class ExplodingGitHub:
+        def __getattr__(self, name: str) -> object:
+            calls.append(name)
+            raise AssertionError(f"prepare must not touch GitHub: {name}")
+
+    pipeline = ChangePipeline(
+        github=ExplodingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+    )
+
+    import asyncio
+
+    prepared = asyncio.run(pipeline.prepare_bundle(_request()))
+
+    assert prepared.status is ChangeStatus.VERIFIED
+    assert prepared.bundle is not None
+    assert calls == []
+
+
+def test_publish_bundle_does_not_run_verification_again(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    verify_calls = 0
+
+    class RecordingGitHub:
+        async def commit_exists(self, repo, sha):
+            return True
+
+        async def create_ref(self, repo, branch, base_sha):
+            return {"ref": branch}
+
+        async def create_commit(self, repo, **kwargs):
+            return "b" * 40
+
+        async def create_pull_request(self, repo, **kwargs):
+            return _pr_ref()
+
+    async def record_approval(**kwargs):
+        return None
+
+    pipeline = ChangePipeline(
+        github=RecordingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+        approval_recorder=record_approval,
+    )
+
+    async def counted_verify():
+        nonlocal verify_calls
+        verify_calls += 1
+        return await ChangePipeline._verify(pipeline)
+
+    pipeline._verify = counted_verify  # type: ignore[method-assign]
+
+    import asyncio
+
+    prepared = asyncio.run(pipeline.prepare_bundle(_request()))
+    assert prepared.bundle is not None
+    published = asyncio.run(
+        pipeline.publish_bundle(
+            prepared.bundle,
+            ChangeApproval(
+                approver="alice",
+                trace_id="trace-1",
+                bundle_hash=prepared.bundle.bundle_hash,
+            ),
+        )
+    )
+
+    assert verify_calls == 1
+    assert published.status is ChangeStatus.PUSHED
+    assert published.commit_sha == "b" * 40
+    assert published.pull_request == _pr_ref()
+
+
+def test_publish_rejects_a_bundle_changed_after_prepare(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    class NoRemoteWriteGitHub:
+        async def commit_exists(self, repo, sha):
+            return True
+
+        async def create_ref(self, *args, **kwargs):
+            raise AssertionError("changed bundle must not create a ref")
+
+    pipeline = ChangePipeline(
+        github=NoRemoteWriteGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+    )
+
+    import asyncio
+
+    prepared = asyncio.run(pipeline.prepare_bundle(_request()))
+    assert prepared.bundle is not None
+    (repo / "app.py").write_text("def add(a, b):\n    return 999\n", encoding="utf-8")
+
+    with pytest.raises(ChangeBundleChanged, match="changed after bundle"):
+        asyncio.run(
+            pipeline.publish_bundle(
+                prepared.bundle,
+                ChangeApproval(
+                    approver="alice",
+                    trace_id="trace-1",
+                    bundle_hash=prepared.bundle.bundle_hash,
+                ),
+            )
+        )
