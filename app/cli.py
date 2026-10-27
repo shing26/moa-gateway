@@ -333,6 +333,7 @@ class TerminalPushApprovalPort:
             approver=operator,
             trace_id=bundle.trace_id,
             bundle_hash=bundle.bundle_hash,
+            run_id=run_id,
         )
 
 
@@ -369,6 +370,13 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
         print(
             "CHANGE_AGENT_PUSH_ENABLED=0；delivery run 是真实交付入口。"
             "dry-run 请使用 scripts/run_change_demo.py。",
+            file=sys.stderr,
+        )
+        return 2
+    if settings.delivery_topology != "single":
+        print(
+            "delivery run 当前只支持 single topology；verified topology "
+            "属于另行规划的 S1 实验，不能静默降级。",
             file=sys.stderr,
         )
         return 2

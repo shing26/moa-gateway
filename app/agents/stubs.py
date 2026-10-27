@@ -206,10 +206,11 @@ async def execute_tool_loop(
     steps: list[ToolLoopStep] = []
     usage = ToolLoopUsage()
     current_messages = list(messages)
+    executed_tool_calls = 0
     try:
         result = await chat_with_tools(current_messages, schemas)
         usage = usage.add_metrics(getattr(llm, "last_metrics", None))
-        for round_index in range(max_steps):
+        while True:
             if not result.tool_calls:
                 steps.append(
                     ToolLoopStep(
@@ -241,7 +242,22 @@ async def execute_tool_loop(
                     ),
                 )
 
-            for call in result.tool_calls:
+            calls = list(result.tool_calls)
+            for call_index, call in enumerate(calls):
+                if executed_tool_calls >= max_steps:
+                    pending = ", ".join(
+                        str((call.get("function") or {}).get("name", ""))
+                        for call in calls[call_index:]
+                    )
+                    return ToolLoopResult(
+                        status="step_limit",
+                        content=str(result.content or ""),
+                        steps=tuple(steps),
+                        usage=usage,
+                        stop_reason=(
+                            "tool step limit reached; pending: " + pending
+                        ),
+                    )
                 started = time.monotonic()
                 name = str((call.get("function") or {}).get("name", ""))
                 arguments: dict[str, Any] = {}
@@ -311,39 +327,10 @@ async def execute_tool_loop(
                         "content": observation,
                     }
                 )
+                executed_tool_calls += 1
             current_messages = result.messages
             result = await chat_with_tools(current_messages, schemas)
             usage = usage.add_metrics(getattr(llm, "last_metrics", None))
-        if not result.tool_calls:
-            steps.append(
-                ToolLoopStep(
-                    index=len(steps) + 1,
-                    action="finish",
-                    tool="",
-                    arguments={},
-                    observation=str(result.content or "")[:200],
-                    outcome="",
-                    elapsed_ms=0.0,
-                )
-            )
-            return ToolLoopResult(
-                status="completed",
-                content=str(result.content or ""),
-                steps=tuple(steps),
-                usage=usage,
-                stop_reason="model finished",
-            )
-        pending = ", ".join(
-            str((call.get("function") or {}).get("name", ""))
-            for call in result.tool_calls
-        )
-        return ToolLoopResult(
-            status="step_limit",
-            content=str(result.content or ""),
-            steps=tuple(steps),
-            usage=usage,
-            stop_reason=f"tool step limit reached; pending: {pending}",
-        )
     except Exception as exc:
         return ToolLoopResult(
             status="error",

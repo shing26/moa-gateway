@@ -214,21 +214,37 @@ async def test_run_store_replaces_atomically_without_partial_json(tmp_path: Path
 async def test_current_view_merges_the_latest_merge_record(tmp_path: Path) -> None:
     store = DeliveryRunStore(tmp_path)
     merges = MergeStore()
-    record = MergeRecord(
+    initial = MergeRecord(
         repo="owner/name",
         pr_number=9,
         head_sha="b" * 40,
-        state=MergeState.AWAITING_APPROVAL.value,
+        state=MergeState.WATCHING.value,
     )
-    merges.save(record)
+    merges.save(initial)
     run = replace(
         _run(DeliveryRunState.WAITING_CI),
-        merge=record,
+        push=PushOutcome(
+            branch="moa/fix-trace-1",
+            commit_sha="b" * 40,
+            pull_request=PullRequestRef(
+                number=9,
+                url="https://example.com/pr/9",
+                head_sha="b" * 40,
+            ),
+        ),
+        merge=initial,
     )
+    latest = replace(
+        initial,
+        state=MergeState.AWAITING_APPROVAL.value,
+        ci_state="success",
+    )
+    merges.save(latest)
 
     view = store.view(run, merges)
 
-    assert view.merge == record
+    assert view.merge == latest
+    assert view.merge != initial
     assert view.state is DeliveryRunState.WAITING_CI
 
 

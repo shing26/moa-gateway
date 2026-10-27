@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import inspect
 import logging
 import re
 import shlex
@@ -19,7 +20,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
-from apps.code_review_pipeline.change.bundle import ChangeBundle, build_change_bundle
+from apps.code_review_pipeline.change.bundle import (
+    ChangeBundle,
+    build_change_bundle,
+    verification_output_excerpt,
+    verification_output_hash,
+)
 from apps.code_review_pipeline.change.refs import PullRequestRef
 
 logger = logging.getLogger("moa.change")
@@ -57,6 +63,7 @@ class ChangeApproval:
     trace_id: str
     bundle_hash: str
     decision: str = "approve"
+    run_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -105,6 +112,9 @@ class ApprovalRecorder(Protocol):
         repo: str,
         operator: str,
         decision: str,
+        run_id: str = "",
+        trace_id: str = "",
+        bundle_hash: str = "",
     ) -> None: ...
 
 
@@ -168,6 +178,7 @@ class ChangePipeline:
             return rejected
 
         verify = await self._verify()
+        output_hash = verification_output_hash(verify.stdout, verify.stderr)
         branch = _traceable_branch(request.branch, request.trace_id)
         bundle = build_change_bundle(
             workspace=self._workspace,
@@ -177,7 +188,8 @@ class ChangePipeline:
             body=request.body,
             verify_command=self._verify_command,
             verify_exit_code=verify.returncode,
-            verify_output=verify.stdout[-4000:],
+            verify_output=verification_output_excerpt(verify.stdout, verify.stderr),
+            verify_output_hash=output_hash,
             model=self._model_name,
             trace_id=request.trace_id,
         )
@@ -328,12 +340,30 @@ class ChangePipeline:
             from apps.code_review_pipeline.task_audit import record_human_decision
 
             recorder = record_human_decision
-        await recorder(
-            task_id=bundle.trace_id,
-            repo=self._repo,
-            operator=approval.approver.strip(),
-            decision=f"approve_change:{bundle.bundle_hash}",
-        )
+        arguments = {
+            "task_id": bundle.trace_id,
+            "repo": self._repo,
+            "operator": approval.approver.strip(),
+            "decision": f"approve_change:{bundle.bundle_hash}",
+        }
+        metadata = {
+            "run_id": approval.run_id,
+            "trace_id": bundle.trace_id,
+            "bundle_hash": bundle.bundle_hash,
+        }
+        try:
+            signature = inspect.signature(recorder)
+        except (TypeError, ValueError):
+            accepts_metadata = False
+        else:
+            accepts_metadata = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            ) or all(name in signature.parameters for name in metadata)
+        if accepts_metadata:
+            await recorder(**arguments, **metadata)
+        else:
+            await recorder(**arguments)
 
     async def _push(self, bundle: ChangeBundle) -> tuple[str, PullRequestRef]:
         """只做三件事：建分支、建 commit、开 PR。不删分支、不 force push。"""

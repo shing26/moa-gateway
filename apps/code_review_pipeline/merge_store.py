@@ -53,6 +53,10 @@ class MergeRecord:
     merged_sha: str = ""
     # 合并失败的原因（GitHub 的原话）。终态时它是人唯一能看到的解释。
     failure_reason: str = ""
+    # DeliveryRun 的证据关联；同时写入首条 transition，兼容无新增列的存储。
+    run_id: str = ""
+    trace_id: str = ""
+    bundle_hash: str = ""
     # 状态迁移历史，仿 ``state_transitions``。
     transitions: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
@@ -236,6 +240,11 @@ class PostgresMergeStore:
             failure_reason,
             transitions,
         ) = row
+        transition_rows = tuple(dict(t) for t in (transitions or ()))
+        initial = next(
+            (item for item in transition_rows if item.get("to") == "watching"),
+            {},
+        )
         return MergeRecord(
             repo=str(repo),
             pr_number=int(pr_number),
@@ -247,7 +256,10 @@ class PostgresMergeStore:
             approver=str(approver or ""),
             merged_sha=str(merged_sha or ""),
             failure_reason=str(failure_reason or ""),
-            transitions=tuple(dict(t) for t in (transitions or ())),
+            run_id=str(initial.get("run_id", "") or ""),
+            trace_id=str(initial.get("trace_id", "") or ""),
+            bundle_hash=str(initial.get("bundle_hash", "") or ""),
+            transitions=transition_rows,
         )
 
     _COLUMNS = (

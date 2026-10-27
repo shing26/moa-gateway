@@ -41,7 +41,11 @@ ALLOWED_TRANSITIONS: dict[DeliveryRunState, frozenset[DeliveryRunState]] = {
         {DeliveryRunState.PUSHING, DeliveryRunState.REJECTED}
     ),
     DeliveryRunState.PUSHING: frozenset(
-        {DeliveryRunState.WAITING_CI, DeliveryRunState.FAILED}
+        {
+            DeliveryRunState.WAITING_CI,
+            DeliveryRunState.NEEDS_HUMAN,
+            DeliveryRunState.FAILED,
+        }
     ),
     DeliveryRunState.WAITING_CI: frozenset(
         {

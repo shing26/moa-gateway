@@ -29,6 +29,14 @@ class BundleChanged(RuntimeError):
     """The concrete publisher detected a workspace/bundle mismatch."""
 
 
+class PushRecoveryRequired(RuntimeError):
+    """The PR exists, but merge registration failed after the remote write."""
+
+    def __init__(self, push: PushOutcome, message: str) -> None:
+        self.push = push
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class ChangePreparation:
     status: PreparationStatus

@@ -21,6 +21,7 @@ from apps.code_review_pipeline.delivery.state import (
         (DeliveryRunState.REVISING, DeliveryRunState.BUDGET_EXHAUSTED),
         (DeliveryRunState.READY_FOR_PUSH_APPROVAL, DeliveryRunState.PUSHING),
         (DeliveryRunState.PUSHING, DeliveryRunState.WAITING_CI),
+        (DeliveryRunState.PUSHING, DeliveryRunState.NEEDS_HUMAN),
         (DeliveryRunState.WAITING_CI, DeliveryRunState.AWAITING_MERGE_APPROVAL),
         (DeliveryRunState.AWAITING_MERGE_APPROVAL, DeliveryRunState.MERGING),
         (DeliveryRunState.MERGING, DeliveryRunState.MERGED),

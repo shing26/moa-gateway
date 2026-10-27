@@ -310,6 +310,7 @@ def test_push_records_approval_before_any_remote_write(repo: Path) -> None:
                 approver="alice",
                 trace_id="trace-1",
                 bundle_hash=dry_run.bundle.bundle_hash,
+                run_id="run-1",
             ),
         )
     )
@@ -322,6 +323,9 @@ def test_push_records_approval_before_any_remote_write(repo: Path) -> None:
             "repo": "owner/name",
             "operator": "alice",
             "decision": f"approve_change:{dry_run.bundle.bundle_hash}",
+            "run_id": "run-1",
+            "trace_id": "trace-1",
+            "bundle_hash": dry_run.bundle.bundle_hash,
         },
     )
     assert [name for name, _ in events[1:]] == ["ref", "commit", "pr"]
@@ -546,6 +550,45 @@ def test_bundle_hash_covers_full_diff_when_display_is_truncated(repo: Path) -> N
 
     assert "diff 已截断" in bundle.patch
     assert bundle.patch_hash == hashlib.sha256(full_diff.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_verification_hash_covers_full_stdout_and_stderr(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+    )
+
+    async def prepare_with_output(stdout: str, stderr: str):
+        async def fake_verify() -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=["verify"],
+                returncode=0,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        monkeypatch.setattr(pipeline, "_verify", fake_verify)
+        result = await pipeline.prepare_bundle(_request())
+        assert result.bundle is not None
+        return result.bundle
+
+    tail = "tail" * 1000
+    first = await prepare_with_output("first-prefix" * 100 + tail, "")
+    second = await prepare_with_output("second-prefix" * 100 + tail, "")
+    stdout_only = await prepare_with_output("same-output", "")
+    stderr_only = await prepare_with_output("", "same-output")
+
+    assert first.verify_output == second.verify_output
+    assert first.verify_output_hash != second.verify_output_hash
+    assert stdout_only.verify_output_hash != stderr_only.verify_output_hash
 
 
 def test_push_rejects_workspace_content_changed_after_bundle(repo: Path) -> None:

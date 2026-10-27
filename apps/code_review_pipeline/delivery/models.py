@@ -282,6 +282,9 @@ def _merge_to_dict(record: MergeRecord | None) -> dict[str, Any] | None:
         "approver": record.approver,
         "merged_sha": record.merged_sha,
         "failure_reason": record.failure_reason,
+        "run_id": record.run_id,
+        "trace_id": record.trace_id,
+        "bundle_hash": record.bundle_hash,
         "transitions": [dict(item) for item in record.transitions],
     }
 

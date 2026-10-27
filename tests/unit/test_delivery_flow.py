@@ -28,6 +28,7 @@ from apps.code_review_pipeline.delivery.ports import (
     BundleChanged,
     ChangePreparation,
     PreparationStatus,
+    PushRecoveryRequired,
 )
 
 
@@ -44,7 +45,12 @@ def _request() -> DeliveryRequest:
     )
 
 
-def _attempt(*, status: str = "completed", summary: str = "changed app.py") -> AgentAttempt:
+def _attempt(
+    *,
+    status: str = "completed",
+    summary: str = "changed app.py",
+    tool_calls: int = 1,
+) -> AgentAttempt:
     return AgentAttempt(
         role="implementer",
         status=status,  # type: ignore[arg-type]
@@ -57,16 +63,17 @@ def _attempt(*, status: str = "completed", summary: str = "changed app.py") -> A
             cost_usd=0.001,
             llm_latency_ms=10.0,
         ),
-        steps=(
+        steps=tuple(
             AgentStep(
-                index=1,
+                index=index,
                 action="call_tool",
                 tool="write_file",
                 arguments={"path": "app.py"},
                 observation="ok",
                 outcome="ok",
                 elapsed_ms=2.0,
-            ),
+            )
+            for index in range(1, tool_calls + 1)
         ),
     )
 
@@ -209,6 +216,7 @@ def _flow(
     preparer: FakePreparer,
     approval: FakeApproval | None = None,
     publisher: FakePublisher | None = None,
+    max_steps: int = 40,
 ) -> tuple[DeliveryFlow, FakeRecorder, FakeAudit, FakePublisher]:
     events: list[str] = []
     recorder = FakeRecorder()
@@ -223,7 +231,10 @@ def _flow(
     )
     flow = DeliveryFlow(
         workspace=tmp_path,
-        policy=DeliveryPolicy(verify_command=("python", "-m", "pytest", "-q")),
+        policy=DeliveryPolicy(
+            verify_command=("python", "-m", "pytest", "-q"),
+            max_steps=max_steps,
+        ),
         implementer=implementer,
         preparer=preparer,
         approval=approval,
@@ -373,6 +384,70 @@ async def test_budget_exhaustion_is_not_a_verification_failure(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_initial_step_limit_is_budget_exhaustion(tmp_path: Path) -> None:
+    flow, _, _, publisher = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt(status="step_limit")]),
+        preparer=FakePreparer([]),
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.BUDGET_EXHAUSTED
+    assert run.failure is None
+    assert publisher.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_revision_step_limit_is_budget_exhaustion(tmp_path: Path) -> None:
+    failed = ChangePreparation(
+        status=PreparationStatus.VERIFY_FAILED,
+        bundle=_bundle(),
+        verification=replace(_verification(), exit_code=1),
+        message="tests failed",
+    )
+    implementer = FakeImplementer(
+        [
+            _attempt(),
+            _attempt(status="step_limit", summary="still working"),
+        ]
+    )
+    flow, _, _, publisher = _flow(
+        tmp_path,
+        implementer=implementer,
+        preparer=FakePreparer([failed]),
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.BUDGET_EXHAUSTED
+    assert run.failure is None
+    assert len(run.attempts) == 2
+    assert implementer.feedback == ["", "tests failed"]
+    assert publisher.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_run_total_step_budget_is_rechecked_after_attempt(
+    tmp_path: Path,
+) -> None:
+    preparer = FakePreparer([])
+    flow, _, _, publisher = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt(tool_calls=1)]),
+        preparer=preparer,
+        max_steps=1,
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.BUDGET_EXHAUSTED
+    assert run.failure is None
+    assert preparer.calls == 0
+    assert publisher.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_s0_rejects_verified_topology_without_silent_degrade(
     tmp_path: Path,
 ) -> None:
@@ -432,3 +507,57 @@ async def test_workspace_change_after_approval_maps_to_bundle_changed(
         "file changed after bundle: app.py",
     )
     assert publisher.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_merge_registration_failure_preserves_push_for_recovery(
+    tmp_path: Path,
+) -> None:
+    push = PushOutcome(
+        branch="moa/fix-1-trace-1",
+        commit_sha="b" * 40,
+        pull_request=PullRequestRef(
+            number=9,
+            url="https://example.com/pr/9",
+            head_sha="b" * 40,
+        ),
+    )
+
+    class RecoverablePublisher(FakePublisher):
+        async def publish(
+            self,
+            *,
+            workspace: Path,
+            bundle: ChangeBundle,
+            approval: ChangeApproval,
+        ) -> PushOutcome:
+            self.calls += 1
+            raise PushRecoveryRequired(
+                push,
+                "PR created but merge registration failed",
+            )
+
+    bundle = _bundle()
+    flow, recorder, _, publisher = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt()]),
+        preparer=FakePreparer(
+            [
+                ChangePreparation(
+                    status=PreparationStatus.READY,
+                    bundle=bundle,
+                    verification=_verification(),
+                )
+            ]
+        ),
+        publisher=RecoverablePublisher([]),
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.NEEDS_HUMAN
+    assert run.failure is not None
+    assert run.failure.code is FailureCode.INFRA_ERROR
+    assert run.push == push
+    assert recorder.runs[-1].push == push
+    assert publisher.calls == 1

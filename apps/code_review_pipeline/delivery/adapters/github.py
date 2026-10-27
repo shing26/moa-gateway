@@ -23,6 +23,7 @@ from apps.code_review_pipeline.delivery.ports import (
     BundleChanged,
     ChangePreparation,
     PreparationStatus,
+    PushRecoveryRequired,
 )
 from apps.code_review_pipeline.merge_state import initial_transition
 from apps.code_review_pipeline.merge_store import MergeRecord
@@ -90,7 +91,10 @@ class GitHubChangeAdapter:
             verification = VerificationEvidence(
                 command=result.bundle.verify_command,
                 exit_code=result.bundle.verify_exit_code,
-                output_hash=hashlib.sha256(output.encode("utf-8")).hexdigest(),
+                output_hash=(
+                    result.bundle.verify_output_hash
+                    or hashlib.sha256(output.encode("utf-8")).hexdigest()
+                ),
                 output_excerpt=output[-4000:],
             )
             return ChangePreparation(
@@ -108,7 +112,10 @@ class GitHubChangeAdapter:
                 verification=VerificationEvidence(
                     command=result.bundle.verify_command,
                     exit_code=result.bundle.verify_exit_code,
-                    output_hash=hashlib.sha256(output.encode("utf-8")).hexdigest(),
+                    output_hash=(
+                        result.bundle.verify_output_hash
+                        or hashlib.sha256(output.encode("utf-8")).hexdigest()
+                    ),
                     output_excerpt=output[-4000:],
                 ),
                 message=result.message,
@@ -151,18 +158,74 @@ class GitHubChangeAdapter:
             commit_sha=result.commit_sha,
             pull_request=result.pull_request,
         )
-        now = self._clock().isoformat()
-        record = MergeRecord(
-            repo=self._pipeline.repo,
-            pr_number=push.pull_request.number,
-            head_sha=push.pull_request.head_sha,
-            transitions=tuple(initial_transition(now)),
+        try:
+            self._register_merge_record(
+                push=push,
+                run_id=approval.run_id,
+                trace_id=bundle.trace_id,
+                bundle_hash=bundle.bundle_hash,
+            )
+        except Exception as exc:
+            raise PushRecoveryRequired(
+                push,
+                "PR was created but merge registration failed: "
+                f"{type(exc).__name__}: {exc}",
+            ) from exc
+        return push
+
+    def recover(
+        self,
+        *,
+        push: PushOutcome,
+        run_id: str,
+        trace_id: str,
+        bundle_hash: str,
+    ) -> MergeRecord:
+        """Re-register a known successful push without repeating remote writes."""
+        return self._register_merge_record(
+            push=push,
+            run_id=run_id,
+            trace_id=trace_id,
+            bundle_hash=bundle_hash,
         )
-        self._merge_store.save(record)
+
+    def _register_merge_record(
+        self,
+        *,
+        push: PushOutcome,
+        run_id: str,
+        trace_id: str,
+        bundle_hash: str,
+    ) -> MergeRecord:
+        identity = (
+            self._pipeline.repo,
+            push.pull_request.number,
+            push.pull_request.head_sha,
+        )
+        now = self._clock().isoformat()
+        record = self._merge_store.get(identity)
+        if record is None:
+            record = MergeRecord(
+                repo=self._pipeline.repo,
+                pr_number=push.pull_request.number,
+                head_sha=push.pull_request.head_sha,
+                run_id=run_id,
+                trace_id=trace_id,
+                bundle_hash=bundle_hash,
+                transitions=tuple(
+                    initial_transition(
+                        now,
+                        run_id=run_id,
+                        trace_id=trace_id,
+                        bundle_hash=bundle_hash,
+                    )
+                ),
+            )
+            self._merge_store.save(record)
         self._merge_store.supersede_older(
             record.repo,
             record.pr_number,
             record.head_sha,
             at=now,
         )
-        return push
+        return self._merge_store.get(identity) or record

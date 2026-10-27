@@ -151,3 +151,41 @@ async def test_tool_loop_completes_when_final_text_arrives_after_max_steps(
         "call_tool",
         "finish",
     ]
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_calls_stop_at_the_hard_step_budget(
+    tmp_path: Path,
+) -> None:
+    llm = FakeLLM(
+        [
+            [
+                _call("1", "write_file", {"path": "one.txt", "content": "one"}),
+                _call("2", "write_file", {"path": "two.txt", "content": "two"}),
+                _call("3", "write_file", {"path": "three.txt", "content": "three"}),
+            ],
+        ]
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file", "write_file", "search"),
+    )
+
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "write three files"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=2,
+        max_tokens=100,
+    )
+
+    assert result.status == "step_limit"
+    assert result.usage.llm_calls == 1
+    assert [step.tool for step in result.steps] == ["write_file", "write_file"]
+    assert "pending: write_file" in result.stop_reason
+    assert (tmp_path / "one.txt").is_file()
+    assert (tmp_path / "two.txt").is_file()
+    assert not (tmp_path / "three.txt").exists()

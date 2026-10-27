@@ -71,6 +71,7 @@ class ChangeBundle:
     verify_output: str
     model: str
     trace_id: str = ""
+    verify_output_hash: str = ""
 
     @property
     def is_verified(self) -> bool:
@@ -89,6 +90,7 @@ class ChangeBundle:
             "patch_hash": self.patch_hash,
             "verify_command": list(self.verify_command),
             "verify_exit_code": self.verify_exit_code,
+            "verify_output_hash": self.verify_output_hash,
             "model": self.model,
             "trace_id": self.trace_id,
         }
@@ -112,10 +114,25 @@ class ChangeBundle:
             "verify_command": list(self.verify_command),
             "verify_exit_code": self.verify_exit_code,
             "verify_output": self.verify_output,
+            "verify_output_hash": self.verify_output_hash,
             "model": self.model,
             "trace_id": self.trace_id,
             "bundle_hash": self.bundle_hash,
         }
+
+
+def verification_output_hash(stdout: str, stderr: str) -> str:
+    payload = json.dumps(
+        {"stdout": stdout, "stderr": stderr},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return _sha256_text(payload)
+
+
+def verification_output_excerpt(stdout: str, stderr: str) -> str:
+    separator = "\n" if stdout and stderr else ""
+    return f"{stdout}{separator}{stderr}"[-4000:]
 
 
 def _git(args: list[str], *, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -152,6 +169,7 @@ def build_change_bundle(
     verify_output: str,
     model: str,
     trace_id: str = "",
+    verify_output_hash: str = "",
 ) -> ChangeBundle:
     """从工作区采集 diff 与文件清单，组装变更包。不触碰远端。"""
     root = Path(workspace).resolve()
@@ -230,4 +248,5 @@ def build_change_bundle(
         verify_output=verify_output,
         model=model,
         trace_id=trace_id,
+        verify_output_hash=verify_output_hash,
     )

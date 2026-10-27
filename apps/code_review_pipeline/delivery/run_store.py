@@ -137,6 +137,7 @@ def _bundle_from_dict(payload: dict[str, Any]) -> ChangeBundle:
         ),
         verify_exit_code=int(payload["verify_exit_code"]),
         verify_output=str(payload.get("verify_output", "")),
+        verify_output_hash=str(payload.get("verify_output_hash", "")),
         model=str(payload["model"]),
         trace_id=str(payload.get("trace_id", "")),
     )
@@ -156,6 +157,9 @@ def _merge_from_dict(payload: dict[str, Any]) -> MergeRecord:
         approver=str(payload.get("approver", "")),
         merged_sha=str(payload.get("merged_sha", "")),
         failure_reason=str(payload.get("failure_reason", "")),
+        run_id=str(payload.get("run_id", "")),
+        trace_id=str(payload.get("trace_id", "")),
+        bundle_hash=str(payload.get("bundle_hash", "")),
         transitions=tuple(
             dict(item) for item in payload.get("transitions", ())
         ),

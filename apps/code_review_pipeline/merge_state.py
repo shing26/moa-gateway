@@ -168,6 +168,23 @@ def should_notify_ci_failure(state: MergeState, action: MergeAction) -> bool:
     )
 
 
-def initial_transition(at: str) -> list[dict[str, str | None]]:
+def initial_transition(
+    at: str,
+    *,
+    run_id: str = "",
+    trace_id: str = "",
+    bundle_hash: str = "",
+) -> list[dict[str, str | None]]:
     """PR 首次进入通道时写进 ``merge_transitions`` 的那一条。"""
-    return [{"from": None, "to": MergeState.WATCHING.value, "at": at}]
+    entry: dict[str, str | None] = {
+        "from": None,
+        "to": MergeState.WATCHING.value,
+        "at": at,
+    }
+    if run_id:
+        entry["run_id"] = run_id
+    if trace_id:
+        entry["trace_id"] = trace_id
+    if bundle_hash:
+        entry["bundle_hash"] = bundle_hash
+    return [entry]

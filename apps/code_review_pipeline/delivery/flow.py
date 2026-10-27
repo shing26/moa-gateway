@@ -24,6 +24,7 @@ from apps.code_review_pipeline.delivery.ports import (
     ImplementerPort,
     PreparationStatus,
     PushApprovalPort,
+    PushRecoveryRequired,
     RunRecorderPort,
 )
 from apps.code_review_pipeline.delivery.state import assert_transition
@@ -150,6 +151,13 @@ class DeliveryFlow:
                     DeliveryRunState.BUDGET_EXHAUSTED,
                     None,
                 )
+            remaining_steps, remaining_tokens = self._remaining_budget(run)
+            if remaining_steps <= 0 or remaining_tokens <= 0:
+                return await self._finish(
+                    run,
+                    DeliveryRunState.BUDGET_EXHAUSTED,
+                    None,
+                )
             if attempt.status == "error":
                 return await self._finish(
                     run,
@@ -164,13 +172,8 @@ class DeliveryFlow:
             if attempt.status == "step_limit":
                 return await self._finish(
                     run,
-                    DeliveryRunState.NEEDS_HUMAN
-                    if run.state is DeliveryRunState.REVISING
-                    else DeliveryRunState.FAILED,
-                    FailureInfo(
-                        FailureCode.INFRA_ERROR,
-                        attempt.stop_reason or "implementer reached step limit",
-                    ),
+                    DeliveryRunState.BUDGET_EXHAUSTED,
+                    None,
                 )
 
             run = await self._move(run, DeliveryRunState.CHECKING, "verify")
@@ -285,6 +288,14 @@ class DeliveryFlow:
                 run,
                 DeliveryRunState.FAILED,
                 FailureInfo(FailureCode.BUNDLE_CHANGED, str(exc)),
+            )
+        except PushRecoveryRequired as exc:
+            run = replace(run, push=exc.push, updated_at=self._clock())
+            await self._recorder.save(run)
+            return await self._finish(
+                run,
+                DeliveryRunState.NEEDS_HUMAN,
+                FailureInfo(FailureCode.INFRA_ERROR, str(exc)),
             )
         except Exception as exc:
             return await self._finish(

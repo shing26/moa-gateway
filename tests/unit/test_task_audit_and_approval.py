@@ -116,6 +116,26 @@ async def test_human_decision_records_who(collector: _Collector) -> None:
     assert entry.extra["decision"] == "approve"
 
 
+@pytest.mark.asyncio
+async def test_human_decision_records_delivery_reconciliation_metadata(
+    collector: _Collector,
+) -> None:
+    await record_human_decision(
+        TASK_ID,
+        REPO,
+        operator="alice",
+        decision="approve_change:bundle-1",
+        run_id="run-1",
+        trace_id=TASK_ID,
+        bundle_hash="bundle-1",
+    )
+
+    entry = collector.entries[0]
+    assert entry.extra["run_id"] == "run-1"
+    assert entry.extra["trace_id"] == TASK_ID
+    assert entry.extra["bundle_hash"] == "bundle-1"
+
+
 class FakeStore:
     def __init__(self) -> None:
         self.posted_review_id: str | None = None
