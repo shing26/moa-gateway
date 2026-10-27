@@ -24,7 +24,7 @@ def _init_baseline(destination: Path) -> None:
     _git(["init", "-q"], cwd=destination)
     _git(["config", "user.email", "delivery@moa.local"], cwd=destination)
     _git(["config", "user.name", "MoA Delivery"], cwd=destination)
-    _git(["add", "."], cwd=destination)
+    _git(["add", "--force", "--all", "--", "."], cwd=destination)
     _git(["commit", "-q", "-m", "materialized base snapshot"], cwd=destination)
 
 
@@ -40,7 +40,7 @@ class GitHubWorkspaceProvisioner:
         destination: Path,
     ) -> Path:
         owner, separator, name = repo.partition("/")
-        if not separator or not owner or not name:
+        if repo.count("/") != 1 or not separator or not owner.strip() or not name.strip():
             raise ValueError(f"repo must be owner/name: {repo!r}")
         root = Path(destination).resolve()
         if root.exists() and any(root.iterdir()):
