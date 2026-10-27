@@ -19,6 +19,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -476,6 +477,74 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
     return 0 if run.state.value in {"waiting_ci", "ready_for_push_approval"} else 1
 
 
+def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
+    """Collect and diagnose failed CI evidence without writing to GitHub."""
+    import httpx
+
+    from app.config import settings
+
+    if not settings.github_token:
+        print("GITHUB_TOKEN 未配置", file=sys.stderr)
+        return 2
+
+    from apps.code_review_pipeline.delivery.adapters import github_ci
+    from apps.code_review_pipeline.delivery.ci_triage import (
+        build_ci_triage_report,
+        write_ci_triage_artifacts,
+    )
+    from apps.code_review_pipeline.routing.github_provider import (
+        build_github_client,
+    )
+
+    github = build_github_client()
+
+    async def execute():
+        try:
+            collector = github_ci.GitHubCiEvidenceCollector(
+                github=github,
+                max_jobs=settings.ci_triage_max_jobs,
+                max_log_chars=settings.ci_triage_max_log_chars,
+            )
+            evidence = await collector.collect(
+                repo=args.repo,
+                head_sha=args.sha,
+            )
+            report = build_ci_triage_report(
+                evidence,
+                base_branch=args.base_branch,
+                branch=args.branch,
+                trace_id=args.trace_id,
+            )
+            return write_ci_triage_artifacts(
+                report,
+                settings.ci_triage_output_dir,
+            )
+        finally:
+            await github.aclose()
+
+    try:
+        artifacts = asyncio.run(execute())
+    except github_ci.CiNotFailed as exc:
+        print(f"CI triage skipped: {exc}", file=sys.stderr)
+        return 1
+    except httpx.HTTPStatusError as exc:
+        print(
+            "CI triage failed: GitHub API returned "
+            f"HTTP {exc.response.status_code}",
+            file=sys.stderr,
+        )
+        return 1
+    except (httpx.HTTPError, ValueError) as exc:
+        print(f"CI triage failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"report    : {artifacts.json_path}")
+    print(f"markdown  : {artifacts.markdown_path}")
+    print(f"request   : {artifacts.request_path}")
+    print("human review required; no GitHub writes performed.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app.cli", description="moa-gateway 操作入口"
@@ -546,6 +615,14 @@ def build_parser() -> argparse.ArgumentParser:
     delivery_run.add_argument("--trace-id", default=None)
     delivery_run.set_defaults(func=cmd_delivery_run)
 
+    delivery_ci_triage = delivery_sub.add_parser(
+        "ci-triage",
+        help="只读收集失败 CI 证据并生成本地诊断报告",
+    )
+    delivery_ci_triage.add_argument("--repo", required=True)
+    delivery_ci_triage.add_argument("--sha", required=True)
+    delivery_ci_triage.set_defaults(func=cmd_delivery_ci_triage)
+
     return parser
 
 
@@ -603,11 +680,19 @@ def _apply_delivery_defaults(args: argparse.Namespace) -> None:
         return
     from app.config import settings
 
-    if args.base_branch is None:
+    if getattr(args, "base_branch", None) is None:
         args.base_branch = settings.change_agent_base_branch
-    if args.trace_id is None:
+    if getattr(args, "command", "") == "ci-triage":
+        sha_prefix = args.sha[:12]
+        trace_repo = re.sub(r"[^A-Za-z0-9]+", "-", args.repo).strip("-").lower()
+        if getattr(args, "branch", None) is None:
+            args.branch = f"moa/ci-fix-{sha_prefix}"
+        if getattr(args, "trace_id", None) is None:
+            args.trace_id = f"ci-{trace_repo}-{sha_prefix}"
+        return
+    if getattr(args, "trace_id", None) is None:
         args.trace_id = f"delivery-{time.time_ns()}"
-    if not args.body:
+    if not getattr(args, "body", ""):
         args.body = args.goal
 
 

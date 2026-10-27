@@ -18,6 +18,7 @@ from apps.code_review_pipeline.routing.github_client import (
     GitHubClient,
     GitHubRepo,
     aggregate_ci_status,
+    is_failing_ci_conclusion,
 )
 
 
@@ -125,6 +126,68 @@ class TestAggregate:
             ]
         )
         assert got.failing[0].url == "https://ci.example/run/1"
+
+
+def test_failing_conclusion_is_exported_for_read_only_collectors() -> None:
+    assert is_failing_ci_conclusion("failure") is True
+    assert is_failing_ci_conclusion("TIMED_OUT") is True
+    assert is_failing_ci_conclusion("cancelled") is True
+    assert is_failing_ci_conclusion("success") is False
+    assert is_failing_ci_conclusion("skipped") is False
+
+
+@pytest.mark.asyncio
+async def test_workflow_runs_are_queried_by_full_head_sha() -> None:
+    seen: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["head_sha"] = request.url.params["head_sha"]
+        return httpx.Response(200, json={"workflow_runs": [{"id": 1}]})
+
+    runs = await _client(handler).list_workflow_runs_for_sha(
+        GitHubRepo("o", "r"), "a" * 40
+    )
+
+    assert seen["path"] == "/repos/o/r/actions/runs"
+    assert seen["head_sha"] == "a" * 40
+    assert runs == [{"id": 1}]
+
+
+@pytest.mark.asyncio
+async def test_workflow_jobs_are_queried_for_the_selected_run() -> None:
+    seen = ""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen
+        seen = request.url.path
+        return httpx.Response(
+            200,
+            json={"jobs": [{"id": 22, "name": "pytest", "conclusion": "failure"}]},
+        )
+
+    jobs = await _client(handler).list_workflow_jobs(GitHubRepo("o", "r"), 7)
+
+    assert seen == "/repos/o/r/actions/runs/7/jobs"
+    assert jobs[0]["name"] == "pytest"
+
+
+@pytest.mark.asyncio
+async def test_job_log_is_downloaded_and_clipped_to_the_tail() -> None:
+    seen = ""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen
+        seen = request.url.path
+        return httpx.Response(200, text="head\n" + "x" * 100 + "\ntail")
+
+    log = await _client(handler).get_job_log(
+        GitHubRepo("o", "r"), 22, max_chars=20
+    )
+
+    assert seen == "/repos/o/r/actions/jobs/22/logs"
+    assert log.endswith("\ntail")
+    assert len(log) == 20
 
 
 def _client(handler: object) -> GitHubClient:

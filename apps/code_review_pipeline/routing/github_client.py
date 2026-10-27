@@ -59,6 +59,11 @@ _PENDING_CONCLUSIONS = frozenset(
 )
 
 
+def is_failing_ci_conclusion(conclusion: str) -> bool:
+    """Whether a GitHub check/job conclusion represents a failed result."""
+    return str(conclusion or "").strip().lower() in _FAILING_CONCLUSIONS
+
+
 @dataclass(frozen=True)
 class CiCheck:
     """一条 CI 结论。`name` 是给飞书卡片用的：红的时候要能说出"哪一条红了"。"""
@@ -306,6 +311,75 @@ class GitHubClient:
         )
         status_resp.raise_for_status()
         return aggregate_ci_status(check_runs, dict(status_resp.json()))
+
+    async def list_workflow_runs_for_sha(
+        self, repo: GitHubRepo, head_sha: str
+    ) -> list[dict[str, Any]]:
+        """List Actions workflow runs for one full commit SHA.
+
+        This is read-only evidence collection. Callers must not infer a failing
+        job from a check-run id: only Actions run/job ids can address job logs.
+        """
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            resp = await self._client.get(
+                f"/repos/{repo.owner}/{repo.name}/actions/runs",
+                params={
+                    "head_sha": head_sha,
+                    "per_page": 100,
+                    "page": page,
+                },
+            )
+            resp.raise_for_status()
+            batch = list(resp.json().get("workflow_runs") or ())
+            out.extend(batch)
+            if len(batch) < 100:
+                return out
+            page += 1
+
+    async def list_workflow_jobs(
+        self, repo: GitHubRepo, run_id: int
+    ) -> list[dict[str, Any]]:
+        """List the latest attempt's jobs for one workflow run."""
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            resp = await self._client.get(
+                f"/repos/{repo.owner}/{repo.name}/actions/runs/{run_id}/jobs",
+                params={
+                    "filter": "latest",
+                    "per_page": 100,
+                    "page": page,
+                },
+            )
+            resp.raise_for_status()
+            batch = list(resp.json().get("jobs") or ())
+            out.extend(batch)
+            if len(batch) < 100:
+                return out
+            page += 1
+
+    async def get_job_log(
+        self,
+        repo: GitHubRepo,
+        job_id: int,
+        *,
+        max_chars: int = 50_000,
+    ) -> str:
+        """Download a job log, following GitHub's redirect to blob storage.
+
+        Only the tail is returned: Python and test-runner failures normally put
+        the actionable summary at the end, and a hard cap keeps triage bounded.
+        """
+        if max_chars <= 0:
+            raise ValueError("max_chars must be positive")
+        resp = await self._client.get(
+            f"/repos/{repo.owner}/{repo.name}/actions/jobs/{job_id}/logs",
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+        return resp.text[-max_chars:]
 
     async def merge_pr(
         self,
