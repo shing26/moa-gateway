@@ -82,6 +82,27 @@ def test_unknown_classification_does_not_invent_a_root_cause() -> None:
     assert evidence == ()
 
 
+def test_test_failure_wins_over_timeout_words_in_passing_test_names() -> None:
+    log = (
+        "tests/unit/test_config.py::test_router_llm_timeout_env PASSED [ 12%]\n"
+        "tests/unit/test_sync_bridge.py::test_timeout_is_one_second PASSED [ 93%]\n"
+        "2026-09-29T04:16:56.6314717Z FAILED "
+        "tests/unit/test_github_webhook_e2e.py::test_command - assert 500 == 200\n"
+        "2026-09-29T04:16:56.6315380Z  +  where 500 = "
+        "<Response [500 Internal Server Error]>.status_code\n"
+        "2026-09-29T04:16:56.6315792Z ========== 1 failed, 853 passed "
+        "in 14.70s ==========\n"
+        "2026-09-29T04:16:57.4842381Z ##[error]Process completed with exit code 1.\n"
+    )
+
+    category, evidence = classify_ci_failure(log, conclusion="failure")
+
+    assert category == "test_failure"
+    assert any("FAILED tests/unit/test_github_webhook_e2e.py" in line for line in evidence)
+    assert any("1 failed, 853 passed" in line for line in evidence)
+    assert all("PASSED" not in line for line in evidence)
+
+
 def test_report_maps_to_ci_failure_delivery_request() -> None:
     report = build_ci_triage_report(
         _evidence(

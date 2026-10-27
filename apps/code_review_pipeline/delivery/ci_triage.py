@@ -26,6 +26,16 @@ _EVIDENCE_LINE = re.compile(
     r"not found|not accessible|could not|cancelled)",
     re.IGNORECASE,
 )
+# Pytest result lines use uppercase PASSED. The lowercase "passed" in a final
+# "1 failed, 853 passed" summary is itself useful evidence and must survive.
+_PASSED_LINE = re.compile(r"\bPASSED\b")
+_STRONG_EVIDENCE_LINE = re.compile(
+    r"(FAILED\s+tests?/|AssertionError|\+\s+where\b|##\[error\]|"
+    r"\d+\s+failed\s*,|timed out|timeouterror|readtimeout|connecttimeout|"
+    r"permission denied|resource not accessible|modulenotfounderror|"
+    r"syntaxerror|compilation failed)",
+    re.IGNORECASE,
+)
 _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
@@ -53,7 +63,13 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
 )
 
-_TIMEOUT_PATTERNS = ("timed out", "timeout", "time limit exceeded")
+_TIMEOUT_PATTERNS = (
+    "timed out",
+    "time limit exceeded",
+    "timeouterror",
+    "readtimeout",
+    "connecttimeout",
+)
 _CANCELLED_PATTERNS = ("cancelled", "canceled")
 _PERMISSION_PATTERNS = (
     "resource not accessible",
@@ -84,6 +100,7 @@ _TEST_PATTERNS = (
     "test failed",
     "pytest failed",
     "failing tests",
+    " failed, ",
 )
 
 
@@ -287,7 +304,10 @@ def classify_ci_failure(
 ) -> tuple[str, tuple[str, ...]]:
     """Classify a failed job using deterministic patterns and quoted evidence."""
     redacted = redact_ci_log(log)
-    lowered = redacted.lower()
+    signal_lines = [
+        line for line in redacted.splitlines() if not _PASSED_LINE.search(line)
+    ]
+    lowered = "\n".join(signal_lines).lower()
     normalized_conclusion = conclusion.strip().lower()
 
     if normalized_conclusion == "timed_out" or any(
@@ -309,16 +329,19 @@ def classify_ci_failure(
     else:
         category = "unknown"
 
-    evidence: list[str] = []
+    strong: list[str] = []
+    fallback: list[str] = []
     for raw_line in redacted.splitlines():
         line = " ".join(raw_line.strip().split())
-        if not line or not _EVIDENCE_LINE.search(line):
+        if not line or _PASSED_LINE.search(line):
             continue
         clipped = line[:500]
-        if clipped not in evidence:
-            evidence.append(clipped)
-        if len(evidence) >= 5:
-            break
+        if _STRONG_EVIDENCE_LINE.search(clipped):
+            if clipped not in strong:
+                strong.append(clipped)
+        elif _EVIDENCE_LINE.search(clipped) and clipped not in fallback:
+            fallback.append(clipped)
+    evidence = (strong + fallback)[:5]
     return category, tuple(evidence)
 
 
