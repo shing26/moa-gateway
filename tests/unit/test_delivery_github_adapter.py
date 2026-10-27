@@ -30,7 +30,7 @@ from apps.code_review_pipeline.delivery.ports import (
 )
 from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
 from apps.code_review_pipeline.merge_state import MergeState
-from apps.code_review_pipeline.merge_store import MergeStore
+from apps.code_review_pipeline.merge_store import MergeRecord, MergeStore
 from apps.code_review_pipeline.change.refs import PullRequestRef
 
 
@@ -194,6 +194,46 @@ async def test_publisher_registers_merge_record_without_webhook(tmp_path: Path) 
     assert record.transitions[0]["trace_id"] == "trace-1"
     assert record.transitions[0]["bundle_hash"] == bundle.bundle_hash
     assert pipeline.publish_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_publisher_upgrades_a_webhook_created_merge_record(tmp_path: Path) -> None:
+    pipeline = FakePipeline(tmp_path)
+    merges = MergeStore()
+    identity = ("owner/name", 5, "b" * 40)
+    merges.save(
+        MergeRecord(
+            repo=identity[0],
+            pr_number=identity[1],
+            head_sha=identity[2],
+        )
+    )
+    adapter = GitHubChangeAdapter(
+        pipeline=pipeline,
+        merge_store=merges,
+        clock=lambda: datetime(2026, 10, 27, tzinfo=UTC),
+    )
+    bundle = _bundle()
+
+    await adapter.publish(
+        workspace=tmp_path,
+        bundle=bundle,
+        approval=ChangeApproval(
+            approver="alice",
+            trace_id="trace-1",
+            bundle_hash=bundle.bundle_hash,
+            run_id="run-1",
+        ),
+    )
+
+    record = merges.get(identity)
+    assert record is not None
+    assert record.run_id == "run-1"
+    assert record.trace_id == "trace-1"
+    assert record.bundle_hash == bundle.bundle_hash
+    assert record.transitions[0]["run_id"] == "run-1"
+    assert record.transitions[0]["trace_id"] == "trace-1"
+    assert record.transitions[0]["bundle_hash"] == bundle.bundle_hash
 
 
 @pytest.mark.asyncio

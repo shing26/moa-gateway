@@ -20,6 +20,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
+from app.agents.command_runner import run_command
 from apps.code_review_pipeline.change.bundle import (
     ChangeBundle,
     build_change_bundle,
@@ -37,6 +38,7 @@ class ChangeStatus(str, Enum):
     NO_CHANGES = "no_changes"
     NO_VERIFY_COMMAND = "no_verify_command"
     MODEL_NOT_CONFIGURED = "model_not_configured"
+    INVALID_BRANCH = "invalid_branch"
     NOT_APPROVED = "not_approved"
     PUSH_DISABLED = "push_disabled"
     PUSHED = "pushed"
@@ -256,6 +258,13 @@ class ChangePipeline:
             "approver": approval.approver if approval is not None else "",
             "push_enabled": self._push_enabled,
         }
+        if bundle.branch.strip() == self._base_branch:
+            return ChangeResult(
+                status=ChangeStatus.INVALID_BRANCH,
+                bundle=bundle,
+                message="refusing to write the configured base branch",
+                audit=audit,
+            )
         if not bundle.is_verified:
             return ChangeResult(
                 status=ChangeStatus.VERIFY_FAILED,
@@ -305,6 +314,8 @@ class ChangePipeline:
             )
 
         assert approval is not None
+        self._assert_bundle_current(bundle)
+        await self._require_remote_base(bundle.base_sha)
         await self._record_approval(bundle, approval)
         commit_sha, pull_request = await self._push(bundle)
         return ChangeResult(
@@ -317,17 +328,34 @@ class ChangePipeline:
             audit=audit,
         )
 
+    def _assert_bundle_current(self, bundle: ChangeBundle) -> None:
+        current = build_change_bundle(
+            workspace=self._workspace,
+            base_sha=bundle.base_sha,
+            branch=bundle.branch,
+            title=bundle.title,
+            body=bundle.body,
+            verify_command=bundle.verify_command,
+            verify_exit_code=bundle.verify_exit_code,
+            verify_output=bundle.verify_output,
+            model=bundle.model,
+            trace_id=bundle.trace_id,
+            verify_output_hash=bundle.verify_output_hash,
+        )
+        if current.bundle_hash != bundle.bundle_hash:
+            raise ChangeBundleChanged("workspace changed after bundle")
+
     async def _verify(self) -> subprocess.CompletedProcess[str]:
-        argv = [*self._verify_command]
-        return await asyncio.to_thread(
-            subprocess.run,  # noqa: S603 - 命令来自部署方配置
-            argv,
-            cwd=str(self._workspace),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
+        result = await asyncio.to_thread(
+            run_command,
+            self._verify_command,
+            cwd=self._workspace,
+        )
+        return subprocess.CompletedProcess(
+            args=list(self._verify_command),
+            returncode=result.exit_code,
+            stdout=result.output,
+            stderr="",
         )
 
     async def _record_approval(
@@ -376,13 +404,7 @@ class ChangePipeline:
                 "GitHub 客户端缺少写侧方法；dry-run 之外的操作尚不可用"
             )
         repo = _split_repo(self._repo)
-        # base_sha 必须是远端真实 commit。本地工作区的 HEAD 可能是临时克隆的
-        # 提交，GitHub 建 ref 时只会回一个 422，让人误以为是权限或分支问题。
-        if not await self._remote_has_commit(repo, bundle.base_sha):
-            raise ValueError(
-                f"base_sha 不存在于远端仓库 {self._repo}: {bundle.base_sha[:12]}…；"
-                "变更必须基于远端 commit，而不是本地临时 HEAD"
-            )
+        await self._require_remote_base(bundle.base_sha)
         await create_ref(repo, bundle.branch, bundle.base_sha)
         commit_sha = str(
             await create_commit(
@@ -420,6 +442,16 @@ class ChangePipeline:
                 "GitHub client does not implement commit_exists; refusing to push"
             )
         return bool(await probe(repo, sha))
+
+    async def _require_remote_base(self, base_sha: str) -> None:
+        # 本地临时 HEAD 不是远端 commit 时，GitHub 建 ref 只会回一个 422，
+        # 让人误以为是权限或分支问题；在审批审计前就把原因说清楚。
+        repo = _split_repo(self._repo)
+        if not await self._remote_has_commit(repo, base_sha):
+            raise ValueError(
+                f"base_sha 不存在于远端仓库 {self._repo}: {base_sha[:12]}…；"
+                "变更必须基于远端 commit，而不是本地临时 HEAD"
+            )
 
     def _file_payload(self, bundle: ChangeBundle) -> list[dict[str, str]]:
         """把变更包里的路径读成 Git Data API 需要的 base64 内容。"""

@@ -109,7 +109,7 @@ def parse_selector(selector: str) -> tuple[list[str], str | None]:
         # 位置参数：只允许工作区内的相对路径或 pytest nodeid。
         if token.startswith("/") or token.startswith("\\") or re.match(r"^[A-Za-z]:", token):
             return [], f"筛选参数 {token} 不是工作区内的相对路径"
-        if ("/" in token or "\\" in token) and ".." in token.replace("\\", "/").split("/"):
+        if ".." in token.replace("\\", "/").split("/"):
             return [], f"筛选参数 {token} 含上级目录"
         tokens.append(token)
     return tokens, None

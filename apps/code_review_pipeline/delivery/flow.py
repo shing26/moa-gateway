@@ -260,7 +260,7 @@ class DeliveryFlow:
         except Exception as exc:
             return await self._finish(
                 run,
-                DeliveryRunState.REJECTED,
+                DeliveryRunState.NEEDS_HUMAN,
                 FailureInfo(
                     FailureCode.INFRA_ERROR,
                     f"push approval failed: {type(exc).__name__}: {exc}",
@@ -273,6 +273,16 @@ class DeliveryFlow:
                 FailureInfo(
                     FailureCode.APPROVAL_REJECTED,
                     "human rejected or unavailable for push approval",
+                ),
+            )
+        if approval.run_id != run.run_id:
+            return await self._finish(
+                run,
+                DeliveryRunState.NEEDS_HUMAN,
+                FailureInfo(
+                    FailureCode.INFRA_ERROR,
+                    "approval run_id does not match the active DeliveryRun: "
+                    f"{approval.run_id!r} != {run.run_id!r}",
                 ),
             )
 

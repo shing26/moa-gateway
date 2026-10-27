@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import Any
 
 from apps.code_review_pipeline.merge_state import (
@@ -72,6 +73,55 @@ class MergeRecord:
     @property
     def is_terminal(self) -> bool:
         return is_terminal(MergeState(self.state))
+
+    def with_delivery_evidence(
+        self,
+        *,
+        run_id: str,
+        trace_id: str,
+        bundle_hash: str,
+        at: str,
+    ) -> MergeRecord:
+        """Attach delivery provenance without replacing merge progress."""
+        existing = {
+            "run_id": self.run_id,
+            "trace_id": self.trace_id,
+            "bundle_hash": self.bundle_hash,
+        }
+        incoming = {
+            "run_id": run_id,
+            "trace_id": trace_id,
+            "bundle_hash": bundle_hash,
+        }
+        for name, value in incoming.items():
+            if existing[name] and existing[name] != value:
+                raise ValueError(
+                    f"merge record already belongs to a different {name}: "
+                    f"{existing[name]!r} != {value!r}"
+                )
+
+        transitions = [dict(item) for item in self.transitions]
+        for item in transitions:
+            if item.get("to") == MergeState.WATCHING.value:
+                item.update(incoming)
+                break
+        else:
+            transitions.insert(
+                0,
+                {
+                    "from": None,
+                    "to": MergeState.WATCHING.value,
+                    "at": at,
+                    **incoming,
+                },
+            )
+        return replace(
+            self,
+            run_id=run_id,
+            trace_id=trace_id,
+            bundle_hash=bundle_hash,
+            transitions=tuple(transitions),
+        )
 
 
 class MergeNotFound(LookupError):
@@ -219,6 +269,35 @@ class PostgresMergeStore:
                         Jsonb(list(record.transitions)),
                     ),
                 )
+                if record.run_id or record.trace_id or record.bundle_hash:
+                    cur.execute(
+                        f"SELECT {self._COLUMNS} FROM pr_merge_gate WHERE "
+                        f"{self._IDENTITY} FOR UPDATE",
+                        record.identity,
+                    )
+                    row = cur.fetchone()
+                    if row is not None:
+                        existing = self._row_to_record(row)
+                        at = (
+                            str(record.transitions[0].get("at") or "")
+                            if record.transitions
+                            else datetime.now(UTC).isoformat()
+                        )
+                        enriched = existing.with_delivery_evidence(
+                            run_id=record.run_id,
+                            trace_id=record.trace_id,
+                            bundle_hash=record.bundle_hash,
+                            at=at or datetime.now(UTC).isoformat(),
+                        )
+                        if enriched.transitions != existing.transitions:
+                            cur.execute(
+                                "UPDATE pr_merge_gate SET transitions = %s::jsonb "
+                                f"WHERE {self._IDENTITY}",
+                                (
+                                    Jsonb(list(enriched.transitions)),
+                                    *record.identity,
+                                ),
+                            )
                 self._conn.commit()
         except Exception:
             if self._conn:

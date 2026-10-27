@@ -222,6 +222,14 @@ class GitHubChangeAdapter:
                 ),
             )
             self._merge_store.save(record)
+        else:
+            record = record.with_delivery_evidence(
+                run_id=run_id,
+                trace_id=trace_id,
+                bundle_hash=bundle_hash,
+                at=now,
+            )
+            self._merge_store.save(record)
         self._merge_store.supersede_older(
             record.repo,
             record.pr_number,

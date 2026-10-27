@@ -215,7 +215,15 @@ async def test_run_tests_appends_selector_to_the_fixed_command(tmp_path: Path) -
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "selector",
-    ["--rootdir=/", "--confcutdir=..", "-p no:cacheprovider", "../outside.py", "/etc/passwd"],
+    [
+        "--rootdir=/",
+        "--confcutdir=..",
+        "-p no:cacheprovider",
+        "..",
+        "../outside.py",
+        "tests/../outside.py",
+        "/etc/passwd",
+    ],
 )
 async def test_run_tests_rejects_selector_outside_allowlist(
     tmp_path: Path, selector: str
@@ -237,3 +245,12 @@ def test_parse_selector_rejects_unknown_flag() -> None:
     tokens, reason = parse_selector("--import-mode=importlib")
     assert tokens == []
     assert reason is not None
+
+
+@pytest.mark.parametrize("selector", ["..", "../outside", "tests/../outside"])
+def test_parse_selector_rejects_parent_directory_components(selector: str) -> None:
+    tokens, reason = parse_selector(selector)
+
+    assert tokens == []
+    assert reason is not None
+    assert "上级目录" in reason

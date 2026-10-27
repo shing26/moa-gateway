@@ -90,6 +90,37 @@ def test_verify_failure_blocks_export(repo: Path) -> None:
     assert result.bundle.patch.strip()
 
 
+@pytest.mark.asyncio
+async def test_verification_does_not_inherit_gateway_credentials(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+    monkeypatch.setenv("CUSTOM_API_KEY", "provider-secret")
+    verify_command = (
+        sys.executable,
+        "-c",
+        (
+            "import os; "
+            "print(os.environ.get('GITHUB_TOKEN', 'missing')); "
+            "print(os.environ.get('CUSTOM_API_KEY', 'missing'))"
+        ),
+    )
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=verify_command,
+        model_name="test-model",
+    )
+
+    result = await pipeline.prepare_bundle(_request())
+
+    assert result.bundle is not None
+    assert result.bundle.verify_output.splitlines() == ["missing", "missing"]
+
+
 def test_no_changes_is_not_exportable(repo: Path) -> None:
     pipeline = ChangePipeline(
         github=object(),
@@ -262,6 +293,54 @@ def test_push_rejects_approval_for_a_different_trace(repo: Path) -> None:
     assert "trace" in result.message.lower()
 
 
+@pytest.mark.asyncio
+async def test_publish_refuses_to_write_the_base_branch(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    calls: list[str] = []
+
+    class RecordingGitHub:
+        async def commit_exists(self, repo, sha):
+            calls.append("commit_exists")
+            return True
+
+        async def create_ref(self, repo, branch, base_sha):
+            calls.append("create_ref")
+            return {}
+
+        async def create_commit(self, repo, **kwargs):
+            calls.append("create_commit")
+            return "b" * 40
+
+        async def create_pull_request(self, repo, **kwargs):
+            calls.append("create_pull_request")
+            return _pr_ref()
+
+    pipeline = ChangePipeline(
+        github=RecordingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        base_branch="moa/change-1-trace-1",
+        push_enabled=True,
+    )
+    prepared = await pipeline.prepare_bundle(_request())
+    assert prepared.bundle is not None
+
+    result = await pipeline.publish_bundle(
+        prepared.bundle,
+        ChangeApproval(
+            approver="alice",
+            trace_id="trace-1",
+            bundle_hash=prepared.bundle.bundle_hash,
+            run_id="run-1",
+        ),
+    )
+
+    assert result.status is ChangeStatus.INVALID_BRANCH
+    assert calls == []
+
+
 def test_push_records_approval_before_any_remote_write(repo: Path) -> None:
     (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
     request = _request()
@@ -329,6 +408,44 @@ def test_push_records_approval_before_any_remote_write(repo: Path) -> None:
         },
     )
     assert [name for name, _ in events[1:]] == ["ref", "commit", "pr"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_remote_base_is_rejected_before_approval_audit(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    approval_records: list[dict[str, str]] = []
+
+    class NoSuchCommitGitHub:
+        async def commit_exists(self, repo, sha):
+            return False
+
+    async def record_approval(**kwargs: str) -> None:
+        approval_records.append(kwargs)
+
+    pipeline = ChangePipeline(
+        github=NoSuchCommitGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+        approval_recorder=record_approval,
+    )
+    prepared = await pipeline.prepare_bundle(_request())
+    assert prepared.bundle is not None
+
+    with pytest.raises(ValueError, match="base_sha"):
+        await pipeline.publish_bundle(
+            prepared.bundle,
+            ChangeApproval(
+                approver="alice",
+                trace_id="trace-1",
+                bundle_hash=prepared.bundle.bundle_hash,
+                run_id="run-1",
+            ),
+        )
+
+    assert approval_records == []
 
 
 def test_push_calls_only_three_write_operations(repo: Path) -> None:
@@ -639,6 +756,33 @@ def test_push_rejects_workspace_content_changed_after_bundle(repo: Path) -> None
                     bundle_hash=dry_run.bundle.bundle_hash,
                 ),
             )
+        )
+
+
+@pytest.mark.asyncio
+async def test_publish_rejects_a_new_untracked_file_after_bundle(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+    )
+    prepared = await pipeline.prepare_bundle(_request())
+    assert prepared.bundle is not None
+    (repo / "late.txt").write_text("not in the approved bundle\n", encoding="utf-8")
+
+    with pytest.raises(ChangeBundleChanged, match="workspace changed after bundle"):
+        await pipeline.publish_bundle(
+            prepared.bundle,
+            ChangeApproval(
+                approver="alice",
+                trace_id="trace-1",
+                bundle_hash=prepared.bundle.bundle_hash,
+                run_id="run-1",
+            ),
         )
 
 

@@ -227,6 +227,7 @@ def _flow(
             approver="alice",
             trace_id="trace-1",
             bundle_hash=_bundle().bundle_hash,
+            run_id="run-1",
         )
     )
     flow = DeliveryFlow(
@@ -366,6 +367,75 @@ async def test_human_rejection_stops_before_publish(tmp_path: Path) -> None:
     assert run.failure.code is FailureCode.APPROVAL_REJECTED
     assert publisher.calls == 0
     assert approval.bundles == [bundle]
+
+
+@pytest.mark.asyncio
+async def test_approval_transport_failure_needs_human_retry(tmp_path: Path) -> None:
+    class UnavailableApproval(FakeApproval):
+        async def request(self, *, run_id: str, bundle: ChangeBundle):
+            raise RuntimeError("approval service unavailable")
+
+    flow, _, _, publisher = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt()]),
+        preparer=FakePreparer(
+            [
+                ChangePreparation(
+                    status=PreparationStatus.READY,
+                    bundle=_bundle(),
+                    verification=_verification(),
+                )
+            ]
+        ),
+        approval=UnavailableApproval(None),
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.NEEDS_HUMAN
+    assert run.failure is not None
+    assert run.failure.code is FailureCode.INFRA_ERROR
+    assert "approval service unavailable" in run.failure.message
+    assert publisher.calls == 0
+
+
+@pytest.mark.parametrize("returned_run_id", ["", "run-other"])
+@pytest.mark.asyncio
+async def test_approval_for_a_different_run_blocks_publish(
+    tmp_path: Path,
+    returned_run_id: str,
+) -> None:
+    bundle = _bundle()
+    approval = FakeApproval(
+        ChangeApproval(
+            approver="alice",
+            trace_id="trace-1",
+            bundle_hash=bundle.bundle_hash,
+            run_id=returned_run_id,
+        )
+    )
+    flow, _, _, publisher = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt()]),
+        preparer=FakePreparer(
+            [
+                ChangePreparation(
+                    status=PreparationStatus.READY,
+                    bundle=bundle,
+                    verification=_verification(),
+                )
+            ]
+        ),
+        approval=approval,
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.NEEDS_HUMAN
+    assert run.failure is not None
+    assert run.failure.code is FailureCode.INFRA_ERROR
+    assert "run_id" in run.failure.message
+    assert publisher.calls == 0
 
 
 @pytest.mark.asyncio
