@@ -18,6 +18,22 @@ NEW_E3_CASE_IDS = (
 )
 
 
+@pytest.mark.parametrize("case_id", NEW_E3_CASE_IDS)
+def test_controlled_case_patches_use_lf(case_id: str) -> None:
+    case = next(item for item in load_controlled_cases() if item.case_id == case_id)
+    task_path = ROOT / case.task_file
+    patch_paths = (
+        task_path.with_name(f"{task_path.stem.removesuffix('.task')}.test.patch"),
+        task_path.with_name(f"{task_path.stem.removesuffix('.task')}.solution.patch"),
+    )
+
+    for patch_path in patch_paths:
+        assert b"\r\n" not in patch_path.read_bytes(), (
+            f"{patch_path.relative_to(ROOT)} must stay LF so git apply matches "
+            "the LF workspace produced by git archive"
+        )
+
+
 def _commit_available(sha: str) -> bool:
     completed = subprocess.run(
         ["git", "cat-file", "-e", f"{sha}^{{commit}}"],

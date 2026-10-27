@@ -30,6 +30,11 @@ for name in (
     "CODE_REVIEW_DATABASE_URL",
     "DATABASE_URL",
     "POSTGRES_URL",
+    # DSN 为空时 build_vector_store() 会改看这个路径。若继承开发机的
+    # ./data/code_review_vectors.sqlite，单测结果就依赖当前工作目录里是否
+    # 恰好事先存在 data/；完整跑一开始没有该目录，实测两条例例直接报
+    # "unable to open database file"。需要持久化的用例各自显式设置。
+    "CODE_REVIEW_VECTOR_DB_PATH",
 ):
     # 只在未设置时置空：用户显式传入的值（如 CI 或本地真库验证）不应被覆盖。
     if not os.environ.get(name):

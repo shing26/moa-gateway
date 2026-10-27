@@ -2,3 +2,4 @@
 # 转成 CRLF，而 `git apply` 对 CRLF 上下文直接 "patch does not apply"（实测）——
 # 于是 harness 的 materialize 会失败。这里显式钉成 LF，别让平台默认值决定任务能不能跑。
 bench/tasks/*.patch text eol=lf
+evals/datasets/review_controlled/*.patch text eol=lf
