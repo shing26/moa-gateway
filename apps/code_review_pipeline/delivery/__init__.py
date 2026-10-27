@@ -33,6 +33,7 @@ from apps.code_review_pipeline.delivery.state import (
     InvalidDeliveryTransition,
     assert_transition,
 )
+from apps.code_review_pipeline.delivery.workspace import GitHubWorkspaceProvisioner
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
@@ -54,6 +55,7 @@ __all__ = [
     "EvidenceRef",
     "FailureCode",
     "FailureInfo",
+    "GitHubWorkspaceProvisioner",
     "ImplementerPort",
     "InvalidDeliveryTransition",
     "PreparationStatus",

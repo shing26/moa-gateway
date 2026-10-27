@@ -20,7 +20,9 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 import time
+from pathlib import Path
 from typing import Any
 
 
@@ -306,6 +308,166 @@ def cmd_demo_approve(args: argparse.Namespace) -> int:
     return 0
 
 
+class TerminalPushApprovalPort:
+    async def request(self, *, run_id: str, bundle) -> Any:
+        from apps.code_review_pipeline.change.pipeline import ChangeApproval
+
+        print(f"run_id   : {run_id}")
+        print(f"branch   : {bundle.branch}")
+        print(f"bundle   : {bundle.bundle_hash}")
+        print(f"patch    : {bundle.patch_hash}")
+        print(f"verify   : exit={bundle.verify_exit_code}")
+        if not sys.stdin.isatty():
+            print("non-interactive stdin; push approval denied")
+            return None
+        operator = (await asyncio.to_thread(input, "approver: ")).strip()
+        answer = (
+            await asyncio.to_thread(
+                input,
+                "type APPROVE to push this exact bundle: ",
+            )
+        ).strip()
+        if not operator or answer != "APPROVE":
+            return None
+        return ChangeApproval(
+            approver=operator,
+            trace_id=bundle.trace_id,
+            bundle_hash=bundle.bundle_hash,
+        )
+
+
+def cmd_delivery_run(args: argparse.Namespace) -> int:
+    from app.agents.provider import LLMClient, LLMConfig
+    from app.config import settings
+    from apps.code_review_pipeline.change.pipeline import (
+        ChangePipeline,
+        verify_command_from_env,
+    )
+    from apps.code_review_pipeline.delivery.adapters.github import (
+        GitHubChangeAdapter,
+    )
+    from apps.code_review_pipeline.delivery.adapters.production_agent import (
+        ProductionImplementer,
+    )
+    from apps.code_review_pipeline.delivery.audit import WalDeliveryAudit
+    from apps.code_review_pipeline.delivery.flow import DeliveryFlow
+    from apps.code_review_pipeline.delivery.models import (
+        DeliveryPolicy,
+        DeliveryRequest,
+    )
+    from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
+    from apps.code_review_pipeline.delivery.workspace import (
+        GitHubWorkspaceProvisioner,
+    )
+    from apps.code_review_pipeline.merge_store import (
+        PostgresMergeStore,
+        build_merge_store,
+    )
+    from apps.code_review_pipeline.routing.github_provider import build_github_client
+
+    if not settings.change_agent_push_enabled:
+        print(
+            "CHANGE_AGENT_PUSH_ENABLED=0；delivery run 是真实交付入口。"
+            "dry-run 请使用 scripts/run_change_demo.py。",
+            file=sys.stderr,
+        )
+        return 2
+    if not settings.change_agent_model.strip():
+        print("CHANGE_AGENT_MODEL 未配置", file=sys.stderr)
+        return 2
+    verify_command = verify_command_from_env(settings.change_agent_verify_command)
+    if not verify_command:
+        print("CHANGE_AGENT_VERIFY_COMMAND 未配置", file=sys.stderr)
+        return 2
+    if not settings.github_token:
+        print("GITHUB_TOKEN 未配置", file=sys.stderr)
+        return 2
+
+    merge_store = build_merge_store()
+    if not isinstance(merge_store, PostgresMergeStore):
+        print(
+            "delivery run 需要共享 MergeStore；请配置 "
+            "VECTOR_DB_DSN 或 CODE_REVIEW_DATABASE_URL",
+            file=sys.stderr,
+        )
+        return 2
+
+    config = LLMConfig.from_env("LLM")
+    config.model = settings.change_agent_model
+    llm = LLMClient(config)
+    github = build_github_client()
+    policy = DeliveryPolicy(
+        verify_command=verify_command,
+        topology=settings.delivery_topology,
+        max_steps=settings.delivery_max_steps,
+        max_tokens=settings.delivery_max_tokens,
+    )
+    request = DeliveryRequest(
+        trace_id=args.trace_id,
+        repo=args.repo,
+        base_sha=args.base_sha,
+        base_branch=args.base_branch,
+        branch=args.branch,
+        goal=args.goal,
+        title=args.title,
+        body=args.body,
+        origin=args.origin,
+        source_ref=args.source_ref,
+    )
+
+    async def execute():
+        try:
+            with tempfile.TemporaryDirectory(prefix="moa-delivery-") as raw:
+                workspace = await GitHubWorkspaceProvisioner(
+                    github=github
+                ).materialize(
+                    repo=args.repo,
+                    base_sha=args.base_sha,
+                    destination=Path(raw) / "workspace",
+                )
+                pipeline = ChangePipeline(
+                    github=github,
+                    repo=args.repo,
+                    workspace=workspace,
+                    verify_command=verify_command,
+                    model_name=settings.change_agent_model,
+                    base_branch=args.base_branch,
+                    push_enabled=True,
+                )
+                adapter = GitHubChangeAdapter(
+                    pipeline=pipeline,
+                    merge_store=merge_store,
+                )
+                flow = DeliveryFlow(
+                    workspace=workspace,
+                    policy=policy,
+                    implementer=ProductionImplementer(
+                        llm=llm,
+                        verify_command=verify_command,
+                    ),
+                    preparer=adapter,
+                    approval=TerminalPushApprovalPort(),
+                    publisher=adapter,
+                    recorder=DeliveryRunStore(settings.delivery_run_record_dir),
+                    audit=WalDeliveryAudit(),
+                )
+                return await flow.run(request)
+        finally:
+            await merge_store.close()
+            await llm.aclose()
+            await github.aclose()
+
+    run = asyncio.run(execute())
+    print(f"run_id    : {run.run_id}")
+    print(f"state     : {run.state.value}")
+    print(f"failure   : {run.failure.to_dict() if run.failure else '-'}")
+    if run.push is not None:
+        print(f"pr        : {run.push.pull_request.url}")
+        print(f"head_sha  : {run.push.pull_request.head_sha}")
+    print(f"record    : {settings.delivery_run_record_dir}/{run.run_id}.json")
+    return 0 if run.state.value in {"waiting_ci", "ready_for_push_approval"} else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app.cli", description="moa-gateway 操作入口"
@@ -356,6 +518,25 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--real", action="store_true", help="真发评论（默认受 dry-run 开关约束）")
     approve.add_argument("--reject", default="", metavar="REASON", help="拒绝而不是批准")
     approve.set_defaults(func=cmd_demo_approve)
+
+    delivery = sub.add_parser("delivery", help="受治理的仓库交付")
+    delivery_sub = delivery.add_subparsers(dest="command", required=True)
+    delivery_run = delivery_sub.add_parser("run", help="实现、验证、审批、推送并登记 PR")
+    delivery_run.add_argument("--repo", required=True)
+    delivery_run.add_argument("--base-sha", required=True)
+    delivery_run.add_argument("--base-branch", default=None)
+    delivery_run.add_argument("--branch", required=True)
+    delivery_run.add_argument("--title", required=True)
+    delivery_run.add_argument("--body", default="")
+    delivery_run.add_argument("--goal", required=True)
+    delivery_run.add_argument(
+        "--origin",
+        choices=["manual", "issue", "ci_failure"],
+        default="manual",
+    )
+    delivery_run.add_argument("--source-ref", default="")
+    delivery_run.add_argument("--trace-id", default=None)
+    delivery_run.set_defaults(func=cmd_delivery_run)
 
     return parser
 
@@ -409,8 +590,22 @@ def cmd_collab(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_delivery_defaults(args: argparse.Namespace) -> None:
+    if getattr(args, "group", "") != "delivery":
+        return
+    from app.config import settings
+
+    if args.base_branch is None:
+        args.base_branch = settings.change_agent_base_branch
+    if args.trace_id is None:
+        args.trace_id = f"delivery-{time.time_ns()}"
+    if not args.body:
+        args.body = args.goal
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _apply_delivery_defaults(args)
     # Windows 下 psycopg 拒绝 ProactorEventLoop（与 app/__main__.py 同一处理）。
     if os.name == "nt":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
