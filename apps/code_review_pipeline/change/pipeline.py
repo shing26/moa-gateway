@@ -12,6 +12,7 @@ import base64
 import hashlib
 import inspect
 import logging
+import os
 import re
 import shlex
 import shutil
@@ -461,26 +462,50 @@ class ChangePipeline:
                 "变更必须基于远端 commit，而不是本地临时 HEAD"
             )
 
-    def _file_payload(self, bundle: ChangeBundle) -> list[dict[str, str]]:
+    def _file_payload(self, bundle: ChangeBundle) -> list[dict[str, Any]]:
         """把变更包里的路径读成 Git Data API 需要的 base64 内容。"""
-        payload: list[dict[str, str]] = []
+        payload: list[dict[str, Any]] = []
         for change in bundle.files:
-            target = (self._workspace / change.path).resolve()
-            if not target.is_relative_to(self._workspace):
+            target = self._workspace / change.path
+            parent = target.parent.resolve()
+            if parent != self._workspace and not parent.is_relative_to(
+                self._workspace
+            ):
                 raise ValueError(f"变更路径越界: {change.path}")
+            if change.kind != "deleted" and target.is_symlink() != (
+                change.mode == "120000"
+            ):
+                raise ChangeBundleChanged(
+                    f"file mode changed after bundle: {change.path}"
+                )
             if change.kind == "deleted":
-                if target.exists():
+                if target.exists() or target.is_symlink():
                     raise ChangeBundleChanged(
                         f"file changed after bundle: {change.path} was recreated"
                     )
-                payload.append({"path": change.path, "content_b64": None})
+                payload.append(
+                    {
+                        "path": change.path,
+                        "content_b64": None,
+                        "mode": change.mode,
+                    }
+                )
                 continue
-            try:
-                content = target.read_bytes()
-            except FileNotFoundError as exc:
-                raise ChangeBundleChanged(
-                    f"file changed after bundle: {change.path}"
-                ) from exc
+            if change.mode == "120000":
+                content = str(os.readlink(target)).encode(
+                    "utf-8",
+                    errors="surrogateescape",
+                )
+            else:
+                target = target.resolve()
+                if not target.is_relative_to(self._workspace):
+                    raise ValueError(f"变更路径越界: {change.path}")
+                try:
+                    content = target.read_bytes()
+                except FileNotFoundError as exc:
+                    raise ChangeBundleChanged(
+                        f"file changed after bundle: {change.path}"
+                    ) from exc
             digest = hashlib.sha256(content).hexdigest()
             if digest != change.after_hash:
                 raise ChangeBundleChanged(
@@ -490,6 +515,7 @@ class ChangePipeline:
                 {
                     "path": change.path,
                     "content_b64": base64.b64encode(content).decode("ascii"),
+                    "mode": change.mode,
                 }
             )
         return payload

@@ -197,6 +197,43 @@ async def test_tool_loop_stops_when_provider_exceeds_the_budget(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_tool_loop_does_not_accept_completion_over_the_budget(
+    tmp_path: Path,
+) -> None:
+    class OverspendingFinalLLM(FakeLLM):
+        async def chat_with_tools(self, messages, tools, **kwargs) -> ChatResult:
+            result = await super().chat_with_tools(messages, tools, **kwargs)
+            self.last_metrics = {
+                "prompt_tokens": 100,
+                "completion_tokens": 40,
+                "cost_usd": 0.001,
+                "llm_latency_ms": 2.0,
+            }
+            return result
+
+    llm = OverspendingFinalLLM(["finished after overspending"])
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "finish"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=5,
+        max_tokens=20,
+    )
+
+    assert result.status == "budget_exhausted"
+    assert result.usage.total_tokens == 140
+    assert result.steps == ()
+
+
+@pytest.mark.asyncio
 async def test_tool_loop_completes_when_final_text_arrives_after_max_steps(
     tmp_path: Path,
 ) -> None:

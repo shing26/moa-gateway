@@ -9,6 +9,7 @@ from bench.experiment import (
     BenchExperimentAdapter,
     CollaborationExperimentAdapter,
     ExperimentRunner,
+    ExperimentManifest,
     ExperimentSpec,
     ExperimentStore,
     RunMetrics,
@@ -142,6 +143,124 @@ async def test_store_refuses_to_replace_or_regress_a_manifest(tmp_path) -> None:
         store.write_manifest(forged_append)
 
     assert outcome.manifest_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_manifest_trials_without_matching_records(
+    tmp_path,
+) -> None:
+    class FakeExecutor:
+        async def execute(
+            self, spec: ExperimentSpec, trial_index: int
+        ) -> TrialEvidence:
+            return TrialEvidence(status="ok")
+
+    store = ExperimentStore(tmp_path / "records")
+    outcome = await ExperimentRunner(store).run(
+        ExperimentSpec(
+            experiment_id="exp-evidence",
+            task="immutable evidence",
+            adapter="fake",
+            trials=2,
+        ),
+        FakeExecutor(),
+    )
+    # Simulate a forged append from the initial zero-trial manifest.
+    store._atomic_write(  # noqa: SLF001 - test simulates an on-disk initial manifest
+        store.manifest_path("exp-evidence"),
+        replace(
+            outcome.manifest,
+            trial_count=0,
+            trial_ids=(),
+            trial_paths=(),
+            status_counts={},
+        ).to_dict(),
+        overwrite=True,
+    )
+    forged = replace(
+        outcome.manifest,
+        trial_count=1,
+        trial_ids=("exp-evidence-trial-000",),
+        trial_paths=("trials/trial-000.json",),
+        status_counts={"ok": 1},
+    )
+    store.trial_path("exp-evidence", 0).unlink()
+
+    with pytest.raises(FileExistsError, match="不存在"):
+        store.write_manifest(forged)
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_manifest_status_without_record_evidence(
+    tmp_path,
+) -> None:
+    class FakeExecutor:
+        async def execute(
+            self, spec: ExperimentSpec, trial_index: int
+        ) -> TrialEvidence:
+            return TrialEvidence(status="ok")
+
+    store = ExperimentStore(tmp_path / "records")
+    outcome = await ExperimentRunner(store).run(
+        ExperimentSpec(
+            experiment_id="exp-status",
+            task="immutable status",
+            adapter="fake",
+            trials=2,
+        ),
+        FakeExecutor(),
+    )
+    store._atomic_write(  # noqa: SLF001 - test simulates an on-disk initial manifest
+        store.manifest_path("exp-status"),
+        replace(
+            outcome.manifest,
+            trial_count=0,
+            trial_ids=(),
+            trial_paths=(),
+            status_counts={},
+        ).to_dict(),
+        overwrite=True,
+    )
+    forged = replace(
+        outcome.manifest,
+        trial_count=1,
+        trial_ids=("exp-status-trial-000",),
+        trial_paths=("trials/trial-000.json",),
+        status_counts={"fail": 1},
+    )
+
+    with pytest.raises(FileExistsError, match="status_counts"):
+        store.write_manifest(forged)
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_an_initial_manifest_with_forged_trials(
+    tmp_path,
+) -> None:
+    store = ExperimentStore(tmp_path / "records")
+    spec = ExperimentSpec(
+        experiment_id="exp-initial-forgery",
+        task="initial forgery",
+        adapter="fake",
+        trials=1,
+    )
+    forged = ExperimentManifest(
+        schema_version=1,
+        experiment_id=spec.experiment_id,
+        created_at="2026-10-29T00:00:00+00:00",
+        updated_at="2026-10-29T00:00:00+00:00",
+        config_hash=spec.config_hash,
+        trial_count=1,
+        status_counts={"ok": 1},
+        trial_ids=("exp-initial-forgery-trial-000",),
+        trial_paths=("trials/trial-000.json",),
+        spec=spec,
+    )
+
+    with pytest.raises(FileExistsError, match="不存在"):
+        store.write_manifest(forged)
+
+    assert not store.manifest_path(spec.experiment_id).exists()
 
 
 @pytest.mark.asyncio

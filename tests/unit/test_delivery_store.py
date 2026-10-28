@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -184,6 +185,45 @@ async def test_run_store_round_trips_every_delivery_evidence_field(
     await store.save(original)
 
     assert store.load(original.run_id) == original
+
+
+@pytest.mark.asyncio
+async def test_run_store_round_trips_file_modes(tmp_path: Path) -> None:
+    store = DeliveryRunStore(tmp_path)
+    original = _full_run()
+    assert original.bundle is not None
+    original = replace(
+        original,
+        bundle=replace(
+            original.bundle,
+            files=(
+                replace(original.bundle.files[0], mode="100755"),
+            ),
+        ),
+    )
+
+    await store.save(original)
+
+    assert store.load(original.run_id) == original
+
+
+@pytest.mark.asyncio
+async def test_run_store_defaults_legacy_file_mode_to_regular(
+    tmp_path: Path,
+) -> None:
+    store = DeliveryRunStore(tmp_path)
+    original = _full_run()
+    assert original.bundle is not None
+    await store.save(original)
+    path = tmp_path / f"{original.run_id}.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    del payload["bundle"]["files"][0]["mode"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = store.load(original.run_id)
+
+    assert loaded.bundle is not None
+    assert loaded.bundle.files[0].mode == "100644"
 
 
 @pytest.mark.asyncio

@@ -120,12 +120,34 @@ def create_verification_workspace(root: Path) -> tuple[Path, Path]:
     """Copy the workspace without ``.git`` or local caches for verification."""
     parent = Path(tempfile.mkdtemp(prefix="moa-verify-"))
     target = parent / "workspace"
+    source = Path(root).resolve()
+
+    def copy_file(source_path: str, target_path: str) -> None:
+        item = Path(source_path)
+        if item.is_symlink() or not item.is_file():
+            raise OSError(f"验证副本只允许普通文件: {source_path}")
+        destination = Path(target_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(item, destination)
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        ignored: set[str] = set()
+        current = Path(directory)
+        for name in names:
+            candidate = current / name
+            if name in _SKIP_DIRS:
+                ignored.add(name)
+                continue
+            if candidate.is_symlink():
+                raise OSError(f"工作区内不允许符号链接: {candidate}")
+        return ignored
+
     try:
         shutil.copytree(
-            root.resolve(),
+            source,
             target,
-            ignore=shutil.ignore_patterns(*_SKIP_DIRS),
-            symlinks=False,
+            ignore=ignore,
+            copy_function=copy_file,
         )
     except Exception:
         shutil.rmtree(parent, ignore_errors=True)

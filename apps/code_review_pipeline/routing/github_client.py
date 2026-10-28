@@ -480,7 +480,7 @@ class GitHubClient:
         base_sha: str,
         branch: str,
         message: str,
-        files: list[dict[str, str]],
+        files: list[dict[str, Any]],
     ) -> str:
         """用 Git Data API 建一个 commit，返回新 commit sha。
 
@@ -500,9 +500,19 @@ class GitHubClient:
         for item in files:
             path = str(item.get("path") or "")
             content = item.get("content_b64")
+            mode = str(item.get("mode") or "100644")
+            if mode not in {"100644", "100755", "120000"}:
+                raise ValueError(f"不支持的 Git mode: {mode!r}")
             if content is None:
                 # 删除：tree 项不带 sha 即表示该路径不存在
-                entries.append({"path": path, "mode": "100644", "type": "blob", "sha": None})
+                entries.append(
+                    {
+                        "path": path,
+                        "mode": mode,
+                        "type": "blob",
+                        "sha": None,
+                    }
+                )
                 continue
             blob = await self._client.post(
                 f"/repos/{repo.owner}/{repo.name}/git/blobs",
@@ -512,7 +522,7 @@ class GitHubClient:
             entries.append(
                 {
                     "path": path,
-                    "mode": "100644",
+                    "mode": mode,
                     "type": "blob",
                     "sha": str(dict(blob.json()).get("sha") or ""),
                 }
