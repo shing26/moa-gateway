@@ -69,9 +69,11 @@ def test_redact_ci_log_removes_common_credential_encodings() -> None:
         '{"Authorization":"Bearer serialized-bearer-secret"}\n'
         "Headers({'authorization': 'Bearer mapping-bearer-secret'})\n"
         "Bearer bare-bearer-secret\n"
+        'Bearer "quoted-bearer-secret"\n'
         "AWS_SECRET_ACCESS_KEY=aws-secret-456\n"
         "https://alice:url-secret-789@example.com/path\n"
         "postgresql://dbuser:db-secret-321@db.example/app\n"
+        "redis://:redis-secret-654@cache.example:6380/2\n"
         "-----BEGIN PRIVATE KEY-----\n"
         "pem-secret-000\n"
         "-----END PRIVATE KEY-----\n"
@@ -85,9 +87,11 @@ def test_redact_ci_log_removes_common_credential_encodings() -> None:
         "serialized-bearer-secret",
         "mapping-bearer-secret",
         "bare-bearer-secret",
+        "quoted-bearer-secret",
         "aws-secret-456",
         "url-secret-789",
         "db-secret-321",
+        "redis-secret-654",
         "pem-secret-000",
     ):
         assert secret not in redacted
@@ -100,9 +104,11 @@ def test_artifacts_do_not_contain_common_credentials(tmp_path: Path) -> None:
         "serialized-bearer-secret",
         "mapping-bearer-secret",
         "bare-bearer-secret",
+        "quoted-bearer-secret",
         "aws-secret-456",
         "url-secret-789",
         "db-secret-321",
+        "redis-secret-654",
         "pem-secret-000",
     )
     report = build_ci_triage_report(
@@ -114,9 +120,11 @@ def test_artifacts_do_not_contain_common_credentials(tmp_path: Path) -> None:
                 '{"Authorization":"Bearer serialized-bearer-secret"} '
                 "Headers({'authorization': 'Bearer mapping-bearer-secret'}) "
                 "Bearer bare-bearer-secret "
+                'Bearer "quoted-bearer-secret" '
                 "AWS_SECRET_ACCESS_KEY=aws-secret-456 "
                 "https://alice:url-secret-789@example.com/path "
                 "postgresql://dbuser:db-secret-321@db.example/app "
+                "redis://:redis-secret-654@cache.example:6380/2 "
                 "-----BEGIN PRIVATE KEY----- pem-secret-000 "
                 "-----END PRIVATE KEY-----\n"
             )

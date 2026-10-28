@@ -51,7 +51,9 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
         r"\1[REDACTED]",
     ),
     (
-        re.compile(r"(?i)\bBearer\s+[^\"'\s,;}]+"),
+        re.compile(
+            r"(?i)\bBearer\s+(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;}]+)"
+        ),
         "Bearer [REDACTED]",
     ),
     (
@@ -64,7 +66,7 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (
         re.compile(
-            r"(?i)([a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@"
+            r"(?i)([a-z][a-z0-9+.-]*://[^/\s:@]*:)[^@\s/]+@"
         ),
         r"\1[REDACTED]@",
     ),
@@ -425,18 +427,31 @@ def build_ci_triage_report(
     )
 
 
+def _artifact_paths(
+    directory: str | Path,
+    trace_id: str,
+    head_sha: str,
+) -> tuple[Path, Path, Path]:
+    target = Path(directory)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", trace_id).strip("-")
+    if not stem:
+        stem = f"ci-{head_sha[:12]}"
+    json_path = target / f"{stem}.json"
+    markdown_path = target / f"{stem}.md"
+    request_path = target / f"{stem}.request.json"
+    return json_path, markdown_path, request_path
+
+
 def write_ci_triage_artifacts(
     report: CiTriageReport,
     directory: str | Path,
 ) -> CiTriageArtifacts:
-    target = Path(directory)
-    target.mkdir(parents=True, exist_ok=True)
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", report.trace_id).strip("-")
-    if not stem:
-        stem = f"ci-{report.head_sha[:12]}"
-    json_path = target / f"{stem}.json"
-    markdown_path = target / f"{stem}.md"
-    request_path = target / f"{stem}.request.json"
+    json_path, markdown_path, request_path = _artifact_paths(
+        directory,
+        report.trace_id,
+        report.head_sha,
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
     json_path.write_text(
         json.dumps(report.to_dict(), ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -471,11 +486,7 @@ def invalidate_ci_triage_request(
     directory: str | Path,
 ) -> Path:
     """Remove executable evidence for a trace whose current state is not failure."""
-    target = Path(directory)
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", trace_id).strip("-")
-    if not stem:
-        stem = f"ci-{head_sha[:12]}"
-    request_path = target / f"{stem}.request.json"
+    _, _, request_path = _artifact_paths(directory, trace_id, head_sha)
     request_path.unlink(missing_ok=True)
     return request_path
 
@@ -489,20 +500,15 @@ def write_ci_triage_unavailable_artifacts(
     status_code: int,
 ) -> CiTriageUnavailableArtifacts:
     """Record that GitHub permissions prevented establishment of failure status."""
-    target = Path(directory)
-    target.mkdir(parents=True, exist_ok=True)
-    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", trace_id).strip("-")
-    if not stem:
-        stem = f"ci-{head_sha[:12]}"
-    json_path = target / f"{stem}.json"
-    markdown_path = target / f"{stem}.md"
+    json_path, markdown_path, request_path = _artifact_paths(
+        directory,
+        trace_id,
+        head_sha,
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
     # A stable trace id means an earlier success may have left executable evidence.
     # The unavailable state must invalidate it rather than sit beside it.
-    request_path = invalidate_ci_triage_request(
-        trace_id=trace_id,
-        head_sha=head_sha,
-        directory=target,
-    )
+    request_path.unlink(missing_ok=True)
     if status_code == 401:
         detail = (
             "Grant fine-grained GitHub 'Checks: Read' and 'Actions: Read' "
