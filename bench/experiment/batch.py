@@ -1065,7 +1065,7 @@ def load_batch_rows(
                     model_config=model_identity,
                     wall_clock_s=record.duration_ms / 1000,
                     source=str(record.path or ""),
-                    task_origin=origins.get(cell.task_id, "E1"),  # type: ignore[arg-type]
+                    task_origin=origins[cell.task_id],
                     baseline_cost_usd=baseline_cost,
                     baseline_tokens=baseline_tokens,
                 )

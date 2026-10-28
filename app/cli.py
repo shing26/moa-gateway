@@ -556,7 +556,17 @@ def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
         )
         return 1
     except (httpx.HTTPError, ValueError) as exc:
+        invalidate_ci_triage_request(
+            trace_id=args.trace_id,
+            head_sha=args.sha,
+            directory=settings.ci_triage_output_dir,
+        )
         print(f"CI triage failed: {exc}", file=sys.stderr)
+        print(
+            "human review required; CI failure status was not established; "
+            "no GitHub writes performed.",
+            file=sys.stderr,
+        )
         return 1
 
     print(f"report    : {artifacts.json_path}")

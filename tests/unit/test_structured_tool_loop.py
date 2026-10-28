@@ -24,6 +24,7 @@ def _call(call_id: str, name: str, arguments: dict) -> dict:
 class FakeLLM:
     def __init__(self, responses: list[object]) -> None:
         self._responses = list(responses)
+        self.requests: list[dict[str, object]] = []
         self.last_metrics = {
             "prompt_tokens": 10,
             "completion_tokens": 5,
@@ -32,6 +33,7 @@ class FakeLLM:
         }
 
     async def chat_with_tools(self, messages, tools, **kwargs) -> ChatResult:
+        self.requests.append({"messages": list(messages), **kwargs})
         response = self._responses.pop(0)
         if isinstance(response, str):
             return ChatResult(
@@ -109,7 +111,39 @@ async def test_tool_loop_stops_on_token_budget(tmp_path: Path) -> None:
     )
 
     assert result.status == "budget_exhausted"
+    assert result.usage.total_tokens == 15
+    assert [request["max_tokens"] for request in llm.requests] == [20]
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_passes_only_the_remaining_token_budget(tmp_path: Path) -> None:
+    llm = FakeLLM(
+        [
+            [_call("1", "read_file", {"path": "x.txt"})],
+            "finished",
+        ]
+    )
+    (tmp_path / "x.txt").write_text("x\n", encoding="utf-8")
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=5,
+        max_tokens=40,
+    )
+
+    assert result.status == "completed"
     assert result.usage.total_tokens == 30
+    # 40 - 15 used - 10 repeated prompt = 15 tokens of completion room.
+    assert [request["max_tokens"] for request in llm.requests] == [40, 15]
 
 
 @pytest.mark.asyncio

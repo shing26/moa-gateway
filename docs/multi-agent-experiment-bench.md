@@ -37,8 +37,9 @@ Experiment
     └── trial-001.json
 ```
 
-`experiment.json` 是 manifest；`trial-*.json` 创建后拒绝覆盖。重复使用已有
-`experiment-id` 会直接失败。
+`experiment.json` 是进度索引：只允许追加 Trial 进度，已有配置、Experiment 身份与
+Trial 前缀拒绝改写；`trial-*.json` 创建后拒绝覆盖。重复使用已有 `experiment-id`
+会直接失败。
 
 ## 实验协议
 

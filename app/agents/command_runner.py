@@ -8,29 +8,15 @@
 from __future__ import annotations
 
 import logging
-import os
 # Fixed verification commands require a process boundary; task argv is never shell-expanded.
 import subprocess  # nosec B404
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-logger = logging.getLogger("moa.agents.command_runner")
+from app.agents.subprocess_env import isolated_env
 
-#: 剥掉的环境变量：代理与凭据。它们既能带出网络，也能让"环境里恰好有 token"
-#: 变成一次和编排无关的差异来源。
-_STRIPPED_SUFFIXES = ("_PROXY", "_API_KEY")
-_STRIPPED_NAMES = frozenset(
-    {
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "ALL_PROXY",
-        "NO_PROXY",
-        "GITHUB_TOKEN",
-        "OPENAI_API_KEY",
-        "OMNIROUTE_API_KEY",
-    }
-)
+logger = logging.getLogger("moa.agents.command_runner")
 
 #: 防止被验证的命令往工作区里写缓存，把 patch 弄脏。
 _DEFAULT_PYTEST_ADDOPTS = "-p no:cacheprovider"
@@ -49,17 +35,7 @@ class CommandResult:
 
 def build_env(workspace: Path, base: Mapping[str, str] | None = None) -> dict[str, str]:
     """构造子进程环境：剥代理/凭据，把 workspace 放到 ``PYTHONPATH`` 最前。"""
-    env = dict(os.environ if base is None else base)
-    for name in list(env):
-        upper = name.upper()
-        if upper in _STRIPPED_NAMES or upper.endswith(_STRIPPED_SUFFIXES):
-            env.pop(name, None)
-    existing = env.get("PYTHONPATH", "")
-    env["PYTHONPATH"] = (
-        f"{workspace}{os.pathsep}{existing}" if existing else str(workspace)
-    )
-    # 别在工作区里留 __pycache__/.pytest_cache：patch 是判决的证据，不该混进噪音。
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env = isolated_env(workspace, base=base)
     env.setdefault("PYTEST_ADDOPTS", _DEFAULT_PYTEST_ADDOPTS)
     return env
 

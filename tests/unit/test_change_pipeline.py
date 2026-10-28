@@ -98,13 +98,24 @@ async def test_verification_does_not_inherit_gateway_credentials(
     (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
     monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
     monkeypatch.setenv("CUSTOM_API_KEY", "provider-secret")
+    dsn = "postgresql://user:" + "password" + "@db/gateway"
+    monkeypatch.setenv("VECTOR_DB_DSN", dsn)
+    monkeypatch.setenv("CODE_REVIEW_DATABASE_URL", dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    monkeypatch.setenv("GH_TOKEN", "github-alias")
+    monkeypatch.setenv("FEISHU_APP_SECRET", "feishu-secret")
+    monkeypatch.setenv("WEBHOOK_AUTH_TOKEN", "webhook-secret")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "postgres-secret")
     verify_command = (
         sys.executable,
         "-c",
         (
             "import os; "
-            "print(os.environ.get('GITHUB_TOKEN', 'missing')); "
-            "print(os.environ.get('CUSTOM_API_KEY', 'missing'))"
+            "print(' '.join(sorted(key for key in os.environ if key in {"
+            "'GITHUB_TOKEN', 'CUSTOM_API_KEY', 'VECTOR_DB_DSN', "
+            "'CODE_REVIEW_DATABASE_URL', 'DATABASE_URL', 'GH_TOKEN', "
+            "'FEISHU_APP_SECRET', 'WEBHOOK_AUTH_TOKEN', 'POSTGRES_PASSWORD'"
+            "})) or 'missing')"
         ),
     )
     pipeline = ChangePipeline(
@@ -118,7 +129,40 @@ async def test_verification_does_not_inherit_gateway_credentials(
     result = await pipeline.prepare_bundle(_request())
 
     assert result.bundle is not None
-    assert result.bundle.verify_output.splitlines() == ["missing", "missing"]
+    assert result.bundle.verify_output.splitlines() == ["missing"]
+
+
+@pytest.mark.asyncio
+async def test_bundle_collection_ignores_agent_supplied_git_extensions(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    marker = tmp_path / "external-diff-executed"
+    external = (
+        f'cmd /c echo %GITHUB_TOKEN% > "{marker}"'
+        if sys.platform == "win32"
+        else f'sh -c \'printf %s "$GITHUB_TOKEN" > "{marker}"\''
+    )
+    _git(["config", "diff.external", external], repo)
+    monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+
+    bundle = build_change_bundle(
+        workspace=repo,
+        base_sha="a" * 40,
+        branch="moa/change-1",
+        title="fix: correct add",
+        body="agent change",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+        trace_id="trace-1",
+    )
+
+    assert "return a + b" in bundle.patch
+    assert not marker.exists()
 
 
 def test_no_changes_is_not_exportable(repo: Path) -> None:
