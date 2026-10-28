@@ -236,4 +236,25 @@ class GitHubChangeAdapter:
             record.head_sha,
             at=now,
         )
-        return self._merge_store.get(identity) or record
+        persisted = self._merge_store.get(identity)
+        if persisted is None:
+            raise RuntimeError(
+                "merge record readback returned nothing after save: "
+                f"{identity!r}"
+            )
+        expected = {
+            "run_id": run_id,
+            "trace_id": trace_id,
+            "bundle_hash": bundle_hash,
+        }
+        actual = {
+            "run_id": persisted.run_id,
+            "trace_id": persisted.trace_id,
+            "bundle_hash": persisted.bundle_hash,
+        }
+        if actual != expected:
+            raise RuntimeError(
+                "merge record readback does not match delivery evidence: "
+                f"{actual!r} != {expected!r}"
+            )
+        return persisted

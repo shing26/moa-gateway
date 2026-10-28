@@ -45,7 +45,19 @@ _ALLOWED_SELECTOR_FLAGS = frozenset(
     }
 )
 
-_SKIP_DIRS = frozenset({".git", "__pycache__", ".venv", ".pytest_cache", "node_modules"})
+_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".mypy_cache",
+        ".tox",
+        "node_modules",
+    }
+)
 _BINARY_SNIFF = b"\x00"
 
 

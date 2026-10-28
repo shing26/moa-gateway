@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +14,7 @@ from app.cli import (
     build_parser,
     cmd_delivery_ci_triage,
     cmd_delivery_run,
+    cmd_delivery_view,
 )
 
 
@@ -83,6 +86,91 @@ def test_delivery_run_rejects_missing_required_argument(missing: str) -> None:
         parser.parse_args(argv)
 
     assert exc.value.code == 2
+
+
+def test_delivery_view_parser_requires_run_id_and_wires_command() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["delivery", "view", "--run-id", "run-1"])
+
+    assert args.group == "delivery"
+    assert args.command == "view"
+    assert args.run_id == "run-1"
+    assert args.func is cmd_delivery_view
+
+
+def test_delivery_view_defaults_do_not_require_run_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "change_agent_base_branch", "main")
+    args = build_parser().parse_args(["delivery", "view", "--run-id", "run-1"])
+
+    _apply_delivery_defaults(args)
+
+    assert args.run_id == "run-1"
+    assert not hasattr(args, "trace_id")
+    assert not hasattr(args, "body")
+
+
+def test_cmd_delivery_view_prints_latest_merge_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.config import settings
+    from apps.code_review_pipeline.change.refs import PullRequestRef
+    from apps.code_review_pipeline.delivery.models import (
+        DeliveryRunState,
+        PushOutcome,
+    )
+    from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
+    from apps.code_review_pipeline.merge_state import MergeState
+    from apps.code_review_pipeline.merge_store import MergeRecord, MergeStore
+    from tests.unit.test_delivery_store import _run
+
+    store = DeliveryRunStore(tmp_path / "runs")
+    merges = MergeStore()
+    push = PushOutcome(
+        branch="moa/fix-trace-1",
+        commit_sha="b" * 40,
+        pull_request=PullRequestRef(
+            number=9,
+            url="https://example.com/pr/9",
+            head_sha="b" * 40,
+        ),
+    )
+    run = replace(
+        _run(DeliveryRunState.WAITING_CI),
+        push=push,
+        merge=MergeRecord(
+            repo="owner/name",
+            pr_number=9,
+            head_sha="b" * 40,
+        ),
+    )
+    asyncio.run(store.save(run))
+    merges.save(
+        MergeRecord(
+            repo="owner/name",
+            pr_number=9,
+            head_sha="b" * 40,
+            state=MergeState.MERGED.value,
+            merged_sha="c" * 40,
+        )
+    )
+    monkeypatch.setattr(settings, "delivery_run_record_dir", str(tmp_path / "runs"))
+    monkeypatch.setattr(
+        "apps.code_review_pipeline.merge_store.build_merge_store",
+        lambda: merges,
+    )
+
+    assert cmd_delivery_view(SimpleNamespace(run_id="run-1")) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["merge"]["state"] == "merged"
+    assert output["merge"]["merged_sha"] == "c" * 40
 
 
 def test_delivery_defaults_use_settings_and_wire_run_command(

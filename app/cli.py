@@ -477,6 +477,29 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
     return 0 if run.state.value in {"waiting_ci", "ready_for_push_approval"} else 1
 
 
+def cmd_delivery_view(args: argparse.Namespace) -> int:
+    """Show the current DeliveryRun view with the latest MergeRecord."""
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
+    from apps.code_review_pipeline.merge_store import build_merge_store
+
+    store = DeliveryRunStore(settings.delivery_run_record_dir)
+    run = store.load(args.run_id)
+    merge_store = build_merge_store()
+
+    async def read() -> object:
+        try:
+            return await asyncio.to_thread(store.view, run, merge_store)
+        finally:
+            close = getattr(merge_store, "close", None)
+            if close is not None:
+                await close()
+
+    current = asyncio.run(read())
+    print(json.dumps(current.to_dict(), ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
     """Collect and diagnose failed CI evidence without writing to GitHub."""
     import httpx
@@ -646,6 +669,13 @@ def build_parser() -> argparse.ArgumentParser:
     delivery_run.add_argument("--trace-id", default=None)
     delivery_run.set_defaults(func=cmd_delivery_run)
 
+    delivery_view = delivery_sub.add_parser(
+        "view",
+        help="读取 DeliveryRun 快照并叠加最新 MergeRecord",
+    )
+    delivery_view.add_argument("--run-id", required=True)
+    delivery_view.set_defaults(func=cmd_delivery_view)
+
     delivery_ci_triage = delivery_sub.add_parser(
         "ci-triage",
         help="只读收集失败 CI 证据并生成本地诊断报告",
@@ -720,6 +750,8 @@ def _apply_delivery_defaults(args: argparse.Namespace) -> None:
             args.branch = f"moa/ci-fix-{sha_prefix}"
         if getattr(args, "trace_id", None) is None:
             args.trace_id = f"ci-{trace_repo}-{sha_prefix}"
+        return
+    if getattr(args, "command", "") != "run":
         return
     if getattr(args, "trace_id", None) is None:
         args.trace_id = f"delivery-{time.time_ns()}"
