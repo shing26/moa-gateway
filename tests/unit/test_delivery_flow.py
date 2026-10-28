@@ -438,6 +438,80 @@ async def test_approval_for_a_different_run_blocks_publish(
     assert publisher.calls == 0
 
 
+@pytest.mark.parametrize(
+    ("trace_id", "bundle_hash"),
+    [
+        ("other-trace", _bundle().bundle_hash),
+        ("trace-1", "0" * 64),
+    ],
+)
+@pytest.mark.asyncio
+async def test_approval_for_a_different_bundle_never_enters_pushing(
+    tmp_path: Path,
+    trace_id: str,
+    bundle_hash: str,
+) -> None:
+    bundle = _bundle()
+    flow, _, audit, publisher = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt()]),
+        preparer=FakePreparer(
+            [
+                ChangePreparation(
+                    status=PreparationStatus.READY,
+                    bundle=bundle,
+                    verification=_verification(),
+                )
+            ]
+        ),
+        approval=FakeApproval(
+            ChangeApproval(
+                approver="alice",
+                trace_id=trace_id,
+                bundle_hash=bundle_hash,
+                run_id="run-1",
+            )
+        ),
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.NEEDS_HUMAN
+    assert run.failure is not None
+    assert run.failure.code is FailureCode.APPROVAL_REJECTED
+    assert "pushing" not in [current for _, current in audit.transitions]
+    assert publisher.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_no_changes_stops_without_an_extra_implementer_attempt(
+    tmp_path: Path,
+) -> None:
+    implementer = FakeImplementer([_attempt(summary="made no edits")])
+    flow, _, _, publisher = _flow(
+        tmp_path,
+        implementer=implementer,
+        preparer=FakePreparer(
+            [
+                ChangePreparation(
+                    status=PreparationStatus.NO_CHANGES,
+                    bundle=None,
+                    verification=_verification(),
+                    message="no files changed",
+                )
+            ]
+        ),
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.NEEDS_HUMAN
+    assert run.failure is not None
+    assert run.failure.code is FailureCode.NO_CHANGES
+    assert len(run.attempts) == 1
+    assert publisher.calls == 0
+
+
 @pytest.mark.asyncio
 async def test_budget_exhaustion_is_not_a_verification_failure(tmp_path: Path) -> None:
     flow, _, _, publisher = _flow(

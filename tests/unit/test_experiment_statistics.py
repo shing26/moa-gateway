@@ -199,6 +199,7 @@ def test_model_matrix_does_not_treat_missing_cost_signal_as_zero() -> None:
             task_id="task-paid",
             arm="L0",
             outcome="pass",
+                task_origin="E1",
             model="model-paid",
             cost_usd=0.25,
         )
@@ -208,6 +209,7 @@ def test_model_matrix_does_not_treat_missing_cost_signal_as_zero() -> None:
             task_id="task-partial",
             arm="L0",
             outcome="pass",
+                task_origin="E1",
             model="model-paid",
             cost_usd=0.0,
         )
