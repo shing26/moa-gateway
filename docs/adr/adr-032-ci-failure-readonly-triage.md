@@ -24,7 +24,8 @@ CI job log 是不可信输入：它可能包含 token、伪造的指令、误导
    不创建 PR，不评论，不合并，不部署。报告固定标记人工复核。
 3. **权限最小化。** fine-grained token 只需要目标仓库的 `Checks: Read` 与
    `Actions: Read`。Actions 权限缺失时保留 checks 证据，并记录明确的
-   `actions_unavailable_reason`；不把权限错误伪装成“没有失败”。
+   `actions_unavailable_reason`；collector 只读 check-runs，不读取需要额外权限的
+   legacy Commit Statuses；不把权限错误伪装成“没有失败”。
 4. **日志先脱敏、再有界。** 常见 bearer/token/API key/AWS key 形状在进入
    evidence 前脱敏；原始下载以流式读取设 2 MB 安全上限，超限 job 明确标记
    不可用，每个 job 只保留配置上限内的脱敏日志尾部，单次 job 数有界。
@@ -54,6 +55,8 @@ CI job log 是不可信输入：它可能包含 token、伪造的指令、误导
   request 不等于授权执行。
 - Checks API 本身不可用时只生成“失败状态不可判定”的 JSON / Markdown，明确
   提示补齐 `Checks: Read` / `Actions: Read`，且不生成 `DeliveryRequest`。
+- CI 当前为 pending/success/none 时同样不算失败；命令清除同 trace 可能残留的
+  `DeliveryRequest`，避免旧证据被误用。
 - token 缺少 Actions 权限时仍能产出部分证据，但报告不会声称拿到了完整日志。
 - 本命令不替代现有 PR 审查或合并通道，也不改变 `CHANGE_AGENT_PUSH_ENABLED`
   默认关闭的行为。

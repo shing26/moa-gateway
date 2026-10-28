@@ -286,16 +286,9 @@ class GitHubClient:
         resp.raise_for_status()
         return dict(resp.json())
 
-    async def get_ci_status(self, repo: GitHubRepo, ref: str) -> CiStatus:
-        """读某个 commit 的 CI 结论（两套 API 合并，见 ``aggregate_ci_status``）。
-
-        ``ref`` 用**完整 sha**，不用分支名：分支名会在读取过程中移动，而这里要判断
-        的是"这个 PR 的这个版本"能不能合并。
-
-        check-runs 必须翻页。GitHub 默认每页 30 条，而 ``per_page`` 上限 100——
-        只取第一页会让"第 101 条红了"被静默漏掉。``list_reviews`` 已经吃过这个亏
-        （见其 docstring），同一个坑不再踩第二次。
-        """
+    async def _list_check_runs_for_sha(
+        self, repo: GitHubRepo, ref: str
+    ) -> list[dict[str, Any]]:
         check_runs: list[dict[str, Any]] = []
         page = 1
         while True:
@@ -307,9 +300,25 @@ class GitHubClient:
             batch = list(resp.json().get("check_runs") or ())
             check_runs.extend(batch)
             if len(batch) < 100:
-                break
+                return check_runs
             page += 1
 
+    async def get_check_run_status(self, repo: GitHubRepo, ref: str) -> CiStatus:
+        """Read check-runs only, without the legacy Commit Statuses API."""
+        check_runs = await self._list_check_runs_for_sha(repo, ref)
+        return aggregate_ci_status(check_runs)
+
+    async def get_ci_status(self, repo: GitHubRepo, ref: str) -> CiStatus:
+        """读某个 commit 的 CI 结论（两套 API 合并，见 ``aggregate_ci_status``）。
+
+        ``ref`` 用**完整 sha**，不用分支名：分支名会在读取过程中移动，而这里要判断
+        的是"这个 PR 的这个版本"能不能合并。
+
+        check-runs 必须翻页。GitHub 默认每页 30 条，而 ``per_page`` 上限 100——
+        只取第一页会让"第 101 条红了"被静默漏掉。``list_reviews`` 已经吃过这个亏
+        （见其 docstring），同一个坑不再踩第二次。
+        """
+        check_runs = await self._list_check_runs_for_sha(repo, ref)
         status_resp = await self._client.get(
             f"/repos/{repo.owner}/{repo.name}/commits/{ref}/status"
         )

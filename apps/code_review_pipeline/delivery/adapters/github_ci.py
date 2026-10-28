@@ -26,7 +26,9 @@ class CiNotFailed(RuntimeError):
 
 
 class CiGitHubPort(Protocol):
-    async def get_ci_status(self, repo: GitHubRepo, ref: str) -> CiStatus: ...
+    async def get_check_run_status(
+        self, repo: GitHubRepo, ref: str
+    ) -> CiStatus: ...
 
     async def list_workflow_runs_for_sha(
         self, repo: GitHubRepo, head_sha: str
@@ -100,7 +102,7 @@ class GitHubCiEvidenceCollector:
 
     async def collect(self, *, repo: str, head_sha: str) -> CiFailureEvidence:
         target = _repo(repo)
-        status = await self._github.get_ci_status(target, head_sha)
+        status = await self._github.get_check_run_status(target, head_sha)
         if status.state != CI_FAILURE:
             raise CiNotFailed(
                 f"CI state for {repo}@{head_sha} is {status.state!r}, not failure"

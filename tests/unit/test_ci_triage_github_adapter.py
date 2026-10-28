@@ -38,10 +38,13 @@ class FakeGitHub:
         self.jobs: dict[int, list[dict]] = {}
         self.logs: dict[int, str] = {}
 
-    async def get_ci_status(self, repo: GitHubRepo, ref: str) -> CiStatus:
+    async def get_check_run_status(self, repo: GitHubRepo, ref: str) -> CiStatus:
         assert repo == GitHubRepo("owner", "name")
         assert ref == SHA
         return self.status
+
+    async def get_ci_status(self, repo: GitHubRepo, ref: str) -> CiStatus:
+        raise AssertionError("CI triage must not read legacy commit statuses")
 
     async def list_workflow_runs_for_sha(
         self, repo: GitHubRepo, head_sha: str

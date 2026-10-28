@@ -51,6 +51,10 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
         r"\1[REDACTED]",
     ),
     (
+        re.compile(r"(?i)\bBearer\s+[^\"'\s,;}]+"),
+        "Bearer [REDACTED]",
+    ),
+    (
         re.compile(
             r"(?i)([\"']?(?:password|passwd|token|secret|api[_-]?key|"
             r"access[_-]?key|secret[_-]?access[_-]?key)[\"']?\s*[=:]\s*)"
@@ -59,7 +63,9 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
         r"\1[REDACTED]",
     ),
     (
-        re.compile(r"(?i)(https?://[^/\s:@]+:)[^@\s/]+@"),
+        re.compile(
+            r"(?i)([a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@"
+        ),
         r"\1[REDACTED]@",
     ),
     (
@@ -458,6 +464,22 @@ def write_ci_triage_artifacts(
     )
 
 
+def invalidate_ci_triage_request(
+    *,
+    trace_id: str,
+    head_sha: str,
+    directory: str | Path,
+) -> Path:
+    """Remove executable evidence for a trace whose current state is not failure."""
+    target = Path(directory)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", trace_id).strip("-")
+    if not stem:
+        stem = f"ci-{head_sha[:12]}"
+    request_path = target / f"{stem}.request.json"
+    request_path.unlink(missing_ok=True)
+    return request_path
+
+
 def write_ci_triage_unavailable_artifacts(
     *,
     repo: str,
@@ -474,10 +496,13 @@ def write_ci_triage_unavailable_artifacts(
         stem = f"ci-{head_sha[:12]}"
     json_path = target / f"{stem}.json"
     markdown_path = target / f"{stem}.md"
-    request_path = target / f"{stem}.request.json"
     # A stable trace id means an earlier success may have left executable evidence.
     # The unavailable state must invalidate it rather than sit beside it.
-    request_path.unlink(missing_ok=True)
+    request_path = invalidate_ci_triage_request(
+        trace_id=trace_id,
+        head_sha=head_sha,
+        directory=target,
+    )
     if status_code == 401:
         detail = (
             "Grant fine-grained GitHub 'Checks: Read' and 'Actions: Read' "
@@ -557,6 +582,7 @@ __all__ = [
     "CiTriageUnavailableArtifacts",
     "build_ci_triage_report",
     "classify_ci_failure",
+    "invalidate_ci_triage_request",
     "redact_ci_log",
     "write_ci_triage_artifacts",
     "write_ci_triage_unavailable_artifacts",

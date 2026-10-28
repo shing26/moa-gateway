@@ -490,6 +490,7 @@ def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
     from apps.code_review_pipeline.delivery.adapters import github_ci
     from apps.code_review_pipeline.delivery.ci_triage import (
         build_ci_triage_report,
+        invalidate_ci_triage_request,
         write_ci_triage_artifacts,
         write_ci_triage_unavailable_artifacts,
     )
@@ -526,6 +527,11 @@ def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
     try:
         artifacts = asyncio.run(execute())
     except github_ci.CiNotFailed as exc:
+        invalidate_ci_triage_request(
+            trace_id=args.trace_id,
+            head_sha=args.sha,
+            directory=settings.ci_triage_output_dir,
+        )
         print(f"CI triage skipped: {exc}", file=sys.stderr)
         return 1
     except httpx.HTTPStatusError as exc:

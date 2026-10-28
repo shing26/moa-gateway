@@ -156,6 +156,35 @@ async def test_workflow_runs_are_queried_by_full_head_sha() -> None:
 
 
 @pytest.mark.asyncio
+async def test_check_run_status_does_not_read_legacy_commit_statuses() -> None:
+    seen: list[str] = []
+    sha = "a" * 40
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "check_runs": [
+                    {
+                        "name": "test",
+                        "status": "completed",
+                        "conclusion": "failure",
+                    }
+                ]
+            },
+        )
+
+    status = await _client(handler).get_check_run_status(
+        GitHubRepo("o", "r"),
+        sha,
+    )
+
+    assert status.state == CI_FAILURE
+    assert seen == [f"/repos/o/r/commits/{sha}/check-runs"]
+
+
+@pytest.mark.asyncio
 async def test_workflow_jobs_are_queried_for_the_selected_run() -> None:
     seen = ""
 

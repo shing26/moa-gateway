@@ -492,3 +492,48 @@ def test_cmd_ci_triage_reports_github_http_failure_without_traceback(
     assert "human review required" in captured_output.err.lower()
     assert not list((tmp_path / "ci").glob("*.request.json"))
     assert captured["closed"] is True
+
+
+def test_cmd_ci_triage_non_failure_invalidates_stale_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.adapters import (
+        github_ci as github_ci_module,
+    )
+    from apps.code_review_pipeline.routing import github_provider
+
+    class FakeGitHub:
+        async def aclose(self) -> None:
+            pass
+
+    class PendingCollector:
+        def __init__(self, *, github, max_jobs, max_log_chars) -> None:
+            pass
+
+        async def collect(self, *, repo, head_sha):
+            raise github_ci_module.CiNotFailed(
+                f"CI state for {repo}@{head_sha} is 'pending', not failure"
+            )
+
+    monkeypatch.setattr(settings, "github_token", "token")
+    monkeypatch.setattr(settings, "ci_triage_output_dir", str(tmp_path / "ci"))
+    monkeypatch.setattr(
+        github_provider, "build_github_client", lambda: FakeGitHub()
+    )
+    monkeypatch.setattr(
+        github_ci_module,
+        "GitHubCiEvidenceCollector",
+        PendingCollector,
+    )
+    args = build_parser().parse_args(_ci_triage_argv())
+    _apply_delivery_defaults(args)
+    stale = tmp_path / "ci" / f"{args.trace_id}.request.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("{}\n", encoding="utf-8")
+
+    assert cmd_delivery_ci_triage(args) == 1
+    assert "CI triage skipped" in capsys.readouterr().err
+    assert not stale.exists()
