@@ -5,7 +5,7 @@ on:
     branches: [main, master]
     tags: [v*]
   pull_request:
-    branches: [main, master]
+    branches: [main, master, codex/governed-delivery-s0]
 
 jobs:
   # 显式钉住 runner 版本（2026-09-24）：GitHub 公告 ubuntu-latest 自 2026-10-19 起
