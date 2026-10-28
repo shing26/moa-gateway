@@ -173,21 +173,19 @@ async def test_workflow_jobs_are_queried_for_the_selected_run() -> None:
 
 
 @pytest.mark.asyncio
-async def test_job_log_is_downloaded_and_clipped_to_the_tail() -> None:
+async def test_job_log_is_downloaded_without_pre_redaction_truncation() -> None:
     seen = ""
+    payload = "head\n" + ("x" * 50_005) + "\ntail"
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal seen
         seen = request.url.path
-        return httpx.Response(200, text="head\n" + "x" * 100 + "\ntail")
+        return httpx.Response(200, text=payload)
 
-    log = await _client(handler).get_job_log(
-        GitHubRepo("o", "r"), 22, max_chars=20
-    )
+    log = await _client(handler).get_job_log(GitHubRepo("o", "r"), 22)
 
     assert seen == "/repos/o/r/actions/jobs/22/logs"
-    assert log.endswith("\ntail")
-    assert len(log) == 20
+    assert log == payload
 
 
 def _client(handler: object) -> GitHubClient:

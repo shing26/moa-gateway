@@ -396,7 +396,9 @@ moa-gateway/
 CI 失败现在可先通过 `delivery ci-triage` 做**只读诊断**：收集失败的 checks 与
 Actions job logs，脱敏、限量后生成本地 JSON / Markdown / `DeliveryRequest`，
 固定要求人工复核。它不改代码、不重跑 workflow、不写回 GitHub；CI 自动修复
-仍未实现，未来若进入写侧仍须走同一条验证、审批、推送与审计管线。
+仍未实现，未来若进入写侧仍须走同一条验证、审批、推送与审计管线。若
+`Checks: Read` 缺失，命令只写“状态不可判定”的 JSON / Markdown，不生成
+`DeliveryRequest`，避免把权限失败误读为 CI 通过。
 
 ### 受治理仓库交付 Agent
 

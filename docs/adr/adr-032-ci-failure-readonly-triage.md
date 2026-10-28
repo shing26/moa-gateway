@@ -51,6 +51,8 @@ CI job log 是不可信输入：它可能包含 token、伪造的指令、误导
 - 项目现在可以宣称“支持只读 CI 失败诊断”，但不能宣称“支持 CI 自动修复”。
 - 诊断结果可被人工审阅，也可作为后续受治理 `DeliveryRequest` 的输入；生成
   request 不等于授权执行。
+- Checks API 本身不可用时只生成“失败状态不可判定”的 JSON / Markdown，明确
+  提示补齐 `Checks: Read` / `Actions: Read`，且不生成 `DeliveryRequest`。
 - token 缺少 Actions 权限时仍能产出部分证据，但报告不会声称拿到了完整日志。
 - 本命令不替代现有 PR 审查或合并通道，也不改变 `CHANGE_AGENT_PUSH_ENABLED`
   默认关闭的行为。

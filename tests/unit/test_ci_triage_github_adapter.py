@@ -55,10 +55,9 @@ class FakeGitHub:
         return self.jobs[run_id]
 
     async def get_job_log(
-        self, repo: GitHubRepo, job_id: int, *, max_chars: int = 50_000
+        self, repo: GitHubRepo, job_id: int
     ) -> str:
         assert repo == GitHubRepo("owner", "name")
-        assert max_chars == 2_000
         self.log_requests.append(job_id)
         return self.logs[job_id]
 
@@ -106,6 +105,43 @@ async def test_collector_uses_latest_failed_run_and_redacts_logs() -> None:
     assert evidence.jobs[0].name == "pytest"
     assert "ghp_" not in evidence.jobs[0].log
     assert "FAILED tests/test_api.py" in evidence.jobs[0].log
+
+
+@pytest.mark.asyncio
+async def test_collector_redacts_before_clipping_job_log_tail() -> None:
+    token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    github = FakeGitHub()
+    github.runs = [
+        {
+            "id": 2,
+            "workflow_id": 10,
+            "name": "CI",
+            "run_number": 2,
+            "run_attempt": 1,
+            "conclusion": "failure",
+        },
+    ]
+    github.jobs = {
+        2: [{"id": 22, "name": "pytest", "conclusion": "failure"}],
+    }
+    github.logs = {
+        22: (
+            "collected 10 items\n"
+            f"Authorization: Bearer {token}\n"
+            "FAILED tests/test_api.py - AssertionError\n"
+        ),
+    }
+    collector = GitHubCiEvidenceCollector(
+        github=github,
+        max_log_chars=100,
+    )
+
+    evidence = await collector.collect(repo="owner/name", head_sha=SHA)
+
+    log = evidence.jobs[0].log
+    assert len(log) <= 100
+    assert token[-12:] not in log
+    assert "FAILED tests/test_api.py" in log
 
 
 @pytest.mark.asyncio

@@ -66,6 +66,11 @@ SINGLE_SOURCE_CONCEPTS = {
         "CODE_REVIEW_WORKSPACE_ROOT",
         "CODE_REVIEW_VERIFY_COMMAND",
     ),
+    "CI 失败只读诊断": (
+        "CI_TRIAGE_OUTPUT_DIR",
+        "CI_TRIAGE_MAX_JOBS",
+        "CI_TRIAGE_MAX_LOG_CHARS",
+    ),
     "主链路 LLM 配置": ("LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY"),
     "入口鉴权凭据": ("WEBHOOK_AUTH_TOKEN", "DASHBOARD_PASSWORD"),
 }
@@ -175,3 +180,18 @@ def test_rogue_hitl_env_name_is_gone() -> None:
                         f"{path.relative_to(REPO_ROOT)}:{line_no}"
                     )
     assert not offenders, f"MOA_HITL_ENABLED 应统一为 HITL_ENABLED: {offenders}"
+
+
+def test_ci_triage_settings_are_covered_by_the_single_source_guard() -> None:
+    guarded = {
+        name
+        for names in SINGLE_SOURCE_CONCEPTS.values()
+        for name in names
+    }
+    ci_triage_envs = {
+        "CI_TRIAGE_OUTPUT_DIR",
+        "CI_TRIAGE_MAX_JOBS",
+        "CI_TRIAGE_MAX_LOG_CHARS",
+    }
+
+    assert ci_triage_envs <= guarded

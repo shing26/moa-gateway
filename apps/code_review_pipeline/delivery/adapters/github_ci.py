@@ -35,9 +35,7 @@ class CiGitHubPort(Protocol):
         self, repo: GitHubRepo, run_id: int
     ) -> list[dict[str, Any]]: ...
 
-    async def get_job_log(
-        self, repo: GitHubRepo, job_id: int, *, max_chars: int = 50_000
-    ) -> str: ...
+    async def get_job_log(self, repo: GitHubRepo, job_id: int) -> str: ...
 
 
 def _repo(value: str) -> GitHubRepo:
@@ -151,11 +149,7 @@ class GitHubCiEvidenceCollector:
                     continue
                 job_id = int(raw.get("id") or 0)
                 try:
-                    log = await self._github.get_job_log(
-                        target,
-                        job_id,
-                        max_chars=self._max_log_chars,
-                    )
+                    log = await self._github.get_job_log(target, job_id)
                     unavailable = ""
                 except httpx.HTTPStatusError as exc:
                     log = ""
@@ -168,7 +162,7 @@ class GitHubCiEvidenceCollector:
                         name=str(raw.get("name") or f"job-{job_id}"),
                         conclusion=conclusion,
                         url=str(raw.get("html_url") or ""),
-                        log=redact_ci_log(log),
+                        log=redact_ci_log(log)[-self._max_log_chars :],
                         unavailable_reason=unavailable,
                     )
                 )

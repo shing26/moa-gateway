@@ -360,26 +360,14 @@ class GitHubClient:
                 return out
             page += 1
 
-    async def get_job_log(
-        self,
-        repo: GitHubRepo,
-        job_id: int,
-        *,
-        max_chars: int = 50_000,
-    ) -> str:
-        """Download a job log, following GitHub's redirect to blob storage.
-
-        Only the tail is returned: Python and test-runner failures normally put
-        the actionable summary at the end, and a hard cap keeps triage bounded.
-        """
-        if max_chars <= 0:
-            raise ValueError("max_chars must be positive")
+    async def get_job_log(self, repo: GitHubRepo, job_id: int) -> str:
+        """Download a job log, following GitHub's redirect to blob storage."""
         resp = await self._client.get(
             f"/repos/{repo.owner}/{repo.name}/actions/jobs/{job_id}/logs",
             follow_redirects=True,
         )
         resp.raise_for_status()
-        return resp.text[-max_chars:]
+        return resp.text
 
     async def merge_pr(
         self,

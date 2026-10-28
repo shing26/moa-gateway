@@ -162,6 +162,30 @@ def test_artifacts_include_report_and_delivery_request(tmp_path: Path) -> None:
     assert payload["trace_id"] == "ci-owner-name-aaaaaaaaaaaa"
 
 
+def test_unavailable_artifacts_record_permission_failure_without_request(
+    tmp_path: Path,
+) -> None:
+    from apps.code_review_pipeline.delivery import ci_triage as ci_triage_module
+
+    artifacts = ci_triage_module.write_ci_triage_unavailable_artifacts(
+        repo="owner/name",
+        head_sha=SHA,
+        trace_id="ci-owner-name-aaaaaaaaaaaa",
+        directory=tmp_path,
+        status_code=403,
+    )
+
+    assert artifacts.json_path.is_file()
+    assert artifacts.markdown_path.is_file()
+    payload = json.loads(artifacts.json_path.read_text(encoding="utf-8"))
+    markdown = artifacts.markdown_path.read_text(encoding="utf-8")
+    assert payload["failure_status_established"] is False
+    assert payload["human_review_required"] is True
+    assert "Checks: Read" in markdown
+    assert "does not mean CI is green" in markdown
+    assert not list(tmp_path.glob("*.request.json"))
+
+
 def test_truncated_report_does_not_claim_unseen_jobs_were_omitted() -> None:
     report = build_ci_triage_report(
         CiFailureEvidence(

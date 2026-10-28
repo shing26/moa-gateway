@@ -491,6 +491,7 @@ def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
     from apps.code_review_pipeline.delivery.ci_triage import (
         build_ci_triage_report,
         write_ci_triage_artifacts,
+        write_ci_triage_unavailable_artifacts,
     )
     from apps.code_review_pipeline.routing.github_provider import (
         build_github_client,
@@ -528,9 +529,23 @@ def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
         print(f"CI triage skipped: {exc}", file=sys.stderr)
         return 1
     except httpx.HTTPStatusError as exc:
+        unavailable = write_ci_triage_unavailable_artifacts(
+            repo=args.repo,
+            head_sha=args.sha,
+            trace_id=args.trace_id,
+            directory=settings.ci_triage_output_dir,
+            status_code=exc.response.status_code,
+        )
         print(
             "CI triage failed: GitHub API returned "
             f"HTTP {exc.response.status_code}",
+            file=sys.stderr,
+        )
+        print(f"report    : {unavailable.json_path}", file=sys.stderr)
+        print(f"markdown  : {unavailable.markdown_path}", file=sys.stderr)
+        print(
+            "human review required; CI failure status was not established; "
+            "no GitHub writes performed.",
             file=sys.stderr,
         )
         return 1

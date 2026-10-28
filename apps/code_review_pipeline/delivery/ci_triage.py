@@ -291,6 +291,12 @@ class CiTriageArtifacts:
     request_path: Path
 
 
+@dataclass(frozen=True)
+class CiTriageUnavailableArtifacts:
+    json_path: Path
+    markdown_path: Path
+
+
 def redact_ci_log(text: str) -> str:
     """Redact common credential shapes before logs cross an evidence boundary."""
     redacted = _ANSI_ESCAPE.sub("", text or "")
@@ -431,6 +437,72 @@ def write_ci_triage_artifacts(
     )
 
 
+def write_ci_triage_unavailable_artifacts(
+    *,
+    repo: str,
+    head_sha: str,
+    trace_id: str,
+    directory: str | Path,
+    status_code: int,
+) -> CiTriageUnavailableArtifacts:
+    """Record that GitHub permissions prevented establishment of failure status."""
+    target = Path(directory)
+    target.mkdir(parents=True, exist_ok=True)
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "-", trace_id).strip("-")
+    if not stem:
+        stem = f"ci-{head_sha[:12]}"
+    json_path = target / f"{stem}.json"
+    markdown_path = target / f"{stem}.md"
+    reason = (
+        f"GitHub Checks unavailable: HTTP {status_code}. "
+        "Grant fine-grained GitHub 'Checks: Read' and 'Actions: Read' "
+        "permissions for this repository."
+    )
+    payload = {
+        "schema_version": CI_TRIAGE_SCHEMA_VERSION,
+        "state": "unavailable",
+        "repo": repo,
+        "head_sha": head_sha,
+        "trace_id": trace_id,
+        "failure_status_established": False,
+        "human_review_required": True,
+        "reason": reason,
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    markdown = "\n".join(
+        [
+            "# CI failure triage unavailable",
+            "",
+            f"- Repository: `{repo}`",
+            f"- Head SHA: `{head_sha}`",
+            "- Failure status: not established",
+            "",
+            "> Human review required. This does not mean CI is green.",
+            "",
+            "## Collection limitation",
+            reason,
+            "",
+            "## Boundary",
+            "No code was changed, no workflow was rerun, and no GitHub writes",
+            "were performed.",
+        ]
+    ) + "\n"
+    json_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    markdown_path.write_text(
+        markdown,
+        encoding="utf-8",
+        newline="\n",
+    )
+    return CiTriageUnavailableArtifacts(
+        json_path=json_path,
+        markdown_path=markdown_path,
+    )
+
+
 __all__ = [
     "CI_TRIAGE_SCHEMA_VERSION",
     "CiFailureCheck",
@@ -439,8 +511,10 @@ __all__ = [
     "CiJobLog",
     "CiTriageArtifacts",
     "CiTriageReport",
+    "CiTriageUnavailableArtifacts",
     "build_ci_triage_report",
     "classify_ci_failure",
     "redact_ci_log",
     "write_ci_triage_artifacts",
+    "write_ci_triage_unavailable_artifacts",
 ]

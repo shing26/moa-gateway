@@ -437,6 +437,7 @@ def test_cmd_ci_triage_collects_and_writes_only_local_artifacts(
 
 
 def test_cmd_ci_triage_reports_github_http_failure_without_traceback(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -468,6 +469,7 @@ def test_cmd_ci_triage_reports_github_http_failure_without_traceback(
             )
 
     monkeypatch.setattr(settings, "github_token", "token")
+    monkeypatch.setattr(settings, "ci_triage_output_dir", str(tmp_path / "ci"))
     monkeypatch.setattr(
         github_provider, "build_github_client", lambda: FakeGitHub()
     )
@@ -481,5 +483,12 @@ def test_cmd_ci_triage_reports_github_http_failure_without_traceback(
 
     assert cmd_delivery_ci_triage(args) == 1
 
-    assert "HTTP 403" in capsys.readouterr().err
+    captured_output = capsys.readouterr()
+    assert "HTTP 403" in captured_output.err
+    markdown_files = list((tmp_path / "ci").glob("*.md"))
+    assert len(markdown_files) == 1
+    assert "Checks: Read" in markdown_files[0].read_text(encoding="utf-8")
+    assert str(markdown_files[0]) in captured_output.err
+    assert "human review required" in captured_output.err.lower()
+    assert not list((tmp_path / "ci").glob("*.request.json"))
     assert captured["closed"] is True
