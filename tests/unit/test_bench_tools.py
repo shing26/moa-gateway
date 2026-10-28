@@ -235,12 +235,16 @@ def test_verification_copy_excludes_nested_cache_directories(
     nested = workspace / "pkg" / "node_modules" / "dep"
     nested.mkdir(parents=True)
     (nested / "index.js").write_text("cached\n", encoding="utf-8")
+    ruff_cache = workspace / "pkg" / ".ruff_cache"
+    ruff_cache.mkdir()
+    (ruff_cache / "cache").write_text("cached\n", encoding="utf-8")
     (workspace / "pkg" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
 
     copied, parent = create_verification_workspace(workspace)
     try:
         assert (copied / "pkg" / "app.py").is_file()
         assert not (copied / "pkg" / "node_modules").exists()
+        assert not (copied / "pkg" / ".ruff_cache").exists()
     finally:
         shutil.rmtree(parent, ignore_errors=True)
 

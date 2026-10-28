@@ -1094,6 +1094,42 @@ def test_bundle_hash_covers_git_file_mode(repo: Path) -> None:
     assert changed_mode.bundle_hash != bundle.bundle_hash
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX executable bits")
+def test_bundle_tracks_removing_the_executable_bit(repo: Path) -> None:
+    script = repo / "run.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.chmod(0o755)
+    first = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-executable",
+        title="fix: executable",
+        body="",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+    )
+    script.chmod(0o644)
+    second = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-executable",
+        title="fix: executable",
+        body="",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+    )
+
+    first_change = next(item for item in first.files if item.path == "run.sh")
+    second_change = next(item for item in second.files if item.path == "run.sh")
+    assert first_change.mode == "100755"
+    assert second_change.mode == "100644"
+    assert first.bundle_hash != second.bundle_hash
+
+
 def test_bundle_records_symlink_mode_and_link_target_hash(repo: Path) -> None:
     target = repo / "target.txt"
     target.write_text("target\n", encoding="utf-8")

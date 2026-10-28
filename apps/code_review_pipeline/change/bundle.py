@@ -177,8 +177,8 @@ def _working_tree_mode(
 ) -> str:
     if path.is_symlink():
         return "120000"
-    if os.name != "nt" and path.stat().st_mode & 0o111:
-        return "100755"
+    if os.name != "nt":
+        return "100755" if path.stat().st_mode & 0o111 else "100644"
     if index_mode in {"100644", "100755"}:
         return index_mode
     return "100755" if base_mode.startswith("1007") else "100644"

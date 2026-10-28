@@ -75,25 +75,18 @@ class ExperimentStore:
                 raise FileExistsError(
                     f"Experiment manifest 已存在，不得改写配置、身份或回退进度: {path}"
                 )
-        self._validate_trial_evidence(
-            manifest,
-            start_index=existing.trial_count if existing is not None else 0,
-            baseline_counts=existing.status_counts if existing is not None else {},
-        )
+        self._validate_trial_evidence(manifest)
         self._atomic_write(path, manifest.to_dict(), overwrite=True)
         return path
 
     def _validate_trial_evidence(
         self,
         manifest: ExperimentManifest,
-        *,
-        start_index: int,
-        baseline_counts: dict[str, int],
     ) -> None:
-        """Reject manifest progress that has no matching immutable record."""
+        """Reject manifest state that has no matching immutable record."""
         experiment_dir = self.experiment_dir(manifest.experiment_id).resolve()
-        added_counts: Counter[str] = Counter()
-        for index in range(start_index, manifest.trial_count):
+        record_counts: Counter[str] = Counter()
+        for index in range(manifest.trial_count):
             expected_id = f"{manifest.experiment_id}-trial-{index:03d}"
             expected_path = f"trials/trial-{index:03d}.json"
             if (
@@ -118,9 +111,8 @@ class ExperimentStore:
                 raise FileExistsError(
                     f"Run Record 与 manifest 证据不符: {expected_path}"
                 )
-            added_counts[record.status] += 1
-        expected_counts = Counter(baseline_counts) + added_counts
-        if dict(sorted(expected_counts.items())) != dict(
+            record_counts[record.status] += 1
+        if dict(sorted(record_counts.items())) != dict(
             sorted(manifest.status_counts.items())
         ):
             raise FileExistsError(

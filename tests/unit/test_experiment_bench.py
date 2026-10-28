@@ -264,6 +264,71 @@ async def test_store_rejects_an_initial_manifest_with_forged_trials(
 
 
 @pytest.mark.asyncio
+async def test_store_revalidates_existing_records_on_append(
+    tmp_path,
+) -> None:
+    class FakeExecutor:
+        async def execute(
+            self, spec: ExperimentSpec, trial_index: int
+        ) -> TrialEvidence:
+            return TrialEvidence(status="ok")
+
+    store = ExperimentStore(tmp_path / "records")
+    outcome = await ExperimentRunner(store).run(
+        ExperimentSpec(
+            experiment_id="exp-revalidate",
+            task="revalidate",
+            adapter="fake",
+            trials=2,
+        ),
+        FakeExecutor(),
+    )
+    store.trial_path("exp-revalidate", 0).unlink()
+    forged = replace(
+        outcome.manifest,
+        trial_count=2,
+        status_counts={"ok": 2},
+    )
+
+    with pytest.raises(FileExistsError, match="不存在"):
+        store.write_manifest(forged)
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_existing_record_status_drift(
+    tmp_path,
+) -> None:
+    class FakeExecutor:
+        async def execute(
+            self, spec: ExperimentSpec, trial_index: int
+        ) -> TrialEvidence:
+            return TrialEvidence(status="ok")
+
+    store = ExperimentStore(tmp_path / "records")
+    outcome = await ExperimentRunner(store).run(
+        ExperimentSpec(
+            experiment_id="exp-status-drift",
+            task="status drift",
+            adapter="fake",
+            trials=2,
+        ),
+        FakeExecutor(),
+    )
+    path = store.trial_path("exp-status-drift", 0)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["status"] = "fail"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    forged = replace(
+        outcome.manifest,
+        trial_count=2,
+        status_counts={"ok": 2},
+    )
+
+    with pytest.raises(FileExistsError, match="status_counts"):
+        store.write_manifest(forged)
+
+
+@pytest.mark.asyncio
 async def test_trial_exception_is_recorded_and_does_not_hide_later_trials(tmp_path) -> None:
     class FlakyExecutor:
         async def execute(self, spec: ExperimentSpec, trial_index: int) -> TrialEvidence:

@@ -269,6 +269,67 @@ async def test_publish_preserves_push_when_merge_registration_fails(
 
 
 @pytest.mark.asyncio
+async def test_publish_refuses_merge_registration_without_readback(
+    tmp_path: Path,
+) -> None:
+    class DroppingSaveStore(MergeStore):
+        def save(self, record) -> None:
+            return None
+
+    adapter = GitHubChangeAdapter(
+        pipeline=FakePipeline(tmp_path),
+        merge_store=DroppingSaveStore(),
+        clock=lambda: datetime(2026, 10, 27, tzinfo=UTC),
+    )
+    bundle = _bundle()
+
+    with pytest.raises(PushRecoveryRequired, match="readback"):
+        await adapter.publish(
+            workspace=tmp_path,
+            bundle=bundle,
+            approval=ChangeApproval(
+                approver="alice",
+                trace_id="trace-1",
+                bundle_hash=bundle.bundle_hash,
+                run_id="run-1",
+            ),
+        )
+
+
+@pytest.mark.asyncio
+async def test_publish_refuses_readback_with_wrong_delivery_evidence(
+    tmp_path: Path,
+) -> None:
+    class EvidenceDroppingStore(MergeStore):
+        def save(self, record) -> None:
+            self._records[record.identity] = replace(
+                record,
+                run_id="",
+                trace_id="",
+                bundle_hash="",
+            )
+
+    adapter = GitHubChangeAdapter(
+        pipeline=FakePipeline(tmp_path),
+        merge_store=EvidenceDroppingStore(),
+        clock=lambda: datetime(2026, 10, 27, tzinfo=UTC),
+    )
+    bundle = _bundle()
+
+    with pytest.raises(PushRecoveryRequired, match="readback"):
+        await adapter.publish(
+            workspace=tmp_path,
+            bundle=bundle,
+            approval=ChangeApproval(
+                approver="alice",
+                trace_id="trace-1",
+                bundle_hash=bundle.bundle_hash,
+                run_id="run-1",
+            ),
+        )
+
+
+@pytest.mark.asyncio
 async def test_merge_registration_recovery_is_idempotent(tmp_path: Path) -> None:
     class FlakySaveStore(MergeStore):
         def __init__(self) -> None:
