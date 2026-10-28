@@ -9,6 +9,7 @@ from bench.experiment import (
     BenchExperimentAdapter,
     CollaborationExperimentAdapter,
     ExperimentRunner,
+    ExperimentManifest,
     ExperimentSpec,
     ExperimentStore,
     RunMetrics,
@@ -230,6 +231,36 @@ async def test_store_rejects_manifest_status_without_record_evidence(
 
     with pytest.raises(FileExistsError, match="status_counts"):
         store.write_manifest(forged)
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_an_initial_manifest_with_forged_trials(
+    tmp_path,
+) -> None:
+    store = ExperimentStore(tmp_path / "records")
+    spec = ExperimentSpec(
+        experiment_id="exp-initial-forgery",
+        task="initial forgery",
+        adapter="fake",
+        trials=1,
+    )
+    forged = ExperimentManifest(
+        schema_version=1,
+        experiment_id=spec.experiment_id,
+        created_at="2026-10-29T00:00:00+00:00",
+        updated_at="2026-10-29T00:00:00+00:00",
+        config_hash=spec.config_hash,
+        trial_count=1,
+        status_counts={"ok": 1},
+        trial_ids=("exp-initial-forgery-trial-000",),
+        trial_paths=("trials/trial-000.json",),
+        spec=spec,
+    )
+
+    with pytest.raises(FileExistsError, match="不存在"):
+        store.write_manifest(forged)
+
+    assert not store.manifest_path(spec.experiment_id).exists()
 
 
 @pytest.mark.asyncio

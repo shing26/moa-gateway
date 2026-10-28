@@ -39,6 +39,7 @@ class ExperimentStore:
 
     def write_manifest(self, manifest: ExperimentManifest) -> Path:
         path = self.manifest_path(manifest.experiment_id)
+        existing: ExperimentManifest | None = None
         if path.exists():
             existing = self.load_manifest(manifest.experiment_id)
             expected_trial_ids = tuple(
@@ -74,19 +75,25 @@ class ExperimentStore:
                 raise FileExistsError(
                     f"Experiment manifest 已存在，不得改写配置、身份或回退进度: {path}"
                 )
-            self._validate_new_trial_evidence(existing, manifest)
+        self._validate_trial_evidence(
+            manifest,
+            start_index=existing.trial_count if existing is not None else 0,
+            baseline_counts=existing.status_counts if existing is not None else {},
+        )
         self._atomic_write(path, manifest.to_dict(), overwrite=True)
         return path
 
-    def _validate_new_trial_evidence(
+    def _validate_trial_evidence(
         self,
-        existing: ExperimentManifest,
         manifest: ExperimentManifest,
+        *,
+        start_index: int,
+        baseline_counts: dict[str, int],
     ) -> None:
         """Reject manifest progress that has no matching immutable record."""
         experiment_dir = self.experiment_dir(manifest.experiment_id).resolve()
         added_counts: Counter[str] = Counter()
-        for index in range(existing.trial_count, manifest.trial_count):
+        for index in range(start_index, manifest.trial_count):
             expected_id = f"{manifest.experiment_id}-trial-{index:03d}"
             expected_path = f"trials/trial-{index:03d}.json"
             if (
@@ -112,7 +119,7 @@ class ExperimentStore:
                     f"Run Record 与 manifest 证据不符: {expected_path}"
                 )
             added_counts[record.status] += 1
-        expected_counts = Counter(existing.status_counts) + added_counts
+        expected_counts = Counter(baseline_counts) + added_counts
         if dict(sorted(expected_counts.items())) != dict(
             sorted(manifest.status_counts.items())
         ):
