@@ -66,6 +66,8 @@ def test_redact_ci_log_removes_common_credential_encodings() -> None:
     raw = (
         '{"password":"json-secret-123"}\n'
         "Authorization: Basic dXNlcjpwYXNzd29yZA==\n"
+        '{"Authorization":"Bearer serialized-bearer-secret"}\n'
+        "Headers({'authorization': 'Bearer mapping-bearer-secret'})\n"
         "AWS_SECRET_ACCESS_KEY=aws-secret-456\n"
         "https://alice:url-secret-789@example.com/path\n"
         "-----BEGIN PRIVATE KEY-----\n"
@@ -78,6 +80,8 @@ def test_redact_ci_log_removes_common_credential_encodings() -> None:
     for secret in (
         "json-secret-123",
         "dXNlcjpwYXNzd29yZA==",
+        "serialized-bearer-secret",
+        "mapping-bearer-secret",
         "aws-secret-456",
         "url-secret-789",
         "pem-secret-000",
@@ -89,6 +93,8 @@ def test_artifacts_do_not_contain_common_credentials(tmp_path: Path) -> None:
     secrets = (
         "json-secret-123",
         "dXNlcjpwYXNzd29yZA==",
+        "serialized-bearer-secret",
+        "mapping-bearer-secret",
         "aws-secret-456",
         "url-secret-789",
         "pem-secret-000",
@@ -99,6 +105,8 @@ def test_artifacts_do_not_contain_common_credentials(tmp_path: Path) -> None:
                 "FAILED tests/test_auth.py "
                 '{"password":"json-secret-123"} '
                 "Authorization: Basic dXNlcjpwYXNzd29yZA== "
+                '{"Authorization":"Bearer serialized-bearer-secret"} '
+                "Headers({'authorization': 'Bearer mapping-bearer-secret'}) "
                 "AWS_SECRET_ACCESS_KEY=aws-secret-456 "
                 "https://alice:url-secret-789@example.com/path "
                 "-----BEGIN PRIVATE KEY----- pem-secret-000 "
@@ -249,6 +257,7 @@ def test_unavailable_artifacts_record_permission_failure_without_request(
     assert payload["failure_status_established"] is False
     assert payload["human_review_required"] is True
     assert "Checks: Read" in markdown
+    assert "rate-limited" in markdown
     assert "does not mean CI is green" in markdown
     assert not list(tmp_path.glob("*.request.json"))
 

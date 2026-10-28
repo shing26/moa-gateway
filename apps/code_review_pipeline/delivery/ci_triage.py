@@ -45,6 +45,13 @@ _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (
         re.compile(
+            r"(?i)([\"']?authorization[\"']?\s*[:=]\s*[\"']?"
+            r"(?:bearer|basic|token)\s+)[^\"'\s,;}]+"
+        ),
+        r"\1[REDACTED]",
+    ),
+    (
+        re.compile(
             r"(?i)([\"']?(?:password|passwd|token|secret|api[_-]?key|"
             r"access[_-]?key|secret[_-]?access[_-]?key)[\"']?\s*[=:]\s*)"
             r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;}\]]+)"
@@ -471,10 +478,16 @@ def write_ci_triage_unavailable_artifacts(
     # A stable trace id means an earlier success may have left executable evidence.
     # The unavailable state must invalidate it rather than sit beside it.
     request_path.unlink(missing_ok=True)
-    if status_code in {401, 403}:
+    if status_code == 401:
         detail = (
             "Grant fine-grained GitHub 'Checks: Read' and 'Actions: Read' "
             "permissions for this repository."
+        )
+    elif status_code == 403:
+        detail = (
+            "The request was denied or rate-limited. Grant fine-grained GitHub "
+            "'Checks: Read' and 'Actions: Read' permissions; if they are already "
+            "present, retry after the reset window."
         )
     elif status_code == 404:
         detail = (
