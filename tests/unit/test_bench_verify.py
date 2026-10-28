@@ -9,17 +9,23 @@ from pathlib import Path
 from bench.harness.verify import build_env, run_command
 
 
-def test_build_env_strips_proxies_and_credentials(tmp_path: Path) -> None:
+def test_build_env_uses_an_explicit_allowlist(tmp_path: Path) -> None:
     env = build_env(
         tmp_path,
         {
             "PATH": "/usr/bin",
+            "TEMP": "/tmp",
             "HTTP_PROXY": "http://proxy",
             "HTTPS_PROXY": "http://proxy",
             "OPENAI_API_KEY": "sk-secret",
             "OMNIROUTE_API_KEY": "secret",
             "LLM_API_KEY": "secret",
             "SOME_SERVICE_API_KEY": "secret",
+            "GITHUB_TOKEN": "token",
+            "DATABASE_URL": "postgresql://u:p@db/app",
+            "VECTOR_DB_DSN": "postgresql://u:p@db/vectors",
+            "AWS_SECRET_ACCESS_KEY": "secret",
+            "UNRELATED_FLAG": "must-not-be-inherited",
         },
     )
     for stripped in (
@@ -29,10 +35,15 @@ def test_build_env_strips_proxies_and_credentials(tmp_path: Path) -> None:
         "OMNIROUTE_API_KEY",
         "LLM_API_KEY",
         "SOME_SERVICE_API_KEY",
+        "GITHUB_TOKEN",
+        "DATABASE_URL",
+        "VECTOR_DB_DSN",
+        "AWS_SECRET_ACCESS_KEY",
+        "UNRELATED_FLAG",
     ):
         assert stripped not in env
-    # 与判据无关的变量原样保留，免得把"每次都用同一个干净环境"变成"每次都用空环境"。
     assert env["PATH"] == "/usr/bin"
+    assert env["TEMP"] == "/tmp"
 
 
 def test_build_env_puts_workspace_first_on_pythonpath(tmp_path: Path) -> None:

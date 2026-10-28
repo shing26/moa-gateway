@@ -141,6 +141,21 @@ def test_paired_analysis_uses_protocol_origin_for_missing_task() -> None:
     assert comparison.tasks[0].task_origin == "E3"
 
 
+def test_paired_analysis_blocks_missing_origin_instead_of_defaulting_to_e1() -> None:
+    comparison = paired_pass_rate_comparison(
+        [],
+        _preregistration(),
+        expected_tasks=("missing-origin",),
+    )
+
+    assert comparison.authorized is False
+    assert comparison.tasks[0].task_origin == ""
+    assert any(
+        "missing-origin 缺少任务来源" in reason
+        for reason in comparison.block_reasons
+    )
+
+
 def test_paired_analysis_refuses_claim_when_any_cell_is_under_sampled() -> None:
     rows = _rows(
         baseline_outcomes=("fail", "fail", "error"),

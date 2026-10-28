@@ -98,6 +98,44 @@ async def test_runner_creates_one_immutable_record_per_trial(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_store_refuses_to_replace_or_regress_a_manifest(tmp_path) -> None:
+    class FakeExecutor:
+        async def execute(
+            self, spec: ExperimentSpec, trial_index: int
+        ) -> TrialEvidence:
+            return TrialEvidence(status="ok")
+
+    store = ExperimentStore(tmp_path / "records")
+    outcome = await ExperimentRunner(store).run(
+        ExperimentSpec(
+            experiment_id="exp-immutable",
+            task="immutable manifest",
+            adapter="fake",
+        ),
+        FakeExecutor(),
+    )
+    original = outcome.manifest_path.read_text(encoding="utf-8")
+    regressed = replace(outcome.manifest, trial_count=0, status_counts={})
+    forged_ids = replace(outcome.manifest, trial_ids=("forged-trial",))
+    overfull = replace(
+        outcome.manifest,
+        trial_count=2,
+        trial_ids=("a", "b"),
+        trial_paths=("a", "b"),
+        status_counts={"ok": 2},
+    )
+
+    with pytest.raises(FileExistsError, match="不得改写"):
+        store.write_manifest(regressed)
+    with pytest.raises(FileExistsError, match="不得改写"):
+        store.write_manifest(forged_ids)
+    with pytest.raises(FileExistsError, match="不得改写"):
+        store.write_manifest(overfull)
+
+    assert outcome.manifest_path.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
 async def test_trial_exception_is_recorded_and_does_not_hide_later_trials(tmp_path) -> None:
     class FlakyExecutor:
         async def execute(self, spec: ExperimentSpec, trial_index: int) -> TrialEvidence:

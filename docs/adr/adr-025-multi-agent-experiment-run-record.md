@@ -26,8 +26,9 @@ Run Record；Web UI 和横向跑分是后续消费者，而不是首版前提。
 
 ## 首版实装（2026-10-22）
 
-- `bench/experiment/` 实现 `Experiment → Trial → Run Record`，manifest 与每条记录写入本地
-  不可变 JSON；已有 Experiment ID 与 Trial 文件均拒绝覆盖。
+- `bench/experiment/` 实现 `Experiment → Trial → Run Record`。Run Record 写入后不可变；
+  `experiment.json` 仅作为进度索引，只允许追加 Trial 进度，配置、身份与既有 Trial
+  前缀均拒绝改写。
 - Run Record 固化任务、模型、运行配置、验证命令、实际计划、依赖路径、治理证据、资源账本
   和工作区执行前后快照。
 - `LLMClient` 对每次真实请求的 messages 与 tool schemas 生成稳定 `prompt_hash`；协作与

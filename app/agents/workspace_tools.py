@@ -86,6 +86,9 @@ def resolve_in_workspace(root: Path, raw: str) -> Path:
     candidate = (root_resolved / (raw or ".")).resolve()
     if candidate != root_resolved and not candidate.is_relative_to(root_resolved):
         raise PathEscape(f"路径越出工作区: {raw!r}")
+    relative = candidate.relative_to(root_resolved)
+    if any(part.lower() == ".git" for part in relative.parts):
+        raise PathEscape(f"路径指向 Git 元数据: {raw!r}")
     return candidate
 
 

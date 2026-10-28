@@ -11,6 +11,8 @@ import json
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from app.agents.subprocess_env import harden_git_argv, isolated_env
 from typing import Any
 
 _MAX_DIFF_CHARS = 200_000
@@ -137,8 +139,9 @@ def verification_output_excerpt(stdout: str, stderr: str) -> str:
 
 def _git(args: list[str], *, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 - 参数由本模块构造，不经 shell
-        ["git", *args],
+        harden_git_argv(args),
         cwd=str(cwd),
+        env=isolated_env(cwd, git=True),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -190,7 +193,14 @@ def build_change_bundle(
 
     # --no-color 保证 diff 可哈希；--binary 让二进制改动也出现在 patch 里。
     full_diff = _git(
-        ["diff", "--no-color", "--binary", "HEAD"],
+        [
+            "diff",
+            "--no-color",
+            "--binary",
+            "--no-ext-diff",
+            "--no-textconv",
+            "HEAD",
+        ],
         cwd=root,
         check=False,
     ).stdout

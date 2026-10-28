@@ -537,3 +537,52 @@ def test_cmd_ci_triage_non_failure_invalidates_stale_request(
     assert cmd_delivery_ci_triage(args) == 1
     assert "CI triage skipped" in capsys.readouterr().err
     assert not stale.exists()
+
+
+@pytest.mark.parametrize("failure", ["timeout", "value-error"])
+def test_cmd_ci_triage_indeterminate_failure_invalidates_stale_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    import httpx
+
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.adapters import (
+        github_ci as github_ci_module,
+    )
+    from apps.code_review_pipeline.routing import github_provider
+
+    class FakeGitHub:
+        async def aclose(self) -> None:
+            pass
+
+    class IndeterminateCollector:
+        def __init__(self, *, github, max_jobs, max_log_chars) -> None:
+            pass
+
+        async def collect(self, *, repo, head_sha):
+            if failure == "timeout":
+                raise httpx.ReadTimeout("timed out")
+            raise ValueError("unrecognized CI response")
+
+    monkeypatch.setattr(settings, "github_token", "token")
+    monkeypatch.setattr(settings, "ci_triage_output_dir", str(tmp_path / "ci"))
+    monkeypatch.setattr(
+        github_provider, "build_github_client", lambda: FakeGitHub()
+    )
+    monkeypatch.setattr(
+        github_ci_module,
+        "GitHubCiEvidenceCollector",
+        IndeterminateCollector,
+    )
+    args = build_parser().parse_args(_ci_triage_argv())
+    _apply_delivery_defaults(args)
+    stale = tmp_path / "ci" / f"{args.trace_id}.request.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("{}\n", encoding="utf-8")
+
+    assert cmd_delivery_ci_triage(args) == 1
+    assert "CI triage failed" in capsys.readouterr().err
+    assert not stale.exists()

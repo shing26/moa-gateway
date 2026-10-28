@@ -258,8 +258,10 @@ def paired_pass_rate_comparison(
             if candidate
             else baseline[0].task_origin
             if baseline
-            else (expected_task_origins or {}).get(task_id, "E1")
+            else (expected_task_origins or {}).get(task_id, "")
         )
+        if not origin:
+            block_reasons.append(f"{task_id} 缺少任务来源")
         tasks.append(
             PairedTask(
                 task_id=task_id,

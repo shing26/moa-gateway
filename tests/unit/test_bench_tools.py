@@ -34,6 +34,20 @@ def test_resolve_rejects_parent_traversal(tmp_path: Path) -> None:
         resolve_in_workspace(tmp_path, "../../etc/passwd")
 
 
+@pytest.mark.parametrize(
+    "path",
+    (
+        ".git",
+        ".git/config",
+        ".GIT/config",
+        "nested/.git/config",
+    ),
+)
+def test_resolve_rejects_git_metadata(tmp_path: Path, path: str) -> None:
+    with pytest.raises(PathEscape, match="Git 元数据"):
+        resolve_in_workspace(tmp_path, path)
+
+
 @pytest.mark.asyncio
 async def test_read_outside_workspace_is_rejected_not_failed(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)

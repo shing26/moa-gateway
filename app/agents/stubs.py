@@ -207,9 +207,31 @@ async def execute_tool_loop(
     usage = ToolLoopUsage()
     current_messages = list(messages)
     executed_tool_calls = 0
+    last_prompt_tokens = 0
+
+    def request_tokens() -> int | None:
+        if max_tokens <= 0:
+            return None
+        remaining = max_tokens - usage.total_tokens
+        if usage.llm_calls == 0:
+            return max(1, remaining)
+        # The next request repeats the prompt. Reserve that known cost before
+        # offering the provider a completion allowance.
+        return max(0, remaining - last_prompt_tokens)
+
+    def record_usage() -> None:
+        nonlocal usage, last_prompt_tokens
+        metrics = getattr(llm, "last_metrics", None) or {}
+        last_prompt_tokens = int(metrics.get("prompt_tokens", 0) or 0)
+        usage = usage.add_metrics(metrics)
+
     try:
-        result = await chat_with_tools(current_messages, schemas)
-        usage = usage.add_metrics(getattr(llm, "last_metrics", None))
+        result = await chat_with_tools(
+            current_messages,
+            schemas,
+            max_tokens=request_tokens(),
+        )
+        record_usage()
         while True:
             if not result.tool_calls:
                 steps.append(
@@ -329,8 +351,24 @@ async def execute_tool_loop(
                 )
                 executed_tool_calls += 1
             current_messages = result.messages
-            result = await chat_with_tools(current_messages, schemas)
-            usage = usage.add_metrics(getattr(llm, "last_metrics", None))
+            allowance = request_tokens()
+            if max_tokens > 0 and allowance is not None and allowance <= 0:
+                return ToolLoopResult(
+                    status="budget_exhausted",
+                    content=str(result.content or ""),
+                    steps=tuple(steps),
+                    usage=usage,
+                    stop_reason=(
+                        f"token budget exhausted: {usage.total_tokens} + "
+                        f"prompt {last_prompt_tokens} >= {max_tokens}"
+                    ),
+                )
+            result = await chat_with_tools(
+                current_messages,
+                schemas,
+                max_tokens=allowance,
+            )
+            record_usage()
     except Exception as exc:
         return ToolLoopResult(
             status="error",

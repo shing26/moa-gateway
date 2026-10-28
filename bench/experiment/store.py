@@ -38,6 +38,29 @@ class ExperimentStore:
 
     def write_manifest(self, manifest: ExperimentManifest) -> Path:
         path = self.manifest_path(manifest.experiment_id)
+        if path.exists():
+            existing = self.load_manifest(manifest.experiment_id)
+            if (
+                manifest.config_hash != existing.config_hash
+                or manifest.created_at != existing.created_at
+                or manifest.spec != existing.spec
+                or manifest.trial_count < existing.trial_count
+                or manifest.trial_count > existing.spec.trials
+                or manifest.trial_ids[: existing.trial_count]
+                != existing.trial_ids
+                or manifest.trial_paths[: existing.trial_count]
+                != existing.trial_paths
+                or len(manifest.trial_ids) != manifest.trial_count
+                or len(manifest.trial_paths) != manifest.trial_count
+                or sum(manifest.status_counts.values()) != manifest.trial_count
+                or any(
+                    manifest.status_counts.get(status, 0) < count
+                    for status, count in existing.status_counts.items()
+                )
+            ):
+                raise FileExistsError(
+                    f"Experiment manifest 已存在，不得改写配置、身份或回退进度: {path}"
+                )
         self._atomic_write(path, manifest.to_dict(), overwrite=True)
         return path
 

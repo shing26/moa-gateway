@@ -5,13 +5,15 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from app.agents.subprocess_env import harden_git_argv, isolated_env
 from apps.code_review_pipeline.routing.github_client import GitHubRepo
 
 
 def _git(args: list[str], *, cwd: Path) -> str:
     return subprocess.run(  # noqa: S603 - arguments are constructed locally
-        ["git", *args],
+        harden_git_argv(args),
         cwd=cwd,
+        env=isolated_env(cwd, git=True),
         capture_output=True,
         text=True,
         encoding="utf-8",
