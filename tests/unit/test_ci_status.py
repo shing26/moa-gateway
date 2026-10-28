@@ -17,6 +17,7 @@ from apps.code_review_pipeline.routing.github_client import (
     GITHUB_API,
     GitHubClient,
     GitHubRepo,
+    JobLogTooLarge,
     aggregate_ci_status,
     is_failing_ci_conclusion,
 )
@@ -186,6 +187,19 @@ async def test_job_log_is_downloaded_without_pre_redaction_truncation() -> None:
 
     assert seen == "/repos/o/r/actions/jobs/22/logs"
     assert log == payload
+
+
+@pytest.mark.asyncio
+async def test_job_log_rejects_oversized_streamed_response() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="x" * 11)
+
+    with pytest.raises(JobLogTooLarge, match="10-byte"):
+        await _client(handler).get_job_log(
+            GitHubRepo("o", "r"),
+            22,
+            max_bytes=10,
+        )
 
 
 def _client(handler: object) -> GitHubClient:

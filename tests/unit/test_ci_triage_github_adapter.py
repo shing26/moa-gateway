@@ -13,6 +13,7 @@ from apps.code_review_pipeline.routing.github_client import (
     CiCheck,
     CiStatus,
     GitHubRepo,
+    JobLogTooLarge,
 )
 
 
@@ -161,6 +162,34 @@ async def test_collector_keeps_checks_when_actions_permission_is_missing() -> No
     assert evidence.checks[0].name == "test"
     assert evidence.jobs == ()
     assert "Actions: Read" in evidence.actions_unavailable_reason
+
+
+@pytest.mark.asyncio
+async def test_collector_marks_oversized_job_log_unavailable() -> None:
+    class OversizedGitHub(FakeGitHub):
+        async def get_job_log(self, repo: GitHubRepo, job_id: int) -> str:
+            raise JobLogTooLarge("job log exceeds the safe streaming limit")
+
+    github = OversizedGitHub()
+    github.runs = [
+        {
+            "id": 2,
+            "workflow_id": 10,
+            "name": "CI",
+            "run_number": 2,
+            "run_attempt": 1,
+            "conclusion": "failure",
+        },
+    ]
+    github.jobs = {
+        2: [{"id": 22, "name": "pytest", "conclusion": "failure"}],
+    }
+    collector = GitHubCiEvidenceCollector(github=github)
+
+    evidence = await collector.collect(repo="owner/name", head_sha=SHA)
+
+    assert evidence.jobs[0].log == ""
+    assert "safe streaming limit" in evidence.jobs[0].unavailable_reason
 
 
 @pytest.mark.asyncio

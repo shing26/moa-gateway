@@ -4,6 +4,8 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from apps.code_review_pipeline.delivery.ci_triage import (
     CiFailureCheck,
     CiFailureEvidence,
@@ -58,6 +60,69 @@ def test_redact_ci_log_removes_tokens_and_authorization_values() -> None:
     assert "github_pat_" not in redacted
     assert "normal failure output" in redacted
     assert redacted.count("[REDACTED]") == 2
+
+
+def test_redact_ci_log_removes_common_credential_encodings() -> None:
+    raw = (
+        '{"password":"json-secret-123"}\n'
+        "Authorization: Basic dXNlcjpwYXNzd29yZA==\n"
+        "AWS_SECRET_ACCESS_KEY=aws-secret-456\n"
+        "https://alice:url-secret-789@example.com/path\n"
+        "-----BEGIN PRIVATE KEY-----\n"
+        "pem-secret-000\n"
+        "-----END PRIVATE KEY-----\n"
+    )
+
+    redacted = redact_ci_log(raw)
+
+    for secret in (
+        "json-secret-123",
+        "dXNlcjpwYXNzd29yZA==",
+        "aws-secret-456",
+        "url-secret-789",
+        "pem-secret-000",
+    ):
+        assert secret not in redacted
+
+
+def test_artifacts_do_not_contain_common_credentials(tmp_path: Path) -> None:
+    secrets = (
+        "json-secret-123",
+        "dXNlcjpwYXNzd29yZA==",
+        "aws-secret-456",
+        "url-secret-789",
+        "pem-secret-000",
+    )
+    report = build_ci_triage_report(
+        _evidence(
+            _job(
+                "FAILED tests/test_auth.py "
+                '{"password":"json-secret-123"} '
+                "Authorization: Basic dXNlcjpwYXNzd29yZA== "
+                "AWS_SECRET_ACCESS_KEY=aws-secret-456 "
+                "https://alice:url-secret-789@example.com/path "
+                "-----BEGIN PRIVATE KEY----- pem-secret-000 "
+                "-----END PRIVATE KEY-----\n"
+            )
+        ),
+        base_branch="main",
+        branch="moa/ci-fix-aaaaaaaaaaaa",
+        trace_id="ci-owner-name-aaaaaaaaaaaa",
+        now=datetime(2026, 10, 28, tzinfo=UTC),
+    )
+
+    artifacts = write_ci_triage_artifacts(report, tmp_path)
+    combined = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            artifacts.json_path,
+            artifacts.markdown_path,
+            artifacts.request_path,
+        )
+    )
+
+    for secret in secrets:
+        assert secret not in combined
 
 
 def test_classify_ci_failure_uses_deterministic_evidence() -> None:
@@ -158,8 +223,10 @@ def test_artifacts_include_report_and_delivery_request(tmp_path: Path) -> None:
     assert artifacts.markdown_path.is_file()
     assert artifacts.request_path.is_file()
     payload = json.loads(artifacts.request_path.read_text(encoding="utf-8"))
+    report_payload = json.loads(artifacts.json_path.read_text(encoding="utf-8"))
     assert payload["origin"] == "ci_failure"
     assert payload["trace_id"] == "ci-owner-name-aaaaaaaaaaaa"
+    assert report_payload["state"] == "failed"
 
 
 def test_unavailable_artifacts_record_permission_failure_without_request(
@@ -184,6 +251,61 @@ def test_unavailable_artifacts_record_permission_failure_without_request(
     assert "Checks: Read" in markdown
     assert "does not mean CI is green" in markdown
     assert not list(tmp_path.glob("*.request.json"))
+
+
+def test_unavailable_artifacts_invalidate_stale_delivery_request(
+    tmp_path: Path,
+) -> None:
+    from apps.code_review_pipeline.delivery import ci_triage as ci_triage_module
+
+    report = build_ci_triage_report(
+        _evidence(_job("FAILED tests/test_api.py\n")),
+        base_branch="main",
+        branch="moa/ci-fix-aaaaaaaaaaaa",
+        trace_id="ci-owner-name-aaaaaaaaaaaa",
+        now=datetime(2026, 10, 28, tzinfo=UTC),
+    )
+    written = write_ci_triage_artifacts(report, tmp_path)
+    assert written.request_path.is_file()
+
+    unavailable = ci_triage_module.write_ci_triage_unavailable_artifacts(
+        repo="owner/name",
+        head_sha=SHA,
+        trace_id="ci-owner-name-aaaaaaaaaaaa",
+        directory=tmp_path,
+        status_code=403,
+    )
+
+    assert unavailable.json_path == written.json_path
+    assert not written.request_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    (
+        (404, "not found"),
+        (429, "rate limit"),
+        (500, "upstream"),
+    ),
+)
+def test_unavailable_artifacts_explain_non_permission_http_failure(
+    tmp_path: Path,
+    status_code: int,
+    expected: str,
+) -> None:
+    from apps.code_review_pipeline.delivery import ci_triage as ci_triage_module
+
+    artifacts = ci_triage_module.write_ci_triage_unavailable_artifacts(
+        repo="owner/name",
+        head_sha=SHA,
+        trace_id="ci-owner-name-aaaaaaaaaaaa",
+        directory=tmp_path,
+        status_code=status_code,
+    )
+
+    markdown = artifacts.markdown_path.read_text(encoding="utf-8")
+    assert expected in markdown.lower()
+    assert "Grant fine-grained GitHub" not in markdown
 
 
 def test_truncated_report_does_not_claim_unseen_jobs_were_omitted() -> None:

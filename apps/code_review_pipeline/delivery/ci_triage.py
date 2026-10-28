@@ -39,16 +39,29 @@ _STRONG_EVIDENCE_LINE = re.compile(
 _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(
-            r"(?i)(authorization:\s*bearer\s+)[^\s]+"
+            r"(?i)(authorization:\s*(?:bearer|basic|token)\s+)[^\s]+"
         ),
         r"\1[REDACTED]",
     ),
     (
         re.compile(
-            r"(?i)((?:token|password|secret|api[_-]?key)\s*[=:]\s*)"
-            r"[^\s,;]+"
+            r"(?i)([\"']?(?:password|passwd|token|secret|api[_-]?key|"
+            r"access[_-]?key|secret[_-]?access[_-]?key)[\"']?\s*[=:]\s*)"
+            r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;}\]]+)"
         ),
         r"\1[REDACTED]",
+    ),
+    (
+        re.compile(r"(?i)(https?://[^/\s:@]+:)[^@\s/]+@"),
+        r"\1[REDACTED]@",
+    ),
+    (
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?"
+            r"-----END [A-Z ]*PRIVATE KEY-----",
+            re.DOTALL,
+        ),
+        "[REDACTED PRIVATE KEY]",
     ),
     (
         re.compile(
@@ -189,6 +202,7 @@ class CiTriageReport:
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
+            "state": "failed",
             "repo": self.repo,
             "head_sha": self.head_sha,
             "trace_id": self.trace_id,
@@ -453,11 +467,27 @@ def write_ci_triage_unavailable_artifacts(
         stem = f"ci-{head_sha[:12]}"
     json_path = target / f"{stem}.json"
     markdown_path = target / f"{stem}.md"
-    reason = (
-        f"GitHub Checks unavailable: HTTP {status_code}. "
-        "Grant fine-grained GitHub 'Checks: Read' and 'Actions: Read' "
-        "permissions for this repository."
-    )
+    request_path = target / f"{stem}.request.json"
+    # A stable trace id means an earlier success may have left executable evidence.
+    # The unavailable state must invalidate it rather than sit beside it.
+    request_path.unlink(missing_ok=True)
+    if status_code in {401, 403}:
+        detail = (
+            "Grant fine-grained GitHub 'Checks: Read' and 'Actions: Read' "
+            "permissions for this repository."
+        )
+    elif status_code == 404:
+        detail = (
+            "Repository or ref not found; verify the repository name and SHA, "
+            "or grant 'Checks: Read' if access is restricted."
+        )
+    elif status_code == 429:
+        detail = "GitHub rate limit exceeded; retry after the reset window."
+    elif 500 <= status_code <= 599:
+        detail = "GitHub upstream server error; retry after the service recovers."
+    else:
+        detail = "Retry after verifying the repository and GitHub service state."
+    reason = f"GitHub Checks unavailable: HTTP {status_code}. {detail}"
     payload = {
         "schema_version": CI_TRIAGE_SCHEMA_VERSION,
         "state": "unavailable",

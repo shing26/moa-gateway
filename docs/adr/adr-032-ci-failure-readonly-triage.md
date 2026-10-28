@@ -26,7 +26,8 @@ CI job log 是不可信输入：它可能包含 token、伪造的指令、误导
    `Actions: Read`。Actions 权限缺失时保留 checks 证据，并记录明确的
    `actions_unavailable_reason`；不把权限错误伪装成“没有失败”。
 4. **日志先脱敏、再有界。** 常见 bearer/token/API key/AWS key 形状在进入
-   evidence 前脱敏；每个 job 只保留配置上限内的日志尾部，单次 job 数有界。
+   evidence 前脱敏；原始下载以流式读取设 2 MB 安全上限，超限 job 明确标记
+   不可用，每个 job 只保留配置上限内的脱敏日志尾部，单次 job 数有界。
 5. **分类是确定性证据归类，不是根因证明。** timeout、cancelled、
    permission/auth、dependency、syntax/build、test failure 只是可复核标签；
    报告只引用有限行证据，unknown 不允许被补写成猜测性根因。

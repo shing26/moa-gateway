@@ -16,6 +16,7 @@ from apps.code_review_pipeline.routing.github_client import (
     CI_FAILURE,
     CiStatus,
     GitHubRepo,
+    JobLogTooLarge,
     is_failing_ci_conclusion,
 )
 
@@ -154,6 +155,9 @@ class GitHubCiEvidenceCollector:
                 except httpx.HTTPStatusError as exc:
                     log = ""
                     unavailable = _http_reason(exc, what=f"job {job_id} log")
+                except JobLogTooLarge as exc:
+                    log = ""
+                    unavailable = f"job {job_id} log unavailable: {exc}"
                 jobs.append(
                     CiJobLog(
                         run_id=run_id,

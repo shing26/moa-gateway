@@ -15,6 +15,10 @@ from apps.code_review_pipeline.change.refs import PullRequestRef
 GITHUB_API = "https://api.github.com"
 
 
+class JobLogTooLarge(RuntimeError):
+    """A job log exceeded the bounded streaming collection limit."""
+
+
 def _trust_env_default() -> bool:
     # 默认**不走**系统代理。实测（2026-10-03）：本机代理在 127.0.0.1:31181 上做
     # TLS 拦截，而它的根证书不在信任链里（SSL_CERT_FILE 指向 anaconda 的
@@ -360,14 +364,33 @@ class GitHubClient:
                 return out
             page += 1
 
-    async def get_job_log(self, repo: GitHubRepo, job_id: int) -> str:
+    async def get_job_log(
+        self,
+        repo: GitHubRepo,
+        job_id: int,
+        *,
+        max_bytes: int = 2_000_000,
+    ) -> str:
         """Download a job log, following GitHub's redirect to blob storage."""
-        resp = await self._client.get(
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        async with self._client.stream(
+            "GET",
             f"/repos/{repo.owner}/{repo.name}/actions/jobs/{job_id}/logs",
             follow_redirects=True,
-        )
-        resp.raise_for_status()
-        return resp.text
+        ) as resp:
+            resp.raise_for_status()
+            content = bytearray()
+            async for chunk in resp.aiter_bytes():
+                if len(content) + len(chunk) > max_bytes:
+                    raise JobLogTooLarge(
+                        f"job log exceeds the {max_bytes}-byte streaming limit"
+                    )
+                content.extend(chunk)
+            return bytes(content).decode(
+                resp.encoding or "utf-8",
+                errors="replace",
+            )
 
     async def merge_pr(
         self,
