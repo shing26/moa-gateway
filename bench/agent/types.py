@@ -275,8 +275,8 @@ class RunResult:
     #: 增量按它算——"多花了多少"在免费端点上只能是 token 口径。
     baseline_tokens: int = 0
     #: 任务来源（``E1`` = 真实历史 bug / ``E3`` = 合成缺陷）。从任务定义透传到判决，
-    #: 报告靠它把两类任务分开说；缺省按 ``E1`` 读（既有任务全是 E1）。
-    source: TaskOrigin = E1_ORIGIN
+    #: 报告靠它把两类任务分开说；来源必须显式透传，不提供静默默认。
+    source: TaskOrigin = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -26,6 +26,7 @@ def _spec(task_id: str) -> TaskSpec:
         verify_command=("python", "-m", "pytest"),
         test_paths=("tests/test_x.py",),
         test_patch=Path("x.test.patch"),
+        source="E1",
     )
 
 

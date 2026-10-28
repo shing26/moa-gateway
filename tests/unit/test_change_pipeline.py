@@ -133,6 +133,32 @@ async def test_verification_does_not_inherit_gateway_credentials(
 
 
 @pytest.mark.asyncio
+async def test_verification_cannot_read_git_metadata(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (repo / ".git" / "secret").write_text("git-secret\n", encoding="utf-8")
+    verify_command = (
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path; "
+            "raise SystemExit(3 if Path('.git/secret').exists() else 0)"
+        ),
+    )
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=verify_command,
+        model_name="test-model",
+    )
+
+    result = await pipeline.prepare_bundle(_request())
+
+    assert result.bundle is not None
+    assert result.bundle.verify_exit_code == 0
+
+
+@pytest.mark.asyncio
 async def test_bundle_collection_ignores_agent_supplied_git_extensions(
     repo: Path,
     tmp_path: Path,

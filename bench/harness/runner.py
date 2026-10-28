@@ -51,7 +51,7 @@ class TaskSpec:
     test_paths: tuple[str, ...]
     test_patch: Path
     difficulty: str = ""
-    source: TaskOrigin = E1_ORIGIN
+    source: TaskOrigin = ""
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -64,7 +64,7 @@ class TaskSpec:
 def load_task(path: Path) -> TaskSpec:
     payload = json.loads(path.read_text(encoding="utf-8"))
     task_id = str(payload["task_id"])
-    source = str(payload.get("source", E1_ORIGIN))
+    source = str(payload.get("source", "") or "")
     if source not in ("E1", "E3"):
         # 来源是闭集；收下一个不认识的来源会让它从报告里"消失"又不报错——宁可炸。
         raise ValueError(f"{task_id}: 未知任务来源 {source!r}（只认 E1 / E3）")

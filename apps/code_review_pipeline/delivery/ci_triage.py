@@ -485,9 +485,12 @@ def invalidate_ci_triage_request(
     head_sha: str,
     directory: str | Path,
 ) -> Path:
-    """Remove executable evidence for a trace whose current state is not failure."""
-    _, _, request_path = _artifact_paths(directory, trace_id, head_sha)
-    request_path.unlink(missing_ok=True)
+    """Remove all stale failure evidence for a trace that is no longer failed."""
+    json_path, markdown_path, request_path = _artifact_paths(
+        directory, trace_id, head_sha
+    )
+    for path in (json_path, markdown_path, request_path):
+        path.unlink(missing_ok=True)
     return request_path
 
 
@@ -506,9 +509,10 @@ def write_ci_triage_unavailable_artifacts(
         head_sha,
     )
     json_path.parent.mkdir(parents=True, exist_ok=True)
-    # A stable trace id means an earlier success may have left executable evidence.
-    # The unavailable state must invalidate it rather than sit beside it.
-    request_path.unlink(missing_ok=True)
+    # A stable trace id means an earlier success may have left stale failure
+    # evidence. The unavailable state must replace that evidence, not sit beside it.
+    for path in (request_path, markdown_path):
+        path.unlink(missing_ok=True)
     if status_code == 401:
         detail = (
             "Grant fine-grained GitHub 'Checks: Read' and 'Actions: Read' "

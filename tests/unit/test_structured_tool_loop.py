@@ -34,6 +34,14 @@ class FakeLLM:
 
     async def chat_with_tools(self, messages, tools, **kwargs) -> ChatResult:
         self.requests.append({"messages": list(messages), **kwargs})
+        # Simulate a provider that consumes more than the requested completion
+        # allowance. The loop itself must still enforce the total budget.
+        self.last_metrics = {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "cost_usd": 0.001,
+            "llm_latency_ms": 2.0,
+        }
         response = self._responses.pop(0)
         if isinstance(response, str):
             return ChatResult(
@@ -111,8 +119,8 @@ async def test_tool_loop_stops_on_token_budget(tmp_path: Path) -> None:
     )
 
     assert result.status == "budget_exhausted"
-    assert result.usage.total_tokens == 15
-    assert [request["max_tokens"] for request in llm.requests] == [20]
+    assert result.usage.total_tokens == 30
+    assert [request["max_tokens"] for request in llm.requests] == [20, 5]
 
 
 @pytest.mark.asyncio
@@ -142,8 +150,50 @@ async def test_tool_loop_passes_only_the_remaining_token_budget(tmp_path: Path) 
 
     assert result.status == "completed"
     assert result.usage.total_tokens == 30
-    # 40 - 15 used - 10 repeated prompt = 15 tokens of completion room.
-    assert [request["max_tokens"] for request in llm.requests] == [40, 15]
+    # The second request gets the full remaining allowance; provider overrun is
+    # detected after the call rather than assumed away by a stale prompt estimate.
+    assert [request["max_tokens"] for request in llm.requests] == [40, 25]
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_stops_when_provider_exceeds_the_budget(tmp_path: Path) -> None:
+    class OverspendingLLM(FakeLLM):
+        async def chat_with_tools(self, messages, tools, **kwargs) -> ChatResult:
+            result = await super().chat_with_tools(messages, tools, **kwargs)
+            self.last_metrics = {
+                "prompt_tokens": 40,
+                "completion_tokens": 30,
+                "cost_usd": 0.001,
+                "llm_latency_ms": 2.0,
+            }
+            return result
+
+    llm = OverspendingLLM(
+        [
+            [_call("1", "read_file", {"path": "x.txt"})],
+            "should not run",
+        ]
+    )
+    (tmp_path / "x.txt").write_text("x\n", encoding="utf-8")
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=5,
+        max_tokens=20,
+    )
+
+    assert result.status == "budget_exhausted"
+    assert result.usage.total_tokens == 70
+    assert len(llm.requests) == 1
 
 
 @pytest.mark.asyncio

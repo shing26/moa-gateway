@@ -124,6 +124,13 @@ async def test_store_refuses_to_replace_or_regress_a_manifest(tmp_path) -> None:
         trial_paths=("a", "b"),
         status_counts={"ok": 2},
     )
+    forged_append = replace(
+        outcome.manifest,
+        trial_count=2,
+        trial_ids=(*outcome.manifest.trial_ids, "forged-trial"),
+        trial_paths=(*outcome.manifest.trial_paths, "trials/forged.json"),
+        status_counts={"ok": 2},
+    )
 
     with pytest.raises(FileExistsError, match="不得改写"):
         store.write_manifest(regressed)
@@ -131,6 +138,8 @@ async def test_store_refuses_to_replace_or_regress_a_manifest(tmp_path) -> None:
         store.write_manifest(forged_ids)
     with pytest.raises(FileExistsError, match="不得改写"):
         store.write_manifest(overfull)
+    with pytest.raises(FileExistsError, match="不得改写"):
+        store.write_manifest(forged_append)
 
     assert outcome.manifest_path.read_text(encoding="utf-8") == original
 

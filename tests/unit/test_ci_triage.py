@@ -303,6 +303,30 @@ def test_unavailable_artifacts_invalidate_stale_delivery_request(
 
     assert unavailable.json_path == written.json_path
     assert not written.request_path.exists()
+    assert "does not mean CI is green" in written.markdown_path.read_text(encoding="utf-8")
+
+
+def test_non_failure_invalidation_removes_all_stale_artifacts(tmp_path: Path) -> None:
+    from apps.code_review_pipeline.delivery import ci_triage as ci_triage_module
+
+    report = build_ci_triage_report(
+        _evidence(_job("FAILED tests/test_api.py\n")),
+        base_branch="main",
+        branch="moa/ci-fix-aaaaaaaaaaaa",
+        trace_id="ci-owner-name-aaaaaaaaaaaa",
+        now=datetime(2026, 10, 28, tzinfo=UTC),
+    )
+    written = write_ci_triage_artifacts(report, tmp_path)
+
+    ci_triage_module.invalidate_ci_triage_request(
+        trace_id=report.trace_id,
+        head_sha=SHA,
+        directory=tmp_path,
+    )
+
+    assert not written.json_path.exists()
+    assert not written.markdown_path.exists()
+    assert not written.request_path.exists()
 
 
 @pytest.mark.parametrize(

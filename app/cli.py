@@ -555,7 +555,7 @@ def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    except (httpx.HTTPError, ValueError) as exc:
+    except Exception as exc:
         invalidate_ci_triage_request(
             trace_id=args.trace_id,
             head_sha=args.sha,
@@ -714,7 +714,7 @@ def _apply_delivery_defaults(args: argparse.Namespace) -> None:
     if getattr(args, "base_branch", None) is None:
         args.base_branch = settings.change_agent_base_branch
     if getattr(args, "command", "") == "ci-triage":
-        sha_prefix = args.sha[:12]
+        sha_prefix = args.sha
         trace_repo = re.sub(r"[^A-Za-z0-9]+", "-", args.repo).strip("-").lower()
         if getattr(args, "branch", None) is None:
             args.branch = f"moa/ci-fix-{sha_prefix}"

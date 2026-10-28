@@ -14,6 +14,7 @@ import inspect
 import logging
 import re
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from enum import Enum
@@ -21,6 +22,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from app.agents.command_runner import run_command
+from app.agents.workspace_tools import create_verification_workspace
 from apps.code_review_pipeline.change.bundle import (
     ChangeBundle,
     build_change_bundle,
@@ -346,11 +348,17 @@ class ChangePipeline:
             raise ChangeBundleChanged("workspace changed after bundle")
 
     async def _verify(self) -> subprocess.CompletedProcess[str]:
-        result = await asyncio.to_thread(
-            run_command,
-            self._verify_command,
-            cwd=self._workspace,
+        verification_root, temporary_parent = await asyncio.to_thread(
+            create_verification_workspace, self._workspace
         )
+        try:
+            result = await asyncio.to_thread(
+                run_command,
+                self._verify_command,
+                cwd=verification_root,
+            )
+        finally:
+            await asyncio.to_thread(shutil.rmtree, temporary_parent, True)
         return subprocess.CompletedProcess(
             args=list(self._verify_command),
             returncode=result.exit_code,

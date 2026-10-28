@@ -78,6 +78,7 @@ def _row(
         cost_usd=cost,
         budget_tier=tier,
         prompt_tokens=tokens,
+        task_origin="E1",
     )
 
 
@@ -208,7 +209,9 @@ def test_single_sample_report_says_it_is_not_a_curve() -> None:
 
 
 def test_run_row_from_dict_tolerates_missing_usage() -> None:
-    row = RunRow.from_dict({"task_id": "t1", "arm": "L0", "outcome": "pass"})
+    row = RunRow.from_dict(
+        {"task_id": "t1", "arm": "L0", "outcome": "pass", "source": "E1"}
+    )
 
     assert row.cost_usd == 0.0
     assert row.budget_tier == "B1"
@@ -225,8 +228,20 @@ def test_from_dict_rejects_an_unknown_budget_tier() -> None:
 def test_report_records_the_source_run_files_for_traceability() -> None:
     # "报告里每个数字都能追到具体的 run"：来源文件名随 report 一起落盘。
     rows = [
-        RunRow(task_id="t1", arm="L0", outcome="pass", source="t1-L0-1.json"),
-        RunRow(task_id="t1", arm="L1", outcome="fail", source="t1-L1-1.json"),
+        RunRow(
+            task_id="t1",
+            arm="L0",
+            outcome="pass",
+            task_origin="E1",
+            source="t1-L0-1.json",
+        ),
+        RunRow(
+            task_id="t1",
+            arm="L1",
+            outcome="fail",
+            task_origin="E1",
+            source="t1-L1-1.json",
+        ),
     ]
 
     report = build_report(rows)
@@ -273,6 +288,7 @@ def test_b3_report_reports_incremental_cost_over_b1_baseline() -> None:
             task_id="t1",
             arm="L3",
             outcome="pass",
+            task_origin="E1",
             cost_usd=1.1,
             budget_tier="B3",
             baseline_cost_usd=0.4,
@@ -329,14 +345,11 @@ def test_unpriced_report_points_the_reader_at_the_token_column() -> None:
     assert "1,234" in rendered
 
 
-def test_run_row_from_dict_reads_the_task_source_with_e1_default() -> None:
-    # 缺字段的旧落盘物按 E1 读（既有任务本来全是 E1）；新任务显式写来源。
-    assert (
-        RunRow.from_dict(
-            {"task_id": "t", "arm": "L0", "outcome": "pass"}
-        ).task_origin
-        == "E1"
-    )
+def test_run_row_from_dict_requires_an_explicit_task_source() -> None:
+    # Missing provenance must fail closed rather than silently be reported as E1.
+    with pytest.raises(ValueError, match="未知任务来源"):
+        RunRow.from_dict({"task_id": "t", "arm": "L0", "outcome": "pass"})
+
     assert (
         RunRow.from_dict(
             {"task_id": "t", "arm": "L0", "outcome": "pass", "source": "E3"}

@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import re
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +92,45 @@ def resolve_in_workspace(root: Path, raw: str) -> Path:
     if any(part.lower() == ".git" for part in relative.parts):
         raise PathEscape(f"路径指向 Git 元数据: {raw!r}")
     return candidate
+
+
+def _resolved_for_write(root: Path, raw: str) -> Path:
+    """Resolve a write target without following an existing final symlink."""
+    root_resolved = root.resolve()
+    lexical = (root_resolved / (raw or ".")).absolute()
+    try:
+        relative = lexical.relative_to(root_resolved)
+    except ValueError as exc:
+        raise PathEscape(f"路径越出工作区: {raw!r}") from exc
+    if any(part.lower() == ".git" for part in relative.parts):
+        raise PathEscape(f"路径指向 Git 元数据: {raw!r}")
+
+    parent = lexical.parent.resolve()
+    if parent != root_resolved and not parent.is_relative_to(root_resolved):
+        raise PathEscape(f"路径越出工作区: {raw!r}")
+    resolved = parent / lexical.name
+    if resolved.is_symlink():
+        raise PathEscape(f"路径是符号链接: {raw!r}")
+    if any(part.lower() == ".git" for part in resolved.relative_to(root_resolved).parts):
+        raise PathEscape(f"路径指向 Git 元数据: {raw!r}")
+    return resolved
+
+
+def create_verification_workspace(root: Path) -> tuple[Path, Path]:
+    """Copy the workspace without ``.git`` or local caches for verification."""
+    parent = Path(tempfile.mkdtemp(prefix="moa-verify-"))
+    target = parent / "workspace"
+    try:
+        shutil.copytree(
+            root.resolve(),
+            target,
+            ignore=shutil.ignore_patterns(*_SKIP_DIRS),
+            symlinks=False,
+        )
+    except Exception:
+        shutil.rmtree(parent, ignore_errors=True)
+        raise
+    return target, parent
 
 
 def parse_selector(selector: str) -> tuple[list[str], str | None]:
@@ -220,7 +261,7 @@ def build_toolset(
         return numbered
 
     async def write_file(path: str, content: str) -> str:
-        target = resolve_in_workspace(root, path)
+        target = _resolved_for_write(root, path)
         target.parent.mkdir(parents=True, exist_ok=True)
         body = content if content.endswith("\n") else content + "\n"
         # newline="" 是必须的：text 模式默认把 \n 翻译成 os.linesep，在 Windows 上
@@ -258,16 +299,20 @@ def build_toolset(
                 break
             if not item.is_file():
                 continue
-            rel_parts = item.relative_to(root).parts
+            try:
+                scanned_path = resolve_in_workspace(root, str(item))
+            except PathEscape:
+                continue
+            rel_parts = scanned_path.relative_to(root).parts
             if any(part in _SKIP_DIRS for part in rel_parts):
                 continue
-            if item.stat().st_size > limits.search_file_bytes:
+            if scanned_path.stat().st_size > limits.search_file_bytes:
                 continue
-            raw = item.read_bytes()
+            raw = scanned_path.read_bytes()
             if _BINARY_SNIFF in raw:
                 continue
             scanned += 1
-            rel = item.relative_to(root).as_posix()
+            rel = scanned_path.relative_to(root).as_posix()
             for lineno, line in enumerate(raw.decode("utf-8", "replace").splitlines(), 1):
                 if regex.search(line):
                     hits.append(f"{rel}:{lineno}: {line.strip()[:200]}")
@@ -282,13 +327,19 @@ def build_toolset(
         if reason is not None:
             raise ValueError(reason)
         argv = [*verify_command, *tokens]
-        result = await asyncio.to_thread(
-            run_command,
-            argv,
-            cwd=root,
-            timeout_s=limits.command_timeout_s,
-            output_limit=limits.output_chars,
+        verification_root, temporary_parent = await asyncio.to_thread(
+            create_verification_workspace, root
         )
+        try:
+            result = await asyncio.to_thread(
+                run_command,
+                argv,
+                cwd=verification_root,
+                timeout_s=limits.command_timeout_s,
+                output_limit=limits.output_chars,
+            )
+        finally:
+            await asyncio.to_thread(shutil.rmtree, temporary_parent, True)
         status = "通过" if result.passed else "未通过"
         return (
             f"$ {' '.join(argv)}\n退出码 {result.exit_code}（{status}）\n{result.output}"
@@ -391,6 +442,7 @@ __all__ = [
     "call_bench_tool",
     "call_workspace_tool",
     "check_tool_policy",
+    "create_verification_workspace",
     "parse_selector",
     "resolve_in_workspace",
 ]

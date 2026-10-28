@@ -117,8 +117,8 @@ def test_ci_triage_defaults_derive_trace_and_branch(
     _apply_delivery_defaults(args)
 
     assert args.base_branch == "release/line"
-    assert args.branch == "moa/ci-fix-aaaaaaaaaaaa"
-    assert args.trace_id == "ci-owner-name-aaaaaaaaaaaa"
+    assert args.branch == f"moa/ci-fix-{'a' * 40}"
+    assert args.trace_id == f"ci-owner-name-{'a' * 40}"
     assert args.func is cmd_delivery_ci_triage
 
 
@@ -586,3 +586,52 @@ def test_cmd_ci_triage_indeterminate_failure_invalidates_stale_request(
     assert cmd_delivery_ci_triage(args) == 1
     assert "CI triage failed" in capsys.readouterr().err
     assert not stale.exists()
+
+
+def test_cmd_ci_triage_unexpected_failure_invalidates_all_stale_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.adapters import (
+        github_ci as github_ci_module,
+    )
+    from apps.code_review_pipeline.routing import github_provider
+
+    class FakeGitHub:
+        async def aclose(self) -> None:
+            pass
+
+    class BrokenCollector:
+        def __init__(self, *, github, max_jobs, max_log_chars) -> None:
+            pass
+
+        async def collect(self, *, repo, head_sha):
+            raise RuntimeError("unexpected parser bug")
+
+    monkeypatch.setattr(settings, "github_token", "token")
+    monkeypatch.setattr(settings, "ci_triage_output_dir", str(tmp_path / "ci"))
+    monkeypatch.setattr(
+        github_provider, "build_github_client", lambda: FakeGitHub()
+    )
+    monkeypatch.setattr(
+        github_ci_module,
+        "GitHubCiEvidenceCollector",
+        BrokenCollector,
+    )
+    args = build_parser().parse_args(_ci_triage_argv())
+    _apply_delivery_defaults(args)
+    stem = args.trace_id
+    stale_paths = [
+        tmp_path / "ci" / f"{stem}.json",
+        tmp_path / "ci" / f"{stem}.md",
+        tmp_path / "ci" / f"{stem}.request.json",
+    ]
+    stale_paths[0].parent.mkdir(parents=True, exist_ok=True)
+    for path in stale_paths:
+        path.write_text("{}\n", encoding="utf-8")
+
+    assert cmd_delivery_ci_triage(args) == 1
+    assert "unexpected parser bug" in capsys.readouterr().err
+    assert not any(path.exists() for path in stale_paths)

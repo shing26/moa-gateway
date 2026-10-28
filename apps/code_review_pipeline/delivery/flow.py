@@ -221,7 +221,6 @@ class DeliveryFlow:
 
             retryable = preparation.status in {
                 PreparationStatus.VERIFY_FAILED,
-                PreparationStatus.NO_CHANGES,
             }
             if retryable and revisions < self._policy.max_revisions:
                 revisions += 1
@@ -283,6 +282,20 @@ class DeliveryFlow:
                     FailureCode.INFRA_ERROR,
                     "approval run_id does not match the active DeliveryRun: "
                     f"{approval.run_id!r} != {run.run_id!r}",
+                ),
+            )
+        assert run.bundle is not None
+        if (
+            approval.trace_id != run.bundle.trace_id
+            or approval.bundle_hash != run.bundle.bundle_hash
+        ):
+            return await self._finish(
+                run,
+                DeliveryRunState.NEEDS_HUMAN,
+                FailureInfo(
+                    FailureCode.APPROVAL_REJECTED,
+                    "approval does not match the active bundle; "
+                    "refusing to enter PUSHING",
                 ),
             )
 

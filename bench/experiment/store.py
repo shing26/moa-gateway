@@ -40,6 +40,14 @@ class ExperimentStore:
         path = self.manifest_path(manifest.experiment_id)
         if path.exists():
             existing = self.load_manifest(manifest.experiment_id)
+            expected_trial_ids = tuple(
+                f"{manifest.experiment_id}-trial-{index:03d}"
+                for index in range(existing.trial_count, manifest.trial_count)
+            )
+            expected_trial_paths = tuple(
+                f"trials/trial-{index:03d}.json"
+                for index in range(existing.trial_count, manifest.trial_count)
+            )
             if (
                 manifest.config_hash != existing.config_hash
                 or manifest.created_at != existing.created_at
@@ -50,6 +58,10 @@ class ExperimentStore:
                 != existing.trial_ids
                 or manifest.trial_paths[: existing.trial_count]
                 != existing.trial_paths
+                or manifest.trial_ids[existing.trial_count :]
+                != expected_trial_ids
+                or manifest.trial_paths[existing.trial_count :]
+                != expected_trial_paths
                 or len(manifest.trial_ids) != manifest.trial_count
                 or len(manifest.trial_paths) != manifest.trial_count
                 or sum(manifest.status_counts.values()) != manifest.trial_count
