@@ -57,6 +57,15 @@ for name in ("GATEWAY_PORT", "APP_PORT"):
 for name in ("CODE_REVIEW_MERGE_ENABLED", "CODE_REVIEW_MERGE_CHANNEL"):
     os.environ[name] = ""
 
+# CI triage limits must not inherit a developer .env: tests assert exact defaults
+# and set their own values when exercising overrides.
+for name in (
+    "CI_TRIAGE_OUTPUT_DIR",
+    "CI_TRIAGE_MAX_JOBS",
+    "CI_TRIAGE_MAX_LOG_CHARS",
+):
+    os.environ[name] = ""
+
 # 飞书回调的验签凭据同理：不置空的话，开发机 .env 里配好的
 # FEISHU_VERIFICATION_TOKEN 会让 /feishu/event 在测试里要求 body 携带 token，
 # 于是 5 条路由用例（构造的是不带 token 的 v2 事件）会 401 —— 这正是它们此前

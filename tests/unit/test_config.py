@@ -305,3 +305,34 @@ def test_delivery_rejects_nonpositive_limits(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("DELIVERY_MAX_TOKENS", "0")
     with pytest.raises(ValueError, match="DELIVERY_MAX_TOKENS"):
         Settings()
+
+
+def test_ci_triage_defaults_are_read_only_and_bounded() -> None:
+    s = Settings()
+    assert s.ci_triage_output_dir == "data/ci-triage"
+    assert s.ci_triage_max_jobs == 10
+    assert s.ci_triage_max_log_chars == 50_000
+
+
+def test_ci_triage_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CI_TRIAGE_OUTPUT_DIR", "tmp/ci-triage")
+    monkeypatch.setenv("CI_TRIAGE_MAX_JOBS", "3")
+    monkeypatch.setenv("CI_TRIAGE_MAX_LOG_CHARS", "9000")
+
+    s = Settings()
+
+    assert s.ci_triage_output_dir == "tmp/ci-triage"
+    assert s.ci_triage_max_jobs == 3
+    assert s.ci_triage_max_log_chars == 9000
+
+
+def test_ci_triage_rejects_nonpositive_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CI_TRIAGE_MAX_JOBS", "0")
+    with pytest.raises(ValueError, match="CI_TRIAGE_MAX_JOBS"):
+        Settings()
+    monkeypatch.setenv("CI_TRIAGE_MAX_JOBS", "10")
+    monkeypatch.setenv("CI_TRIAGE_MAX_LOG_CHARS", "0")
+    with pytest.raises(ValueError, match="CI_TRIAGE_MAX_LOG_CHARS"):
+        Settings()

@@ -17,7 +17,7 @@
 [![Security: Bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
 
 <p align="center">
-自动化测试门禁 · <b>28</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
+自动化测试门禁 · <b>31</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
 </p>
 
 <p align="center">
@@ -328,7 +328,7 @@ moa-gateway/
 ├── bench/       # §5.0 agent 原语 + §5.1 带工具专家 + harness + 预算 B1/B3 + 报告聚合 + 任务定义（剂量曲线实验）
 ├── delivery/    # 定位与减法清单（对外口径的单一来源）+ 交付材料摘要
 ├── docs/
-│   ├── adr/                           # ADR-002 ~ ADR-029
+│   ├── adr/                           # ADR-002 ~ ADR-032
 │   ├── archive/                       # 历史文档 9 份（未按此实施，见 archive/README.md）
 │   ├── multi-agent-collaboration.md # 协作链路架构与并发写治理说明
 │   ├── multi-agent-experiment-bench.md # Experiment/Trial/Run Record 契约与复跑语义
@@ -342,7 +342,7 @@ moa-gateway/
 
 ## 📑 核心架构决策记录 (ADR)
 
-项目所有核心演化遵循「决策先行、代码在后」原则，完整归档于 `docs/adr/`（adr-002 ~ adr-029）：
+项目所有核心演化遵循「决策先行、代码在后」原则，完整归档于 `docs/adr/`（adr-002 ~ adr-032）：
 
 | ADR 编号 | 核心决策主题 | 关键设计与约束 |
 | :---: | :--- | :--- |
@@ -358,6 +358,9 @@ moa-gateway/
 | **ADR-023** | bench 内的 agent 原语 | 工具+循环+目标+记忆+预算六要素齐备、**能失败**的执行体；自报（`AgentRun`）与判决（`RunResult`）分离；落 `bench/`、不动 `app/` |
 | **ADR-024** | PR Review 价值闭环 | 候选与发布分离；逐条五态反馈；Run generation 隔离；Comment-only 人工写回与固定 `R0/R1/R1+I` 评测 |
 | **ADR-025** | 多智能体实验 Run Record | 固定 `Experiment → Trial → Run Record`；每条 Trial 不可变落盘；真实 prompt 指纹、模型/配置/工作区快照与受控复跑比较共同构成验收面 |
+| **ADR-030** | 受治理的变更 agent | 验证 → 人工审批 → 推送；默认 dry-run，未验证或无模型时拒绝产出可推送变更包 |
+| **ADR-031** | 受治理仓库交付 Agent | `DeliveryRequest -> DeliveryRun`；默认单 Implementer，Verifier 仅作预注册实验 |
+| **ADR-032** | CI 失败只读诊断 | 只收集、脱敏并归类失败证据；不修复、不重跑、不写回 GitHub |
 
 ---
 
@@ -390,13 +393,18 @@ moa-gateway/
 .venv\Scripts\python.exe scripts\run_change_demo.py --fail   # 验证失败，出口被挡住
 ```
 
-CI 排障与 issue 修复共用这条管线，只差输入采集器——不是两套实现。
+CI 失败现在可先通过 `delivery ci-triage` 做**只读诊断**：收集失败的 checks 与
+Actions job logs，脱敏、限量后生成本地 JSON / Markdown / `DeliveryRequest`，
+固定要求人工复核。它不改代码、不重跑 workflow、不写回 GitHub；CI 自动修复
+仍未实现，未来若进入写侧仍须走同一条验证、审批、推送与审计管线。若
+`Checks: Read` 缺失，命令只写“状态不可判定”的 JSON / Markdown，不生成
+`DeliveryRequest`，避免把权限失败误读为 CI 通过。
 
 ### 受治理仓库交付 Agent
 
 产品入口是 `DeliveryRequest -> DeliveryRun`。S0 默认单 Implementer；所有推送仍经过
 bundle hash 与人工审批，PR 创建后进入现有合并通道。Verifier 是预注册实验 S1，
-默认关闭；CI 失败转人工，不自动修复。
+默认关闭。CI 失败已有只读诊断（ADR-032），但仍转人工，不自动修复。
 
 ---
 
@@ -434,5 +442,5 @@ GitHub Actions CI（Python 3.12）依次执行：pytest → ruff → 防源码�
 <div align="center">
 <sub><b>Python 3.12 · FastAPI · LangGraph · Redis · pgvector · Elasticsearch · uv</b></sub>
 <br>
-<sub>本 README 的每个定量声明都可用上文命令在本地复现（bench 曲线那条真花钱） · 架构决策归档于 docs/adr/（28 份）</sub>
+<sub>本 README 的每个定量声明都可用上文命令在本地复现（bench 曲线那条真花钱） · 架构决策归档于 docs/adr/（31 份）</sub>
 </div>

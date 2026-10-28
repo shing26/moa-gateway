@@ -289,6 +289,22 @@ class Settings:
             os.getenv("DELIVERY_RUN_RECORD_DIR", "data/delivery-runs")
             or "data/delivery-runs"
         ).strip()
+        # CI triage is read-only evidence collection. These limits bound local
+        # artifacts and downloaded logs; none of them enable GitHub writes.
+        self.ci_triage_output_dir: str = (
+            os.getenv("CI_TRIAGE_OUTPUT_DIR", "data/ci-triage")
+            or "data/ci-triage"
+        ).strip()
+        self.ci_triage_max_jobs: int = _parse_int(
+            os.getenv("CI_TRIAGE_MAX_JOBS"),
+            10,
+            name="CI_TRIAGE_MAX_JOBS",
+        )
+        self.ci_triage_max_log_chars: int = _parse_int(
+            os.getenv("CI_TRIAGE_MAX_LOG_CHARS"),
+            50_000,
+            name="CI_TRIAGE_MAX_LOG_CHARS",
+        )
 
         # ── 合并通道（ADR-021）────────────────────────────────────────────
         # 默认关：合并是有外部后果的写操作，必须显式开启才生效。
@@ -434,6 +450,17 @@ class Settings:
             )
         if not self.delivery_run_record_dir:
             raise ValueError("DELIVERY_RUN_RECORD_DIR 不能为空")
+        if self.ci_triage_max_jobs <= 0:
+            raise ValueError(
+                f"CI_TRIAGE_MAX_JOBS 必须为正整数，得到 {self.ci_triage_max_jobs}"
+            )
+        if self.ci_triage_max_log_chars <= 0:
+            raise ValueError(
+                "CI_TRIAGE_MAX_LOG_CHARS 必须为正整数，"
+                f"得到 {self.ci_triage_max_log_chars}"
+            )
+        if not self.ci_triage_output_dir:
+            raise ValueError("CI_TRIAGE_OUTPUT_DIR 不能为空")
         # 合并通道由**独立 worker 进程**轮询（app/merge_worker.py），网关与 worker
         # 各建一份 merge_store。无共享 DSN 时两边都是进程内存，worker 看不到网关
         # 建的记录，通道永远不动、也不报错。这是"配了却静默不生效"，所以在启动时

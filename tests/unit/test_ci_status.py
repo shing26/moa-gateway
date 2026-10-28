@@ -17,7 +17,9 @@ from apps.code_review_pipeline.routing.github_client import (
     GITHUB_API,
     GitHubClient,
     GitHubRepo,
+    JobLogTooLarge,
     aggregate_ci_status,
+    is_failing_ci_conclusion,
 )
 
 
@@ -125,6 +127,108 @@ class TestAggregate:
             ]
         )
         assert got.failing[0].url == "https://ci.example/run/1"
+
+
+def test_failing_conclusion_is_exported_for_read_only_collectors() -> None:
+    assert is_failing_ci_conclusion("failure") is True
+    assert is_failing_ci_conclusion("TIMED_OUT") is True
+    assert is_failing_ci_conclusion("cancelled") is True
+    assert is_failing_ci_conclusion("success") is False
+    assert is_failing_ci_conclusion("skipped") is False
+
+
+@pytest.mark.asyncio
+async def test_workflow_runs_are_queried_by_full_head_sha() -> None:
+    seen: dict[str, str] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["head_sha"] = request.url.params["head_sha"]
+        return httpx.Response(200, json={"workflow_runs": [{"id": 1}]})
+
+    runs = await _client(handler).list_workflow_runs_for_sha(
+        GitHubRepo("o", "r"), "a" * 40
+    )
+
+    assert seen["path"] == "/repos/o/r/actions/runs"
+    assert seen["head_sha"] == "a" * 40
+    assert runs == [{"id": 1}]
+
+
+@pytest.mark.asyncio
+async def test_check_run_status_does_not_read_legacy_commit_statuses() -> None:
+    seen: list[str] = []
+    sha = "a" * 40
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "check_runs": [
+                    {
+                        "name": "test",
+                        "status": "completed",
+                        "conclusion": "failure",
+                    }
+                ]
+            },
+        )
+
+    status = await _client(handler).get_check_run_status(
+        GitHubRepo("o", "r"),
+        sha,
+    )
+
+    assert status.state == CI_FAILURE
+    assert seen == [f"/repos/o/r/commits/{sha}/check-runs"]
+
+
+@pytest.mark.asyncio
+async def test_workflow_jobs_are_queried_for_the_selected_run() -> None:
+    seen = ""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen
+        seen = request.url.path
+        return httpx.Response(
+            200,
+            json={"jobs": [{"id": 22, "name": "pytest", "conclusion": "failure"}]},
+        )
+
+    jobs = await _client(handler).list_workflow_jobs(GitHubRepo("o", "r"), 7)
+
+    assert seen == "/repos/o/r/actions/runs/7/jobs"
+    assert jobs[0]["name"] == "pytest"
+
+
+@pytest.mark.asyncio
+async def test_job_log_is_downloaded_without_pre_redaction_truncation() -> None:
+    seen = ""
+    payload = "head\n" + ("x" * 50_005) + "\ntail"
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen
+        seen = request.url.path
+        return httpx.Response(200, text=payload)
+
+    log = await _client(handler).get_job_log(GitHubRepo("o", "r"), 22)
+
+    assert seen == "/repos/o/r/actions/jobs/22/logs"
+    assert log == payload
+
+
+@pytest.mark.asyncio
+async def test_job_log_rejects_oversized_streamed_response() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="x" * 11)
+
+    with pytest.raises(JobLogTooLarge, match="10-byte"):
+        await _client(handler).get_job_log(
+            GitHubRepo("o", "r"),
+            22,
+            max_bytes=10,
+        )
 
 
 def _client(handler: object) -> GitHubClient:

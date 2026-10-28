@@ -15,6 +15,10 @@ from apps.code_review_pipeline.change.refs import PullRequestRef
 GITHUB_API = "https://api.github.com"
 
 
+class JobLogTooLarge(RuntimeError):
+    """A job log exceeded the bounded streaming collection limit."""
+
+
 def _trust_env_default() -> bool:
     # 默认**不走**系统代理。实测（2026-10-03）：本机代理在 127.0.0.1:31181 上做
     # TLS 拦截，而它的根证书不在信任链里（SSL_CERT_FILE 指向 anaconda 的
@@ -57,6 +61,11 @@ _FAILING_CONCLUSIONS = frozenset(
 _PENDING_CONCLUSIONS = frozenset(
     {"queued", "in_progress", "waiting", "requested", "pending"}
 )
+
+
+def is_failing_ci_conclusion(conclusion: str) -> bool:
+    """Whether a GitHub check/job conclusion represents a failed result."""
+    return str(conclusion or "").strip().lower() in _FAILING_CONCLUSIONS
 
 
 @dataclass(frozen=True)
@@ -277,16 +286,9 @@ class GitHubClient:
         resp.raise_for_status()
         return dict(resp.json())
 
-    async def get_ci_status(self, repo: GitHubRepo, ref: str) -> CiStatus:
-        """读某个 commit 的 CI 结论（两套 API 合并，见 ``aggregate_ci_status``）。
-
-        ``ref`` 用**完整 sha**，不用分支名：分支名会在读取过程中移动，而这里要判断
-        的是"这个 PR 的这个版本"能不能合并。
-
-        check-runs 必须翻页。GitHub 默认每页 30 条，而 ``per_page`` 上限 100——
-        只取第一页会让"第 101 条红了"被静默漏掉。``list_reviews`` 已经吃过这个亏
-        （见其 docstring），同一个坑不再踩第二次。
-        """
+    async def _list_check_runs_for_sha(
+        self, repo: GitHubRepo, ref: str
+    ) -> list[dict[str, Any]]:
         check_runs: list[dict[str, Any]] = []
         page = 1
         while True:
@@ -298,14 +300,106 @@ class GitHubClient:
             batch = list(resp.json().get("check_runs") or ())
             check_runs.extend(batch)
             if len(batch) < 100:
-                break
+                return check_runs
             page += 1
 
+    async def get_check_run_status(self, repo: GitHubRepo, ref: str) -> CiStatus:
+        """Read check-runs only, without the legacy Commit Statuses API."""
+        check_runs = await self._list_check_runs_for_sha(repo, ref)
+        return aggregate_ci_status(check_runs)
+
+    async def get_ci_status(self, repo: GitHubRepo, ref: str) -> CiStatus:
+        """读某个 commit 的 CI 结论（两套 API 合并，见 ``aggregate_ci_status``）。
+
+        ``ref`` 用**完整 sha**，不用分支名：分支名会在读取过程中移动，而这里要判断
+        的是"这个 PR 的这个版本"能不能合并。
+
+        check-runs 必须翻页。GitHub 默认每页 30 条，而 ``per_page`` 上限 100——
+        只取第一页会让"第 101 条红了"被静默漏掉。``list_reviews`` 已经吃过这个亏
+        （见其 docstring），同一个坑不再踩第二次。
+        """
+        check_runs = await self._list_check_runs_for_sha(repo, ref)
         status_resp = await self._client.get(
             f"/repos/{repo.owner}/{repo.name}/commits/{ref}/status"
         )
         status_resp.raise_for_status()
         return aggregate_ci_status(check_runs, dict(status_resp.json()))
+
+    async def list_workflow_runs_for_sha(
+        self, repo: GitHubRepo, head_sha: str
+    ) -> list[dict[str, Any]]:
+        """List Actions workflow runs for one full commit SHA.
+
+        This is read-only evidence collection. Callers must not infer a failing
+        job from a check-run id: only Actions run/job ids can address job logs.
+        """
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            resp = await self._client.get(
+                f"/repos/{repo.owner}/{repo.name}/actions/runs",
+                params={
+                    "head_sha": head_sha,
+                    "per_page": 100,
+                    "page": page,
+                },
+            )
+            resp.raise_for_status()
+            batch = list(resp.json().get("workflow_runs") or ())
+            out.extend(batch)
+            if len(batch) < 100:
+                return out
+            page += 1
+
+    async def list_workflow_jobs(
+        self, repo: GitHubRepo, run_id: int
+    ) -> list[dict[str, Any]]:
+        """List the latest attempt's jobs for one workflow run."""
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            resp = await self._client.get(
+                f"/repos/{repo.owner}/{repo.name}/actions/runs/{run_id}/jobs",
+                params={
+                    "filter": "latest",
+                    "per_page": 100,
+                    "page": page,
+                },
+            )
+            resp.raise_for_status()
+            batch = list(resp.json().get("jobs") or ())
+            out.extend(batch)
+            if len(batch) < 100:
+                return out
+            page += 1
+
+    async def get_job_log(
+        self,
+        repo: GitHubRepo,
+        job_id: int,
+        *,
+        max_bytes: int = 2_000_000,
+    ) -> str:
+        """Download a job log, following GitHub's redirect to blob storage."""
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        async with self._client.stream(
+            "GET",
+            f"/repos/{repo.owner}/{repo.name}/actions/jobs/{job_id}/logs",
+            follow_redirects=True,
+        ) as resp:
+            resp.raise_for_status()
+            content = bytearray()
+            async for chunk in resp.aiter_bytes():
+                if len(content) + len(chunk) > max_bytes:
+                    raise JobLogTooLarge(
+                        f"job log exceeds the {max_bytes}-byte streaming limit"
+                    )
+                content.extend(chunk)
+            return bytes(content).decode(
+                resp.encoding or "utf-8",
+                errors="replace",
+            )
 
     async def merge_pr(
         self,

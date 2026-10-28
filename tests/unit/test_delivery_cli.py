@@ -10,6 +10,7 @@ from app.cli import (
     TerminalPushApprovalPort,
     _apply_delivery_defaults,
     build_parser,
+    cmd_delivery_ci_triage,
     cmd_delivery_run,
 )
 
@@ -28,6 +29,17 @@ def _delivery_argv() -> list[str]:
         "fix: add",
         "--goal",
         "make add return a + b",
+    ]
+
+
+def _ci_triage_argv() -> list[str]:
+    return [
+        "delivery",
+        "ci-triage",
+        "--repo",
+        "owner/name",
+        "--sha",
+        "a" * 40,
     ]
 
 
@@ -94,6 +106,22 @@ def test_delivery_defaults_use_settings_and_wire_run_command(
     assert args.func is cmd_delivery_run
 
 
+def test_ci_triage_defaults_derive_trace_and_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "change_agent_base_branch", "release/line")
+    args = build_parser().parse_args(_ci_triage_argv())
+
+    _apply_delivery_defaults(args)
+
+    assert args.base_branch == "release/line"
+    assert args.branch == "moa/ci-fix-aaaaaaaaaaaa"
+    assert args.trace_id == "ci-owner-name-aaaaaaaaaaaa"
+    assert args.func is cmd_delivery_ci_triage
+
+
 def test_cmd_delivery_run_rejects_push_disabled(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -106,6 +134,20 @@ def test_cmd_delivery_run_rejects_push_disabled(
 
     assert cmd_delivery_run(args) == 2
     assert "CHANGE_AGENT_PUSH_ENABLED=0" in capsys.readouterr().err
+
+
+def test_cmd_ci_triage_requires_github_token(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "github_token", "")
+    args = build_parser().parse_args(_ci_triage_argv())
+    _apply_delivery_defaults(args)
+
+    assert cmd_delivery_ci_triage(args) == 2
+    assert "GITHUB_TOKEN" in capsys.readouterr().err
 
 
 def test_cmd_delivery_run_rejects_injected_verified_topology(
@@ -316,3 +358,182 @@ def test_cmd_delivery_run_wires_delivery_runtime(
     assert captured["llm"].config.model == "test-model"
     assert captured["llm_closed"] is True
     assert captured["github_closed"] is True
+
+
+def test_cmd_ci_triage_collects_and_writes_only_local_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.adapters import (
+        github_ci as github_ci_module,
+    )
+    from apps.code_review_pipeline.delivery.ci_triage import (
+        CiFailureCheck,
+        CiFailureEvidence,
+        CiJobLog,
+    )
+    from apps.code_review_pipeline.routing import github_provider
+
+    captured: dict[str, object] = {}
+
+    class FakeGitHub:
+        async def aclose(self) -> None:
+            captured["closed"] = True
+
+    class FakeCollector:
+        def __init__(self, *, github, max_jobs, max_log_chars) -> None:
+            captured["collector"] = (github, max_jobs, max_log_chars)
+
+        async def collect(self, *, repo, head_sha):
+            captured["identity"] = (repo, head_sha)
+            return CiFailureEvidence(
+                repo=repo,
+                head_sha=head_sha,
+                checks=(
+                    CiFailureCheck(
+                        name="test",
+                        conclusion="failure",
+                        url="https://github.com/owner/name/actions/runs/1",
+                    ),
+                ),
+                jobs=(
+                    CiJobLog(
+                        run_id=1,
+                        job_id=2,
+                        workflow_name="CI",
+                        name="pytest",
+                        conclusion="failure",
+                        log="FAILED tests/test_api.py - AssertionError\n",
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr(settings, "github_token", "token")
+    monkeypatch.setattr(settings, "ci_triage_output_dir", str(tmp_path / "ci"))
+    monkeypatch.setattr(settings, "ci_triage_max_jobs", 4)
+    monkeypatch.setattr(settings, "ci_triage_max_log_chars", 1234)
+    monkeypatch.setattr(
+        github_provider, "build_github_client", lambda: FakeGitHub()
+    )
+    monkeypatch.setattr(
+        github_ci_module,
+        "GitHubCiEvidenceCollector",
+        FakeCollector,
+    )
+    args = build_parser().parse_args(_ci_triage_argv())
+    _apply_delivery_defaults(args)
+
+    assert cmd_delivery_ci_triage(args) == 0
+
+    output = capsys.readouterr().out
+    assert "human review required" in output
+    assert "no GitHub writes performed" in output
+    assert "report.json" in output or ".json" in output
+    assert captured["identity"] == ("owner/name", "a" * 40)
+    assert captured["closed"] is True
+    assert list((tmp_path / "ci").glob("*.request.json"))
+
+
+def test_cmd_ci_triage_reports_github_http_failure_without_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import httpx
+
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.adapters import (
+        github_ci as github_ci_module,
+    )
+    from apps.code_review_pipeline.routing import github_provider
+
+    captured: dict[str, object] = {}
+
+    class FakeGitHub:
+        async def aclose(self) -> None:
+            captured["closed"] = True
+
+    class ForbiddenCollector:
+        def __init__(self, *, github, max_jobs, max_log_chars) -> None:
+            pass
+
+        async def collect(self, *, repo, head_sha):
+            request = httpx.Request("GET", "https://api.github.com/checks")
+            response = httpx.Response(403, request=request)
+            raise httpx.HTTPStatusError(
+                "forbidden",
+                request=request,
+                response=response,
+            )
+
+    monkeypatch.setattr(settings, "github_token", "token")
+    monkeypatch.setattr(settings, "ci_triage_output_dir", str(tmp_path / "ci"))
+    monkeypatch.setattr(
+        github_provider, "build_github_client", lambda: FakeGitHub()
+    )
+    monkeypatch.setattr(
+        github_ci_module,
+        "GitHubCiEvidenceCollector",
+        ForbiddenCollector,
+    )
+    args = build_parser().parse_args(_ci_triage_argv())
+    _apply_delivery_defaults(args)
+
+    assert cmd_delivery_ci_triage(args) == 1
+
+    captured_output = capsys.readouterr()
+    assert "HTTP 403" in captured_output.err
+    markdown_files = list((tmp_path / "ci").glob("*.md"))
+    assert len(markdown_files) == 1
+    assert "Checks: Read" in markdown_files[0].read_text(encoding="utf-8")
+    assert str(markdown_files[0]) in captured_output.err
+    assert "human review required" in captured_output.err.lower()
+    assert not list((tmp_path / "ci").glob("*.request.json"))
+    assert captured["closed"] is True
+
+
+def test_cmd_ci_triage_non_failure_invalidates_stale_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.adapters import (
+        github_ci as github_ci_module,
+    )
+    from apps.code_review_pipeline.routing import github_provider
+
+    class FakeGitHub:
+        async def aclose(self) -> None:
+            pass
+
+    class PendingCollector:
+        def __init__(self, *, github, max_jobs, max_log_chars) -> None:
+            pass
+
+        async def collect(self, *, repo, head_sha):
+            raise github_ci_module.CiNotFailed(
+                f"CI state for {repo}@{head_sha} is 'pending', not failure"
+            )
+
+    monkeypatch.setattr(settings, "github_token", "token")
+    monkeypatch.setattr(settings, "ci_triage_output_dir", str(tmp_path / "ci"))
+    monkeypatch.setattr(
+        github_provider, "build_github_client", lambda: FakeGitHub()
+    )
+    monkeypatch.setattr(
+        github_ci_module,
+        "GitHubCiEvidenceCollector",
+        PendingCollector,
+    )
+    args = build_parser().parse_args(_ci_triage_argv())
+    _apply_delivery_defaults(args)
+    stale = tmp_path / "ci" / f"{args.trace_id}.request.json"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("{}\n", encoding="utf-8")
+
+    assert cmd_delivery_ci_triage(args) == 1
+    assert "CI triage skipped" in capsys.readouterr().err
+    assert not stale.exists()
