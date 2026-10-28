@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +48,11 @@ class FileChange:
     kind: str  # added / modified / deleted
     before_hash: str
     after_hash: str
+    mode: str = "100644"
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"100644", "100755", "120000"}:
+            raise ValueError(f"unsupported Git file mode: {self.mode!r}")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +60,7 @@ class FileChange:
             "kind": self.kind,
             "before_hash": self.before_hash,
             "after_hash": self.after_hash,
+            "mode": self.mode,
         }
 
 
@@ -154,10 +161,36 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
-    if not path.is_file():
-        return ""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def _sha256_bytes(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _symlink_content(path: Path) -> bytes:
+    return str(os.readlink(path)).encode("utf-8", errors="surrogateescape")
+
+
+def _working_tree_mode(
+    path: Path,
+    *,
+    base_mode: str,
+    index_mode: str,
+) -> str:
+    if path.is_symlink():
+        return "120000"
+    if os.name != "nt" and path.stat().st_mode & 0o111:
+        return "100755"
+    if index_mode in {"100644", "100755"}:
+        return index_mode
+    return "100755" if base_mode.startswith("1007") else "100644"
+
+
+def _content_hash(path: Path, mode: str) -> str:
+    content = (
+        _symlink_content(path)
+        if mode == "120000"
+        else path.read_bytes()
+    )
+    return _sha256_bytes(content)
 
 
 def build_change_bundle(
@@ -209,16 +242,29 @@ def build_change_bundle(
         diff = diff[:_MAX_DIFF_CHARS] + "\n…（diff 已截断）"
 
     before_hashes = _git(
-        ["ls-tree", "-r", "--full-tree", "HEAD"],
+        ["ls-tree", "-r", "-z", "--full-tree", "HEAD"],
         cwd=root,
         check=False,
     ).stdout
     base_blobs: dict[str, str] = {}
-    for line in before_hashes.splitlines():
-        meta, _, path = line.partition("\t")
+    base_modes: dict[str, str] = {}
+    for row in before_hashes.split("\0"):
+        meta, separator, path = row.partition("\t")
         parts = meta.split()
-        if len(parts) >= 3 and parts[1] == "blob":
+        if separator and len(parts) >= 3 and parts[1] == "blob":
             base_blobs[path] = parts[2]
+            base_modes[path] = parts[0]
+
+    index_modes: dict[str, str] = {}
+    for row in _git(
+        ["ls-files", "--stage", "-z"],
+        cwd=root,
+        check=False,
+    ).stdout.split("\0"):
+        meta, separator, path = row.partition("\t")
+        parts = meta.split()
+        if separator and len(parts) >= 2:
+            index_modes[path] = parts[0]
 
     files: list[FileChange] = []
     for line in status.splitlines():
@@ -235,13 +281,24 @@ def build_change_bundle(
             if "D" in code
             else "modified"
         )
-        target = (root / path).resolve()
+        target = root / path
+        if kind == "deleted":
+            mode = base_modes.get(path, "100644")
+            after_hash = ""
+        else:
+            mode = _working_tree_mode(
+                target,
+                base_mode=base_modes.get(path, ""),
+                index_mode=index_modes.get(path, ""),
+            )
+            after_hash = _content_hash(target, mode)
         files.append(
             FileChange(
                 path=path,
                 kind=kind,
                 before_hash=base_blobs.get(path, ""),
-                after_hash="" if kind == "deleted" else _sha256_file(target),
+                after_hash=after_hash,
+                mode=mode,
             )
         )
 

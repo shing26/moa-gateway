@@ -1,6 +1,8 @@
 """GitHub 通道的代理策略：默认直连，可显式打开系统代理。"""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from apps.code_review_pipeline.routing.github_client import GitHubClient
@@ -61,3 +63,53 @@ async def test_create_pull_request_returns_number_url_and_head_sha() -> None:
     assert ref.number == 17
     assert ref.url.endswith("/pull/17")
     assert ref.head_sha == "b" * 40
+
+
+@pytest.mark.asyncio
+async def test_create_commit_uses_each_file_mode() -> None:
+    import httpx
+
+    from apps.code_review_pipeline.routing.github_client import GitHubRepo
+
+    tree_entries: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/git/commits/base"):
+            return httpx.Response(200, json={"tree": {"sha": "tree-base"}})
+        if request.url.path.endswith("/git/blobs"):
+            payload = json.loads(request.content)
+            return httpx.Response(
+                201,
+                json={"sha": f"blob-{payload['content']}"},
+            )
+        if request.url.path.endswith("/git/trees"):
+            payload = json.loads(request.content)
+            tree_entries.extend(payload["tree"])
+            return httpx.Response(201, json={"sha": "tree-new"})
+        if request.url.path.endswith("/git/commits"):
+            return httpx.Response(201, json={"sha": "c" * 40})
+        if request.url.path.endswith("/git/refs/heads/moa/fix"):
+            return httpx.Response(200, json={})
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    client = GitHubClient(token="t")
+    await client._client.aclose()  # noqa: SLF001
+    client._client = httpx.AsyncClient(  # noqa: SLF001
+        base_url="https://api.github.com",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        await client.create_commit(
+            GitHubRepo(owner="owner", name="name"),
+            base_sha="base",
+            branch="moa/fix",
+            message="fix",
+            files=[
+                {"path": "run.sh", "content_b64": "ZWNobyBvaw==", "mode": "100755"},
+                {"path": "link", "content_b64": "dGFyZ2V0", "mode": "120000"},
+            ],
+        )
+    finally:
+        await client.aclose()
+
+    assert [entry["mode"] for entry in tree_entries] == ["100755", "120000"]

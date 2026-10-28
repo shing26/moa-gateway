@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import os
 import subprocess
 import sys
 from dataclasses import replace
@@ -1067,6 +1069,88 @@ def test_bundle_hash_covers_commit_metadata_and_trace(repo: Path) -> None:
     )
 
     assert all(item.bundle_hash != bundle.bundle_hash for item in variants)
+
+
+def test_bundle_hash_covers_git_file_mode(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    bundle = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-mode",
+        title="fix: mode",
+        body="",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+    )
+
+    changed_mode = replace(
+        bundle,
+        files=(replace(bundle.files[0], mode="100755"),),
+    )
+
+    assert bundle.files[0].mode == "100644"
+    assert changed_mode.bundle_hash != bundle.bundle_hash
+
+
+def test_bundle_records_symlink_mode_and_link_target_hash(repo: Path) -> None:
+    target = repo / "target.txt"
+    target.write_text("target\n", encoding="utf-8")
+    link = repo / "link.txt"
+    try:
+        os.symlink("target.txt", link)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不允许创建符号链接")
+
+    bundle = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-link",
+        title="fix: link",
+        body="",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+    )
+    change = next(item for item in bundle.files if item.path == "link.txt")
+
+    assert change.mode == "120000"
+    assert change.after_hash == hashlib.sha256(b"target.txt").hexdigest()
+
+
+def test_push_payload_preserves_symlink_mode_and_content(repo: Path) -> None:
+    target = repo / "target.txt"
+    target.write_text("target\n", encoding="utf-8")
+    link = repo / "link.txt"
+    try:
+        os.symlink("target.txt", link)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不允许创建符号链接")
+
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+    )
+    bundle = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-link",
+        title="fix: link",
+        body="",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+    )
+    payload = {item["path"]: item for item in pipeline._file_payload(bundle)}
+
+    assert payload["link.txt"]["mode"] == "120000"
+    assert base64.b64decode(payload["link.txt"]["content_b64"]) == b"target.txt"
 
 
 @pytest.mark.parametrize(

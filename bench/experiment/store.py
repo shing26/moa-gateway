@@ -6,6 +6,7 @@ import json
 import os
 import re
 import uuid
+from collections import Counter
 from pathlib import Path
 
 from bench.experiment.types import (
@@ -73,8 +74,51 @@ class ExperimentStore:
                 raise FileExistsError(
                     f"Experiment manifest 已存在，不得改写配置、身份或回退进度: {path}"
                 )
+            self._validate_new_trial_evidence(existing, manifest)
         self._atomic_write(path, manifest.to_dict(), overwrite=True)
         return path
+
+    def _validate_new_trial_evidence(
+        self,
+        existing: ExperimentManifest,
+        manifest: ExperimentManifest,
+    ) -> None:
+        """Reject manifest progress that has no matching immutable record."""
+        experiment_dir = self.experiment_dir(manifest.experiment_id).resolve()
+        added_counts: Counter[str] = Counter()
+        for index in range(existing.trial_count, manifest.trial_count):
+            expected_id = f"{manifest.experiment_id}-trial-{index:03d}"
+            expected_path = f"trials/trial-{index:03d}.json"
+            if (
+                manifest.trial_ids[index] != expected_id
+                or manifest.trial_paths[index] != expected_path
+            ):
+                raise FileExistsError(
+                    f"Experiment manifest 的 Trial 身份与约定不符: {expected_path}"
+                )
+            trial_path = (experiment_dir / expected_path).resolve()
+            if not trial_path.is_relative_to(experiment_dir) or not trial_path.is_file():
+                raise FileExistsError(
+                    f"Experiment manifest 引用的 Run Record 不存在: {expected_path}"
+                )
+            record = self.load_record(trial_path)
+            if (
+                record.experiment_id != manifest.experiment_id
+                or record.trial_id != expected_id
+                or record.trial_index != index
+                or record.config_hash != manifest.config_hash
+            ):
+                raise FileExistsError(
+                    f"Run Record 与 manifest 证据不符: {expected_path}"
+                )
+            added_counts[record.status] += 1
+        expected_counts = Counter(existing.status_counts) + added_counts
+        if dict(sorted(expected_counts.items())) != dict(
+            sorted(manifest.status_counts.items())
+        ):
+            raise FileExistsError(
+                "Experiment manifest 的 status_counts 与 Run Record 不符"
+            )
 
     def write_record(self, record: RunRecord) -> Path:
         path = self.trial_path(record.experiment_id, record.trial_index)

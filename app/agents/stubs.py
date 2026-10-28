@@ -228,6 +228,16 @@ async def execute_tool_loop(
         )
         record_usage()
         while True:
+            if max_tokens > 0 and usage.total_tokens > max_tokens:
+                return ToolLoopResult(
+                    status="budget_exhausted",
+                    content=str(result.content or ""),
+                    steps=tuple(steps),
+                    usage=usage,
+                    stop_reason=(
+                        f"token budget exceeded: {usage.total_tokens} > {max_tokens}"
+                    ),
+                )
             if not result.tool_calls:
                 steps.append(
                     ToolLoopStep(
@@ -363,16 +373,6 @@ async def execute_tool_loop(
                 max_tokens=allowance,
             )
             record_usage()
-            if max_tokens > 0 and usage.total_tokens > max_tokens:
-                return ToolLoopResult(
-                    status="budget_exhausted",
-                    content=str(result.content or ""),
-                    steps=tuple(steps),
-                    usage=usage,
-                    stop_reason=(
-                        f"token budget exceeded: {usage.total_tokens} > {max_tokens}"
-                    ),
-                )
     except Exception as exc:
         return ToolLoopResult(
             status="error",

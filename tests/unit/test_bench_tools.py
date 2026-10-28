@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -204,6 +205,63 @@ async def test_workspace_toolset_can_be_rebound_for_an_isolated_copy(
     assert outcome.kind == "ok"
     assert (isolated / "isolated.txt").read_text(encoding="utf-8") == "only here\n"
     assert not (original / "isolated.txt").exists()
+
+
+def test_verification_copy_rejects_workspace_symlinks(tmp_path: Path) -> None:
+    from app.agents.workspace_tools import create_verification_workspace
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret\n", encoding="utf-8")
+    try:
+        os.symlink(outside, workspace / "linked-dir", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不允许创建符号链接")
+
+    with pytest.raises(OSError, match="符号链接"):
+        create_verification_workspace(workspace)
+
+    assert not list(tmp_path.glob("moa-verify-*"))
+
+
+def test_verification_copy_excludes_nested_cache_directories(
+    tmp_path: Path,
+) -> None:
+    from app.agents.workspace_tools import create_verification_workspace
+
+    workspace = tmp_path / "workspace"
+    nested = workspace / "pkg" / "node_modules" / "dep"
+    nested.mkdir(parents=True)
+    (nested / "index.js").write_text("cached\n", encoding="utf-8")
+    (workspace / "pkg" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    copied, parent = create_verification_workspace(workspace)
+    try:
+        assert (copied / "pkg" / "app.py").is_file()
+        assert not (copied / "pkg" / "node_modules").exists()
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def test_verification_copy_excludes_git_file_metadata(tmp_path: Path) -> None:
+    from app.agents.workspace_tools import create_verification_workspace
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".git").write_text(
+        "gitdir: /private/repository/.git/worktrees/example\n",
+        encoding="utf-8",
+    )
+    (workspace / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    copied, parent = create_verification_workspace(workspace)
+    try:
+        assert (copied / "app.py").is_file()
+        assert not (copied / ".git").exists()
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
 
 
 @pytest.mark.asyncio

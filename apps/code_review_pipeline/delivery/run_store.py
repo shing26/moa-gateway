@@ -127,6 +127,7 @@ def _bundle_from_dict(payload: dict[str, Any]) -> ChangeBundle:
                 kind=str(item["kind"]),
                 before_hash=str(item.get("before_hash", "")),
                 after_hash=str(item.get("after_hash", "")),
+                mode=str(item.get("mode", "100644")),
             )
             for item in payload.get("files", ())
         ),

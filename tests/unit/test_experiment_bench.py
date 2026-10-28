@@ -145,6 +145,94 @@ async def test_store_refuses_to_replace_or_regress_a_manifest(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_store_rejects_manifest_trials_without_matching_records(
+    tmp_path,
+) -> None:
+    class FakeExecutor:
+        async def execute(
+            self, spec: ExperimentSpec, trial_index: int
+        ) -> TrialEvidence:
+            return TrialEvidence(status="ok")
+
+    store = ExperimentStore(tmp_path / "records")
+    outcome = await ExperimentRunner(store).run(
+        ExperimentSpec(
+            experiment_id="exp-evidence",
+            task="immutable evidence",
+            adapter="fake",
+            trials=2,
+        ),
+        FakeExecutor(),
+    )
+    # Simulate a forged append from the initial zero-trial manifest.
+    store._atomic_write(  # noqa: SLF001 - test simulates an on-disk initial manifest
+        store.manifest_path("exp-evidence"),
+        replace(
+            outcome.manifest,
+            trial_count=0,
+            trial_ids=(),
+            trial_paths=(),
+            status_counts={},
+        ).to_dict(),
+        overwrite=True,
+    )
+    forged = replace(
+        outcome.manifest,
+        trial_count=1,
+        trial_ids=("exp-evidence-trial-000",),
+        trial_paths=("trials/trial-000.json",),
+        status_counts={"ok": 1},
+    )
+    store.trial_path("exp-evidence", 0).unlink()
+
+    with pytest.raises(FileExistsError, match="不存在"):
+        store.write_manifest(forged)
+
+
+@pytest.mark.asyncio
+async def test_store_rejects_manifest_status_without_record_evidence(
+    tmp_path,
+) -> None:
+    class FakeExecutor:
+        async def execute(
+            self, spec: ExperimentSpec, trial_index: int
+        ) -> TrialEvidence:
+            return TrialEvidence(status="ok")
+
+    store = ExperimentStore(tmp_path / "records")
+    outcome = await ExperimentRunner(store).run(
+        ExperimentSpec(
+            experiment_id="exp-status",
+            task="immutable status",
+            adapter="fake",
+            trials=2,
+        ),
+        FakeExecutor(),
+    )
+    store._atomic_write(  # noqa: SLF001 - test simulates an on-disk initial manifest
+        store.manifest_path("exp-status"),
+        replace(
+            outcome.manifest,
+            trial_count=0,
+            trial_ids=(),
+            trial_paths=(),
+            status_counts={},
+        ).to_dict(),
+        overwrite=True,
+    )
+    forged = replace(
+        outcome.manifest,
+        trial_count=1,
+        trial_ids=("exp-status-trial-000",),
+        trial_paths=("trials/trial-000.json",),
+        status_counts={"fail": 1},
+    )
+
+    with pytest.raises(FileExistsError, match="status_counts"):
+        store.write_manifest(forged)
+
+
+@pytest.mark.asyncio
 async def test_trial_exception_is_recorded_and_does_not_hide_later_trials(tmp_path) -> None:
     class FlakyExecutor:
         async def execute(self, spec: ExperimentSpec, trial_index: int) -> TrialEvidence:
