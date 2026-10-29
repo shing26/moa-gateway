@@ -57,6 +57,7 @@ class FakeStore:
         self.posted_review_id = posted_review_id
         self.saved: list[str] = []
         self.transitions: list[str] = []
+        self.state = "posting"
 
     def get_posted_review_id(self, identity: tuple[str, int, str]) -> str | None:
         return self.posted_review_id
@@ -65,8 +66,18 @@ class FakeStore:
         self.posted_review_id = review_id
         self.saved.append(review_id)
 
-    def transition_task(self, identity: tuple[str, int, str], action: str) -> str:
+    def get_task_state(self, identity: tuple[str, int, str]) -> str:
+        return self.state
+
+    def transition_task(
+        self,
+        identity: tuple[str, int, str],
+        action: str,
+        **_kwargs: Any,
+    ) -> str:
         self.transitions.append(action)
+        if action == "complete":
+            self.state = "done"
         return action
 
 
@@ -148,3 +159,48 @@ async def test_dry_run_does_not_post_or_record() -> None:
     assert gh.posted == []
     assert store.saved == []
     assert store.transitions == [], "dry-run 不该推进到 done，否则任务被判成已完成"
+
+
+@pytest.mark.asyncio
+async def test_recorded_review_repairs_a_task_stranded_in_posting() -> None:
+    gh = FakeGitHub()
+    store = FakeStore(posted_review_id="12345")
+
+    outcome = await publish_review(
+        gh,
+        store,
+        IDENTITY,
+        TASK_ID,
+        "already posted",
+        dry_run=False,
+    )
+
+    assert outcome.status == "already_posted"
+    assert store.get_task_state(IDENTITY) == "done"
+    assert store.transitions == ["complete"]
+    assert gh.posted == []
+
+
+@pytest.mark.asyncio
+async def test_audit_failure_cannot_strand_a_posted_review(monkeypatch) -> None:
+    async def _audit_failure(*_args, **_kwargs):
+        raise OSError("audit disk unavailable")
+
+    monkeypatch.setattr(
+        "apps.code_review_pipeline.task_audit.record_lifecycle",
+        _audit_failure,
+    )
+    gh = FakeGitHub()
+    store = FakeStore()
+
+    outcome = await publish_review(
+        gh,
+        store,
+        IDENTITY,
+        TASK_ID,
+        "posted despite audit failure",
+        dry_run=False,
+    )
+
+    assert outcome.status == "posted"
+    assert store.get_task_state(IDENTITY) == "done"

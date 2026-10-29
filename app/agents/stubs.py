@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from app.agents.contract import AgentEnvelope, SubAgent, register_agent
 from app.agents.provider import LLMClient, LLMConfig
 from app.agents.tool_contract import call_tool
 from app.agents.tools import tool_registry
+from app.agents.workspace_tools import build_toolset, call_workspace_tool
 from app.config import settings
 
 logger = logging.getLogger("moa.agents")
@@ -84,6 +86,39 @@ def _build_envelope_context(envelope: AgentEnvelope, role_tag: str) -> str:
     return "\n\n".join(parts)
 
 
+def _tool_runtime(envelope: AgentEnvelope):
+    """选择本次专家可用的工具集。
+
+    只有显式带有 ``workspace_path`` 的请求才切到工作区工具。这样普通业务
+    专家仍使用全局工具注册表，而协作/实验台可以在同一套 Agent 实现上获得
+    文件读写、搜索和固定命令验证能力。
+    """
+    raw_workspace = (envelope.agent_local_slot or {}).get("workspace_path")
+    if not raw_workspace:
+        return tool_registry, None
+
+    workspace = Path(str(raw_workspace)).resolve()
+    if not workspace.is_dir():
+        raise ValueError(f"工作区不存在或不是目录: {workspace}")
+    raw_verify = (envelope.agent_local_slot or {}).get("verify_command")
+    verify_command = (
+        tuple(str(token) for token in raw_verify)
+        if isinstance(raw_verify, (list, tuple))
+        else ()
+    )
+    names = ["read_file", "write_file", "list_files", "search"]
+    if verify_command:
+        names.append("run_tests")
+    return (
+        build_toolset(
+            workspace=workspace,
+            verify_command=verify_command,
+            names=tuple(names),
+        ),
+        workspace,
+    )
+
+
 async def _execute_with_tools(
     llm: LLMClient,
     envelope: AgentEnvelope,
@@ -104,36 +139,53 @@ async def _execute_with_tools(
     messages.extend(history)
     messages.append({"role": "user", "content": envelope.user_raw_input})
     logger.info("%s execute trace=%s session=%s", agent_name, envelope.trace_id, envelope.session_id)
+    tools, workspace = _tool_runtime(envelope)
     chat_with_tools = getattr(llm, "chat_with_tools", None)
     if chat_with_tools is None:
         return await llm.chat(messages)
-    schemas = tool_registry.list_schemas()
+    schemas = tools.list_schemas()
     result = await chat_with_tools(messages, schemas)
     for _ in range(settings.agent_max_steps):
         if not result.tool_calls:
             break
         for call in result.tool_calls:
-            tool = tool_registry.get(call["function"]["name"])
+            slot = envelope.agent_local_slot
+            slot["tool_calls_total"] = int(slot.get("tool_calls_total", 0) or 0) + 1
+            tool = tools.get(call["function"]["name"])
             if tool is None:
                 output = '{"error": "unknown tool"}'
+                slot["tool_errors_total"] = int(slot.get("tool_errors_total", 0) or 0) + 1
             else:
                 try:
                     arguments = json.loads(call["function"].get("arguments") or "{}")
                 except json.JSONDecodeError as exc:
                     output = f'{{"error": "参数不是合法 JSON: {exc}"}}'
+                    slot["tool_arg_rejections_total"] = int(
+                        slot.get("tool_arg_rejections_total", 0) or 0
+                    ) + 1
                 else:
                     # 与 ReActLoop 共用同一份契约（ADR-018）：注入 session_id（覆盖式，
                     # 模型自带的值作废）→ 校验 → 执行。此前这条路径既不注入也不校验，
                     # 模型带上 session_id 就能直达 handler。
-                    outcome = await call_tool(
-                        tool, arguments, session_id=envelope.session_id
+                    outcome = await (
+                        call_workspace_tool(tool, arguments, workspace=workspace)
+                        if workspace is not None
+                        else call_tool(
+                            tool, arguments, session_id=envelope.session_id
+                        )
                     )
                     if outcome.kind == "ok":
                         output = outcome.detail
                     elif outcome.kind == "rejected":
                         output = f'{{"error": "参数被拒：{outcome.detail}"}}'
+                        slot["tool_arg_rejections_total"] = int(
+                            slot.get("tool_arg_rejections_total", 0) or 0
+                        ) + 1
                     else:
                         output = f'{{"error": "{outcome.detail}"}}'
+                        slot["tool_errors_total"] = int(
+                            slot.get("tool_errors_total", 0) or 0
+                        ) + 1
             result.messages.append(
                 {"role": "tool", "tool_call_id": call["id"], "content": output}
             )

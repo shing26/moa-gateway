@@ -31,7 +31,7 @@ Critic 只决定"这一轮该不该放它走"。harness 仍可能在跑完验证
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -145,8 +145,17 @@ class L2PlannerWorkerCritic:
         #: 采样的温度与本次作答的模型一样，从实际跑循环的那个 client 读——不写死一个
         #: 与配置无关的常数，否则报告里的 temperature 是"实现猜的"，不是"真跑的"。
         self._temperature = pool.temperature
+        self._active_plan: tuple[dict[str, Any], ...] = ()
 
     async def run(self, *, workspace: Path, goal: str, budget: Budget) -> AgentRun:
+        """执行 L2，并把本次实际解析出的计划挂到统一出口。"""
+        self._active_plan = ()
+        run = await self._run_once(workspace=workspace, goal=goal, budget=budget)
+        return replace(run, plan=self._active_plan)
+
+    async def _run_once(
+        self, *, workspace: Path, goal: str, budget: Budget
+    ) -> AgentRun:
         combined = Usage()
         turns = 0
         trace: list[Step] = []
@@ -355,35 +364,70 @@ class L2PlannerWorkerCritic:
         planner_steps = min(self._policy.planner_steps, budget.max_steps)
         if planner_steps <= 0:
             return _PlanResult(None, "step_limit", Usage(), 0, (), "")
-        session = self._planner.session(
-            workspace=workspace,
-            goal=goal,
-            budget=Budget(
-                max_cost_usd=budget.max_cost_usd,
-                max_steps=planner_steps,
-                max_tokens=budget.max_tokens,
-            ),
-        )
-        session.add_user_message(
-            build_plan_message(goal=goal, max_subtasks=self._policy.max_subtasks)
-        )
-        # 同一会话里重问：planner 看得见自己上一次的原文与那句解析错误，而不是被
-        # 当成两个无关的问题各问一次。
         attempts = max(1, self._policy.planner_attempts)
         last_error = ""
+        usage = Usage()
+        turns = 0
+        steps: list[Step] = []
+        model = ""
         for attempt in range(1, attempts + 1):
+            # Each retry starts from the original compact prompt plus the parser
+            # error. Reusing one transcript grows the request past small local
+            # context windows and makes a formatting retry more expensive than
+            # the original plan request.
+            session = self._planner.session(
+                workspace=workspace,
+                goal=goal,
+                budget=Budget(
+                    max_cost_usd=budget.max_cost_usd,
+                    max_steps=planner_steps,
+                    max_tokens=budget.max_tokens,
+                ),
+            )
+            session.add_user_message(
+                build_plan_message(
+                    goal=goal, max_subtasks=self._policy.max_subtasks
+                )
+            )
+            if attempt > 1:
+                session.add_user_message(build_plan_retry_message(error=last_error))
             status = await session.advance(max_turns=planner_steps)
-            steps = tuple(session.steps)
+            usage = usage + session.usage
+            turns += session.turns
+            steps.extend(session.steps)
+            model = session.model or model
             if status != "completed":
+                if (
+                    status == "error"
+                    and session.finish_reason == "length"
+                    and attempt < attempts
+                ):
+                    last_error = session.error
+                    logger.warning(
+                        "planner 输出被 completion 上限截断（第 %d/%d 次）："
+                        "completion_tokens 已耗尽；重问并要求只返回计划",
+                        attempt,
+                        attempts,
+                    )
+                    continue
                 return _PlanResult(
-                    None, status, session.usage, session.turns, steps, session.model
+                    None,
+                    status,
+                    usage,
+                    turns,
+                    tuple(steps),
+                    model,
+                    error=session.error,
                 )
             try:
                 plan = parse_plan(
                     session.finish_content, max_subtasks=self._policy.max_subtasks
                 )
             except PlanParseError as exc:
-                last_error = str(exc)
+                last_error = (
+                    f"{exc}; finish_reason={session.finish_reason or 'unknown'}; "
+                    f"reasoning_chars={session.reasoning_chars}"
+                )
                 if attempt >= attempts:
                     break
                 logger.warning(
@@ -392,18 +436,26 @@ class L2PlannerWorkerCritic:
                     attempts,
                     last_error,
                 )
-                session.add_user_message(build_plan_retry_message(error=last_error))
                 continue
+            self._active_plan = tuple(
+                {
+                    "index": subtask.index,
+                    "instruction": subtask.instruction,
+                    "context": subtask.context,
+                    "depends_on": list(subtask.depends_on),
+                }
+                for subtask in plan.subtasks
+            )
             return _PlanResult(
-                plan, status, session.usage, session.turns, steps, session.model
+                plan, status, usage, turns, tuple(steps), model
             )
         return _PlanResult(
             None,
             "error",
-            session.usage,
-            session.turns,
-            tuple(session.steps),
-            session.model,
+            usage,
+            turns,
+            tuple(steps),
+            model,
             error=last_error,
         )
 

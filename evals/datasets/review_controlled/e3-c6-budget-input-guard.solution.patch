@@ -1,0 +1,15 @@
+diff --git a/app/budget/guard.py b/app/budget/guard.py
+--- a/app/budget/guard.py
++++ b/app/budget/guard.py
+@@ -48,10 +48,8 @@ class BudgetGuard:
+     def record(self, session_id: str, cost_usd: float) -> float:
+         """累计一次真实成本，返回该会话的新累计值。"""
+-        if cost_usd == 0:
++        if cost_usd <= 0:
+             return self.spent(session_id)
+         entry = self._spend.setdefault(session_id, _SessionSpend())
+         entry.total_usd += float(cost_usd)
+         entry.last_seen = time.monotonic()
+-        if cost_usd < 0:
+-            return self.spent(session_id)
+         return entry.total_usd

@@ -1,0 +1,11 @@
+{
+  "task_id": "e3-c6-budget-input-guard",
+  "base_commit": "910c865b0a75af1b745e3054555de5509c46a236",
+  "difficulty": "中",
+  "source": "E3",
+  "fix_surface": "medium",
+  "note": "负数成本不是可累计消费，必须与零值一样被忽略。",
+  "known_defect": "negative cost is accumulated into a session",
+  "verify_command": ["{python}", "-m", "pytest", "tests/unit/test_e3_budget_input_guard.py", "-q"],
+  "test_paths": ["tests/unit/test_e3_budget_input_guard.py"]
+}

@@ -41,7 +41,14 @@ from app.agents.tools import ToolRegistry
 
 from bench.agent.memory import MemoryPolicy, compact_messages, truncate_observation
 from bench.agent.tools import call_bench_tool
-from bench.agent.types import AgentRun, AgentStatus, Budget, Step, Usage
+from bench.agent.types import (
+    AgentRun,
+    AgentStatus,
+    Budget,
+    LLMRetryEvent,
+    Step,
+    Usage,
+)
 
 logger = logging.getLogger("bench.agent.loop")
 
@@ -50,6 +57,62 @@ logger = logging.getLogger("bench.agent.loop")
 LLM_RETRY_ATTEMPTS = 3
 #: 每次重试前的退避（毫秒），最后一次的值会重复用于更后面的尝试。
 LLM_RETRY_BACKOFF_MS = (1000, 3000)
+
+
+def _rate_limit_status(exc: BaseException) -> int | None:
+    """从 provider 异常里提取可复核的限流状态，不保存请求正文。"""
+    for value in (
+        getattr(exc, "status_code", None),
+        getattr(exc, "http_status", None),
+        getattr(exc, "code", None),
+    ):
+        try:
+            status = int(value)
+        except (TypeError, ValueError):
+            continue
+        if status > 0:
+            return status
+    label = f"{type(exc).__name__}: {exc}".lower()
+    return 429 if "ratelimit" in label or "too many requests" in label else None
+
+
+def _http_status(exc: BaseException) -> int | None:
+    for value in (
+        getattr(exc, "status_code", None),
+        getattr(exc, "http_status", None),
+        getattr(exc, "code", None),
+    ):
+        try:
+            status = int(value)
+        except (TypeError, ValueError):
+            continue
+        if status > 0:
+            return status
+    return None
+
+
+def _is_retryable_llm_error(exc: BaseException) -> bool:
+    """Only retry transient provider failures.
+
+    Bad requests, context-window overflow, auth failures and missing models are
+    deterministic for the same request. Retrying them only multiplies latency
+    and can stack unconsumed Ollama generations behind the client timeout.
+    """
+    status = _http_status(exc)
+    if status is not None:
+        return status in {408, 409, 425, 429} or status >= 500
+    name = type(exc).__name__.lower()
+    return not any(
+        marker in name
+        for marker in (
+            "badrequest",
+            "contextwindow",
+            "authentication",
+            "permissiondenied",
+            "notfound",
+            "unprocessable",
+        )
+    )
 
 
 class _ToolRunner(Protocol):
@@ -130,6 +193,10 @@ class LoopSession:
         self.served_calls = 0
         #: 最后一次调用模型说的那句收工话——``finish`` 步的观察。
         self.finish_content = ""
+        #: 最后一次调用的 provider 停止原因与 reasoning 长度。它们不能只留在
+        #: ``last_metrics`` 里：下一次调用会覆盖，复盘空输出时就没有边界证据了。
+        self.finish_reason = ""
+        self.reasoning_chars = 0
         #: 最近一次 ``error`` 的原文。
         self.error = ""
         self._last_index = 0
@@ -209,7 +276,20 @@ class LoopSession:
 
             # ① 终局：模型不再要求调工具。**先于预算判定**，理由见模块 docstring。
             if not result.tool_calls:
+                self.finish_reason = str(getattr(result, "finish_reason", "") or "")
+                self.reasoning_chars = int(
+                    getattr(result, "reasoning_chars", 0) or 0
+                )
                 self.finish_content = str(result.content or "")
+                if self.finish_reason == "length":
+                    self.error = (
+                        "LLM 输出被单次 completion 上限截断: "
+                        f"finish_reason={self.finish_reason}, "
+                        f"completion_tokens={int((metrics or {}).get('completion_tokens', 0) or 0)}, "
+                        f"reasoning_chars={self.reasoning_chars}, "
+                        f"content_chars={len(self.finish_content)}"
+                    )
+                    return "error"
                 # 把模型这句"我为什么停"也留进历史：续跑（L1 的回边）时后一段必须
                 # 看得见前一段说了什么，否则 Critic 的指令进来时上下文是断的。
                 self._messages = [
@@ -265,11 +345,30 @@ class LoopSession:
                 raise
             except Exception as exc:  # noqa: BLE001 - 任何调用故障都可重试
                 last = exc
+                if not _is_retryable_llm_error(exc):
+                    logger.warning("agent llm call failed without retry: %s", exc)
+                    break
+                delay_ms = (
+                    0
+                    if attempt >= LLM_RETRY_ATTEMPTS
+                    else LLM_RETRY_BACKOFF_MS[
+                        min(attempt - 1, len(LLM_RETRY_BACKOFF_MS) - 1)
+                    ]
+                )
+                status_code = _rate_limit_status(exc)
+                self.usage = self.usage.add_retry(
+                    LLMRetryEvent(
+                        call_index=self.served_calls,
+                        failed_attempt=attempt,
+                        max_attempts=LLM_RETRY_ATTEMPTS,
+                        delay_ms=delay_ms,
+                        error_type=type(exc).__name__,
+                        status_code=status_code,
+                        rate_limited=status_code == 429,
+                    )
+                )
                 if attempt >= LLM_RETRY_ATTEMPTS:
                     break
-                delay_ms = LLM_RETRY_BACKOFF_MS[
-                    min(attempt - 1, len(LLM_RETRY_BACKOFF_MS) - 1)
-                ]
                 logger.warning(
                     "agent llm call failed (attempt %d/%d): %s; retrying in %dms",
                     attempt,

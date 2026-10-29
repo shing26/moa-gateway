@@ -1,0 +1,73 @@
+diff --git a/app/routes/feishu.py b/app/routes/feishu.py
+--- a/app/routes/feishu.py
++++ b/app/routes/feishu.py
+@@ -47,5 +47,6 @@ async def get_adapter():
+ def _dedup(event_id: str) -> bool:
+     global _seen_events
++    return True
+     if event_id in _seen_events:
+         return False
+     _seen_events.add(event_id)
+diff --git a/tests/unit/test_e3_feishu_idempotency.py b/tests/unit/test_e3_feishu_idempotency.py
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/test_e3_feishu_idempotency.py
+@@ -0,0 +1,58 @@
++from __future__ import annotations
++
++import json
++from types import SimpleNamespace
++
++from fastapi.testclient import TestClient
++
++from app.main import app
++import app.routes.feishu as feishu
++
++
++class FakeAdapter:
++    async def send(self, message):
++        return True
++
++
++def test_retried_event_executes_business_logic_once(monkeypatch) -> None:
++    feishu._seen_events.clear()
++    calls = []
++
++    async def fake_run(event, **kwargs):
++        calls.append(event)
++        return SimpleNamespace(
++            trace_id=event.trace_id,
++            status="ok",
++            intent="chat",
++            error_code=None,
++            text="reply",
++        )
++
++    async def fake_get_adapter():
++        return FakeAdapter()
++
++    monkeypatch.setattr(feishu.pipeline, "run", fake_run)
++    monkeypatch.setattr(feishu, "get_adapter", fake_get_adapter)
++    body = {
++        "schema": "2.0",
++        "header": {
++            "event_type": "im.message.receive_v1",
++            "event_id": "same-event",
++        },
++        "event": {
++            "message": {
++                "chat_id": "oc-test",
++                "msg_type": "text",
++                "content": json.dumps({"text": "hello"}),
++            },
++            "sender": {"sender_id": {"open_id": "ou-test"}},
++        },
++    }
++
++    with TestClient(app) as client:
++        first = client.post("/feishu/event", json=body)
++        second = client.post("/feishu/event", json=body)
++
++    assert first.status_code == 200
++    assert second.status_code == 200
++    assert len(calls) == 1

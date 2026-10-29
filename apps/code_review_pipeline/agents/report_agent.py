@@ -26,6 +26,8 @@ SYSTEM_PROMPT = """你是一个代码审查报告生成助手。请综合多个 
       "suggestion": "修复建议",
       "confidence": 0.0-1.0,
       "team_specific": true/false,
+      "evidence": ["diff:相对路径:行号", "command:pytest 输出摘要"],
+      "revision_of": "仅当本 finding 是 Critic revise 后的修订版时，填写原候选 finding_uid",
       "source_agents": ["static_analysis", "semantic_review"]
     }
   ],
@@ -46,6 +48,10 @@ SYSTEM_PROMPT = """你是一个代码审查报告生成助手。请综合多个 
    - medium 数量 >= 3 -> request_changes
    - 否则 -> approve
 4. summary 开头用 emoji 表示总体状态：✅/⚠️/❌
+5. 如果输入包含 critic_instructions，必须逐条执行并返回完整 findings 列表；
+   未要求修改的 finding 原样保留，不得借修订新增未经证据支持的问题。
+6. evidence 只能引用 diff、ruff、bandit、rag、command 或 file 中真实存在的结果，
+   格式以前缀加冒号开头；没有这类证据时不要发布该 finding。
 
 只输出 JSON，不要其他内容。"""
 
@@ -57,10 +63,19 @@ class ReportAgent:
     async def execute(self, envelope: AgentEnvelope) -> AgentFindingResult:
         llm = self._llm or build_code_review_llm()
         system = SYSTEM_PROMPT
-        triage = envelope.agent_local_slot.get("triage", {})
-        static = envelope.agent_local_slot.get("static_analysis", {})
-        semantic = envelope.agent_local_slot.get("semantic_review", {})
-        test = envelope.agent_local_slot.get("test_coverage", {})
+        report_inputs = envelope.agent_local_slot.get("report_inputs", {}) or {}
+        triage = envelope.agent_local_slot.get(
+            "triage", report_inputs.get("triage", {})
+        )
+        static = envelope.agent_local_slot.get(
+            "static_analysis", report_inputs.get("static_analysis", {})
+        )
+        semantic = envelope.agent_local_slot.get(
+            "semantic_review", report_inputs.get("semantic_review", {})
+        )
+        test = envelope.agent_local_slot.get(
+            "test_coverage", report_inputs.get("test_coverage", {})
+        )
 
         user_input = json.dumps(
             {
@@ -69,6 +84,12 @@ class ReportAgent:
                 "semantic_review": semantic,
                 "test_coverage": test,
                 "pr_title": envelope.agent_local_slot.get("pr_title", ""),
+                "candidate_findings": envelope.agent_local_slot.get(
+                    "candidate_findings", []
+                ),
+                "critic_instructions": envelope.agent_local_slot.get(
+                    "critic_instructions", []
+                ),
             },
             ensure_ascii=False,
         )
@@ -109,6 +130,10 @@ def _parse_report(raw: str, *, trace_id: str) -> AgentFindingResult:
                 confidence=float(item.get("confidence", 0.0) or 0.0),
                 team_specific=bool(item.get("team_specific", False)),
                 evidence=tuple(item.get("evidence", []) or []),
+                source_agents=tuple(item.get("source_agents", []) or []),
+                revision_of=(
+                    str(item.get("revision_of") or "").strip() or None
+                ),
             )
         )
     return AgentFindingResult(

@@ -403,11 +403,19 @@ async def _run(args: argparse.Namespace) -> int:
         else:
             view.on_tail(node, update)
 
-    result = orchestrator.finish(trace_id)
-    view.panel(result)
-    if result.need_human_review:
-        print(paint("提示：状态为待复核，未通过人工确认前不要当作成功交付。", "yellow"))
-    return 0
+    try:
+        result = await orchestrator.afinish(trace_id)
+        view.panel(result)
+        if result.need_human_review:
+            print(
+                paint(
+                    "提示：状态为待复核，未通过人工确认前不要当作成功交付。",
+                    "yellow",
+                )
+            )
+        return 0
+    finally:
+        await orchestrator.aclose()
 
 
 def main(argv: list[str] | None = None) -> int:

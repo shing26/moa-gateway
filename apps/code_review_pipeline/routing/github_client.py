@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
+
+from apps.code_review_pipeline.archive import extract_repo_tarball
 
 GITHUB_API = "https://api.github.com"
 
@@ -199,6 +204,35 @@ class GitHubClient:
         resp = await self._client.get(f"/repos/{repo.owner}/{repo.name}/pulls/{pr_number}")
         resp.raise_for_status()
         return dict(resp.json())
+
+    async def download_archive(self, repo: GitHubRepo, ref: str, dest: Path) -> None:
+        """下载某个 commit 的 tarball 并解压到 ``dest``。
+
+        用归档 API 而不是 ``git clone``：token 不会出现在命令行里，工作区也不需要
+        依赖宿主机的 git 配置。GitHub 会在 302 后给出实际归档地址，因此必须跟随
+        重定向。
+        """
+        dest = Path(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        fd, raw_path = tempfile.mkstemp(prefix="moa-gh-archive-", suffix=".tar.gz")
+        os.close(fd)
+        archive = Path(raw_path)
+        try:
+            async with self._client.stream(
+                "GET",
+                f"/repos/{repo.owner}/{repo.name}/tarball/{ref}",
+                follow_redirects=True,
+            ) as response:
+                response.raise_for_status()
+                handle = await asyncio.to_thread(archive.open, "wb")
+                try:
+                    async for chunk in response.aiter_bytes():
+                        await asyncio.to_thread(handle.write, chunk)
+                finally:
+                    await asyncio.to_thread(handle.close)
+            await asyncio.to_thread(extract_repo_tarball, archive, dest)
+        finally:
+            archive.unlink(missing_ok=True)
 
     async def list_reviews(self, repo: GitHubRepo, pr_number: int) -> list[dict[str, Any]]:
         """列出 PR 上的 review（D4 幂等兜底要用）。

@@ -20,7 +20,7 @@ R6（多级 supervisor）在 ADR-022 立项前一直处于冻结状态。本模�
 治理之下的协作（这是差异化叙事）
 --------------------------------
 "多 Agent"本身不稀奇，稀奇的是每个专家的输出仍然要过同一条守卫链：评估器 →
-三级 guard 合并 → HITL → 审计。Critic 打回只重跑被打回的子任务，不是全链重跑；
+三级 guard 合并 → HITL → 审计。Critic 打回会重跑目标及其全部下游，无关分支保留；
 达到轮次上限仍不通过时标 ``need_human_review`` 走人工，而不是把没通过的输出
 伪装成成功交付。
 
@@ -35,12 +35,14 @@ R6（多级 supervisor）在 ADR-022 立项前一直处于冻结状态。本模�
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import logging
 import operator
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, Protocol, TypedDict
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -50,6 +52,7 @@ from langgraph.types import Command, Send, interrupt
 import app.agents.loader  # noqa: F401  (import for agent registration side effects)
 from app.agents.contract import AgentEnvelope, get_agent
 from app.agents.retry import AgentExecutionFailed, execute_with_retry
+from app.agents.workspace_tools import resolve_in_workspace
 from app.audit.models import AuditEntry
 from app.audit.recorder import record
 from app.config import settings
@@ -61,6 +64,16 @@ from app.middleware.request_logger import bind_trace
 from app.models.events import new_trace_id
 from app.models.errors import ErrorCode
 from app.outbound.adapter import ResponseAdapter
+from app.orchestration.workspace_isolation import (
+    collect_workspace_write_set,
+    create_isolated_workspace,
+    merge_workspace_write_sets,
+    summarize_write_sets,
+)
+from app.orchestration.checkpointing import (
+    OwnedCheckpointer,
+    open_sqlite_checkpointer,
+)
 from app.pipeline import (
     FAILURE_ESCALATION_TEXT,
     _merge_guard,
@@ -217,6 +230,9 @@ class CollabResult:
     node_path: tuple[str, ...]
     guard_action: str = ""
     error_code: str = ""
+    workspace_writes: tuple[dict[str, Any], ...] = ()
+    workspace_conflicts: tuple[dict[str, Any], ...] = ()
+    workspace_merges: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -235,6 +251,27 @@ class CollabEvent:
 
     node: str
     update: dict[str, Any]
+
+
+def _normalize_stream_update(node: str, raw: Any) -> dict[str, Any]:
+    """把 LangGraph 的 updates chunk 归一成 JSON 可展示的 dict。
+
+    ``execute_expert`` 等普通节点返回 dict；``__interrupt__`` 却返回
+    ``Interrupt`` 对象的元组，``dict(tuple)`` 会直接抛 TypeError。中断不是
+    异常状态，流式观察者应该收到和 ``pending_payload`` 同形的负载。
+    """
+    if node != "__interrupt__":
+        return dict(raw or {}) if isinstance(raw, dict) else {"value": raw}
+
+    items = raw if isinstance(raw, (tuple, list)) else (raw,)
+    interrupts: list[dict[str, Any]] = []
+    for item in items:
+        value = getattr(item, "value", item)
+        if isinstance(value, dict):
+            interrupts.append(dict(value))
+        else:
+            interrupts.append({"value": value})
+    return {"interrupts": interrupts}
 
 
 # ── 协作 LLM 协议 ────────────────────────────────────────────────────────
@@ -309,6 +346,21 @@ def _verdict(history: Any) -> tuple[CritiqueVerdict, ...]:
     return tuple(
         _to_verdict(item) for item in (history or ()) if isinstance(item, dict)
     )
+
+
+def _dependent_closure(
+    plan: tuple[SubtaskAssignment, ...], targets: Sequence[int]
+) -> set[int]:
+    """返回被打回子任务及其所有传递下游。"""
+    closure = {int(target) for target in targets}
+    changed = True
+    while changed:
+        changed = False
+        for item in plan:
+            if item.index not in closure and any(dep in closure for dep in item.depends_on):
+                closure.add(item.index)
+                changed = True
+    return closure
 
 
 # 规划用的切分符。刻意不含逗号/顿号：那会把一个完整句子拆碎，而中文任务里
@@ -456,7 +508,20 @@ class LiteLLMCollaborationLLM:
             text = text.strip("`")
             if text.lower().startswith("json"):
                 text = text[4:]
-        return json.loads(text)
+        text = text.strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            normalized = re.sub(
+                r"([{,]\s*)([A-Za-z_]\w*)(\s*:)",
+                r'\1"\2"\3',
+                text,
+            )
+            normalized = re.sub(r",\s*([}\]])", r"\1", normalized)
+            try:
+                return json.loads(normalized)
+            except json.JSONDecodeError:
+                return ast.literal_eval(normalized)
 
     async def plan(self, *, task: str) -> list[dict[str, Any]]:
         raw = await self._complete(self._PLAN_PROMPT, task)
@@ -528,6 +593,13 @@ def _add(left: float, right: float) -> float:
     return float(left or 0.0) + float(right or 0.0)
 
 
+def _merge_rounds(left: dict[int, int], right: dict[int, int]) -> dict[int, int]:
+    """合并并发 worker 完成的轮次；每个子任务只保留最新轮次。"""
+    merged = dict(left or {})
+    merged.update(right or {})
+    return merged
+
+
 class CollabState(TypedDict, total=False):
     trace_id: str
     session_id: str
@@ -535,6 +607,8 @@ class CollabState(TypedDict, total=False):
     task: str
     channel: str
     target: str
+    workspace_path: str
+    verify_command: tuple[str, ...]
     # plan / pending / subtask / verdict / critique_history 存的都是**普通 dict**，
     # 不是上面的 dataclass：checkpointer 会序列化这些值，而 LangGraph 只保证
     # JSON 原生类型的长期可反序列化（自定义类型未来版本会被 block）。
@@ -546,6 +620,12 @@ class CollabState(TypedDict, total=False):
     # 所以多个 worker 之间不会互相覆盖。
     subtask: dict[str, Any]
     outputs: Annotated[dict[int, str], _merge_outputs]
+    # 依赖调度账本：
+    # * required_round 由 Critic 在 revise 时写入目标及其下游；
+    # * completed_round 由并发专家 worker 写入，因此必须带 reducer。
+    # 一个子任务只有在 completed_round[i] >= required_round[i] 时才算本轮完成。
+    required_round: dict[int, int]
+    completed_round: Annotated[dict[int, int], _merge_rounds]
     critique_history: Annotated[list[dict[str, Any]], operator.add]
     verdict: dict[str, Any] | None
     # Critic 轮次耗尽后的标记：照常交付，但交付文本里显式说明"critic 未通过"。
@@ -576,6 +656,13 @@ class CollabState(TypedDict, total=False):
     tool_calls: Annotated[int, _add]
     tool_errors: Annotated[int, _add]
     tool_arg_rejections: Annotated[int, _add]
+    # 每个并发专家先在自己的工作区副本里执行；写集回图后由单个 dispatch
+    # 节点检测冲突并确定性合并。正文只在 checkpoint 内存活，Run Record
+    # 只保留写入者、路径与哈希摘要。
+    workspace_write_sets: Annotated[list[dict[str, Any]], operator.add]
+    workspace_conflicts: Annotated[list[dict[str, Any]], operator.add]
+    workspace_merges: Annotated[list[dict[str, Any]], operator.add]
+    applied_write_ids: list[str]
     # 已落审计的子任务数（每个子任务一条条目，见 _node_execute_expert）。
     audited_subtasks: Annotated[int, _add]
     # LangGraph 的 operator.add reducer：执行轨迹免费拿到，不用另接 tracer。
@@ -629,12 +716,14 @@ class CollabOrchestrator:
 
     图结构::
 
-        plan → dispatch →(Send fan-out)→ execute_expert → critic ─┬─ revise ─→ dispatch
-                                                                    │   (round+1，有界)
-                                                                    ├─ approve → summarize → evaluate → guard ─┬─ allow → deliver
-                                                                    │                                            ├─ review → prepare_hitl → await_human ─┬─ approve → deliver
-                                                                    │                                            │                                          └─ reject → rejected
-                                                                    └─ escalate ────────────────────────────────┘                        └─ deny → blocked
+        plan → dispatch →(Send ready wave)→ execute_expert → dispatch → ...
+                    │                                              │
+                    └──────────── 所有依赖层完成后 ───────────────→ critic ─┬─ revise ─→ dispatch
+                                                                            │   (round+1，有界)
+                                                                            ├─ approve → summarize → evaluate → guard ─┬─ allow → deliver
+                                                                            │                                            ├─ review → prepare_hitl → await_human ─┬─ approve → deliver
+                                                                            │                                            │                                          └─ reject → rejected
+                                                                            └─ escalate ────────────────────────────────┘                        └─ deny → blocked
 
     与 ``LangGraphOrchestrator`` 的分工：那边证明图运行时与 FSM 管道**等价**，
     这边提供 FSM 管道没有的能力。两者共用同一批治理原语，所以"多 Agent"不会
@@ -660,6 +749,7 @@ class CollabOrchestrator:
         settings_obj: Any = None,
         budget_guard: Any = None,
         checkpointer: Any = None,
+        workspace_root: Path | str | None = None,
     ) -> None:
         cfg = settings_obj or settings
         self._settings = cfg
@@ -678,7 +768,24 @@ class CollabOrchestrator:
         self._budget_guard = budget_guard
         self._max_rounds = max(0, int(getattr(cfg, "collab_max_rounds", 2)))
         self._max_subtasks = max(1, int(getattr(cfg, "collab_max_subtasks", 4)))
-        self._checkpointer = checkpointer or InMemorySaver()
+        configured_root = workspace_root or getattr(cfg, "collab_workspace_root", "")
+        self._workspace_root = (
+            Path(str(configured_root)).resolve() if str(configured_root or "").strip() else None
+        )
+        self._owned_checkpointer: OwnedCheckpointer | None = None
+        if checkpointer is not None:
+            self._checkpointer = checkpointer
+        else:
+            checkpoint_path = str(
+                getattr(cfg, "collab_checkpoint_path", "") or ""
+            ).strip()
+            if checkpoint_path and checkpoint_path != ":memory:":
+                self._owned_checkpointer = open_sqlite_checkpointer(
+                    checkpoint_path
+                )
+                self._checkpointer = self._owned_checkpointer.saver
+            else:
+                self._checkpointer = InMemorySaver()
         self._graph = self._build()
 
     # ── construction ───────────────────────────────────────────────────────
@@ -719,8 +826,12 @@ class CollabOrchestrator:
         graph.add_edge("plan", "dispatch")
         # handoff 就在这里：dispatch 不自己调专家，而是按子任务派 Send。
         # "critic" 也在可达集合里，是 pending 为空时的直通退路（见 _fan_out）。
-        graph.add_conditional_edges("dispatch", self._fan_out, ["execute_expert", "critic"])
-        graph.add_edge("execute_expert", "critic")
+        graph.add_conditional_edges(
+            "dispatch", self._fan_out, ["execute_expert", "critic", "failed"]
+        )
+        # 一批 ready worker 完成后必须回到 dispatch，而不是直接进 Critic：
+        # 下一层依赖只有在前置产物落盘后才能入队。
+        graph.add_edge("execute_expert", "dispatch")
         graph.add_conditional_edges(
             "critic",
             self._after_critic,
@@ -886,31 +997,118 @@ class CollabOrchestrator:
             "llm_latency_ms": float(spent.get("llm_latency_ms", 0.0) or 0.0),
         }
 
+    def _workspace_state(
+        self,
+        workspace_path: str = "",
+        verify_command: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        """把调用方给的工作区收敛到配置根目录以内。
+
+        ``workspace_path`` 是操作者显式授予的能力，不是模型参数。模型之后只能
+        通过工作区工具访问这个根目录内的相对路径；``resolve_in_workspace``
+        会解析符号链接，防止用软链逃逸。
+        """
+        command = tuple(str(token) for token in (verify_command or ()))
+        raw_path = str(workspace_path or "").strip()
+        if not raw_path:
+            if command:
+                raise ValueError("verify_command 需要同时提供 workspace_path")
+            return {"workspace_path": "", "verify_command": ()}
+        if self._workspace_root is None:
+            raise ValueError(
+                "未配置 COLLAB_WORKSPACE_ROOT；拒绝向协作专家开放任意宿主目录"
+            )
+        try:
+            resolved = resolve_in_workspace(self._workspace_root, raw_path)
+        except Exception as exc:
+            raise ValueError(str(exc)) from exc
+        if not resolved.is_dir():
+            raise ValueError(f"工作区不存在或不是目录: {resolved}")
+        return {"workspace_path": str(resolved), "verify_command": command}
+
+    def _merge_pending_workspace_writes(
+        self, state: CollabState
+    ) -> dict[str, Any]:
+        workspace_path = str(state.get("workspace_path", "") or "")
+        write_sets = list(state.get("workspace_write_sets") or ())
+        settled = tuple(state.get("applied_write_ids") or ())
+        if not workspace_path or not write_sets:
+            return {}
+        merged = merge_workspace_write_sets(
+            workspace_path,
+            write_sets,
+            settled_write_ids=settled,
+        )
+        updates: dict[str, Any] = {
+            "applied_write_ids": sorted(
+                set(settled) | set(merged.settled_write_ids)
+            )
+        }
+        if merged.applied:
+            updates["workspace_merges"] = [dict(item) for item in merged.applied]
+        if merged.conflicts:
+            updates["workspace_conflicts"] = [
+                dict(item) for item in merged.conflicts
+            ]
+        return updates
+
     async def _node_dispatch(self, state: CollabState) -> dict[str, Any]:
         """决定本轮派哪些子任务。
 
-        第 0 轮派全部；反思轮只派 Critic 点名的那些——"打回只重跑被打回的子任务"
-        就是这一行。targets 越界（Critic 编了个不存在的 index）时退回全量，
-        让图继续走而不是空转。
+        每轮只派依赖已完成的 ready 子任务；一批完成后图会回到这里继续下一层。
+        Critic 打回时已把目标及全部下游的 ``required_round`` 推进，因此旧产物
+        不会被误认为新轮次已经完成。
         """
         plan = _assignments(state.get("plan"))
-        round_no = int(state.get("round", 0) or 0)
-        raw_verdict = state.get("verdict")
-        verdict = _to_verdict(raw_verdict) if isinstance(raw_verdict, dict) else None
-        pending = plan
-        if round_no > 0 and verdict is not None and verdict.targets:
-            wanted = {int(target) for target in verdict.targets}
-            targeted = tuple(item for item in plan if item.index in wanted)
-            if targeted:
-                pending = targeted
-            else:
-                logger.warning(
-                    "collab critic targets %s 均不在计划内，本轮改派全部子任务",
-                    sorted(wanted),
-                )
+        workspace_updates = self._merge_pending_workspace_writes(state)
+        if int(state.get("failure_envelopes", 0) or 0) > 0:
+            return {
+                "pending": (),
+                "node_path": ["dispatch"],
+                **workspace_updates,
+            }
+
+        required = {
+            int(index): int(value)
+            for index, value in dict(state.get("required_round") or {}).items()
+        }
+        completed = {
+            int(index): int(value)
+            for index, value in dict(state.get("completed_round") or {}).items()
+        }
+        unfinished = [
+            item
+            for item in plan
+            if completed.get(item.index, -1) < required.get(item.index, 0)
+        ]
+        pending = tuple(
+            item
+            for item in unfinished
+            if all(
+                completed.get(dep, -1) >= required.get(dep, 0)
+                for dep in item.depends_on
+            )
+        )
+        if unfinished and not pending:
+            blocked = ", ".join(str(item.index) for item in unfinished)
+            text = (
+                "多 Agent 协作计划存在循环依赖，无法生成可执行层："
+                f"未就绪子任务 {blocked}"
+            )
+            logger.error(text)
+            return {
+                "pending": (),
+                "status": "error",
+                "error_code": ErrorCode.VALIDATION_ERROR.value,
+                "raw_output": text,
+                "need_human_review": True,
+                "node_path": ["dispatch"],
+                **workspace_updates,
+            }
         return {
             "pending": tuple(item.to_dict() for item in pending),
             "node_path": ["dispatch"],
+            **workspace_updates,
         }
 
     def _fan_out(self, state: CollabState) -> Any:
@@ -925,16 +1123,31 @@ class CollabOrchestrator:
         trace_id 都取不到（这是第一版实测撞出来的 KeyError）。
         """
         pending = tuple(state.get("pending") or ())
+        if state.get("status") == "error":
+            return "failed"
         if not pending:
             return "critic"
+        outputs = dict(state.get("outputs") or {})
         shared = {
             "trace_id": state.get("trace_id", ""),
             "session_id": state.get("session_id", ""),
             "task": state.get("task", ""),
             "round": int(state.get("round", 0) or 0),
+            "workspace_path": state.get("workspace_path", ""),
+            "verify_command": tuple(state.get("verify_command") or ()),
         }
         return [
-            Send("execute_expert", {**shared, "subtask": dict(item)})
+            Send(
+                "execute_expert",
+                {
+                    **shared,
+                    "subtask": dict(item),
+                    "dependency_outputs": {
+                        str(dep): str(outputs.get(int(dep), "") or "")
+                        for dep in item.get("depends_on", ())
+                    },
+                },
+            )
             for item in pending
         ]
 
@@ -967,6 +1180,15 @@ class CollabOrchestrator:
         if subtask is None:
             return {"node_path": ["execute_expert:?"]}
         label = f"execute_expert:{subtask.index}"
+        writer_id = (
+            f"round-{int(state.get('round', 0) or 0)}"
+            f"/subtask-{subtask.index}"
+        )
+        isolated = (
+            create_isolated_workspace(str(state["workspace_path"]))
+            if state.get("workspace_path")
+            else None
+        )
         slot: dict[str, Any] = {
             "intent": COLLAB_INTENT,
             "resource": COLLAB_INTENT,
@@ -977,7 +1199,13 @@ class CollabOrchestrator:
             "collab_subtask_index": subtask.index,
             "collab_round": int(state.get("round", 0) or 0),
             "collab_depends_on": list(subtask.depends_on),
+            "collab_dependency_outputs": dict(
+                state.get("dependency_outputs") or {}
+            ),
         }
+        if isolated is not None:
+            slot["workspace_path"] = str(isolated.root)
+            slot["verify_command"] = list(state.get("verify_command") or ())
         envelope = AgentEnvelope(
             trace_id=state["trace_id"],
             session_id=state["session_id"],
@@ -985,10 +1213,16 @@ class CollabOrchestrator:
             global_summary="",
             agent_local_slot=slot,
         )
-        updates: dict[str, Any] = {"node_path": [label], "audited_subtasks": 1}
+        round_no = int(state.get("round", 0) or 0)
+        updates: dict[str, Any] = {
+            "node_path": [label],
+            "audited_subtasks": 1,
+            "completed_round": {subtask.index: round_no},
+        }
         output = ""
         attempts = 0
         metrics: dict[str, Any] = {}
+        write_accepted = False
 
         expert = self._expert(subtask.agent)
         if expert is None:
@@ -1002,6 +1236,8 @@ class CollabOrchestrator:
                 output, attempts, _ = await execute_with_retry(expert, envelope)
                 metrics = dict(envelope.agent_local_slot.get("llm_metrics") or {})
             except asyncio.CancelledError:
+                if isolated is not None:
+                    isolated.cleanup()
                 raise
             except Exception as exc:  # noqa: BLE001 - 单个子任务失败不该炸掉整轮
                 attempts = int(getattr(exc, "attempts", 1) or 1)
@@ -1024,6 +1260,23 @@ class CollabOrchestrator:
                     output = self._escalate_expert_failure(
                         updates, subtask.index, failure_reason
                     )
+                else:
+                    write_accepted = True
+
+        if isolated is not None:
+            try:
+                write_set = collect_workspace_write_set(
+                    source=isolated.source,
+                    isolated_root=isolated.root,
+                    writer_id=writer_id,
+                    task=subtask.instruction,
+                    round_index=int(state.get("round", 0) or 0),
+                    accepted=write_accepted,
+                )
+                if write_set["changes"]:
+                    updates["workspace_write_sets"] = [write_set]
+            finally:
+                isolated.cleanup()
 
         cost_usd = float(metrics.get("cost_usd", 0.0) or 0.0)
         tool_calls = int(slot.get("tool_calls_total", 0) or 0)
@@ -1096,6 +1349,17 @@ class CollabOrchestrator:
             "node_path": [f"critic:{round_no}"],
             **self._llm_spend(),
         }
+        if verdict.decision == DECISION_REVISE and verdict.targets:
+            invalidated = _dependent_closure(
+                _assignments(state.get("plan")), verdict.targets
+            )
+            required = {
+                int(index): int(value)
+                for index, value in dict(state.get("required_round") or {}).items()
+            }
+            for index in invalidated:
+                required[index] = max(required.get(index, 0), round_no)
+            updates["required_round"] = required
         if verdict.decision == DECISION_REVISE and not looping:
             # 到上限仍不通过，或"要改但没说改谁"：标记未决，交付时显式说明。
             updates["critique_unresolved"] = True
@@ -1353,7 +1617,7 @@ class CollabOrchestrator:
 
     async def _node_failed(self, state: CollabState) -> dict[str, Any]:
         """子任务重试耗尽、且审批关闭：以错误收口，不伪装成交付。"""
-        text = FAILURE_ESCALATION_TEXT
+        text = str(state.get("raw_output") or FAILURE_ESCALATION_TEXT)
         await self._audit_final(state, status="error", text=text, need_review=True)
         return {
             "delivered_text": text,
@@ -1432,6 +1696,15 @@ class CollabOrchestrator:
                 "tool_calls": int(state.get("tool_calls", 0) or 0),
                 "tool_errors": int(state.get("tool_errors", 0) or 0),
                 "tool_arg_rejections": int(state.get("tool_arg_rejections", 0) or 0),
+                "collab_workspace_write_sets": len(
+                    state.get("workspace_write_sets") or ()
+                ),
+                "collab_workspace_conflicts": len(
+                    state.get("workspace_conflicts") or ()
+                ),
+                "collab_workspace_merges": len(
+                    state.get("workspace_merges") or ()
+                ),
             },
         )
         try:
@@ -1474,6 +1747,19 @@ class CollabOrchestrator:
             node_path=tuple(state.get("node_path") or ()),
             guard_action=state.get("guard_action", ""),
             error_code=state.get("error_code", ""),
+            workspace_writes=tuple(
+                summarize_write_sets(state.get("workspace_write_sets") or ())
+            ),
+            workspace_conflicts=tuple(
+                dict(item)
+                for item in (state.get("workspace_conflicts") or ())
+                if isinstance(item, dict)
+            ),
+            workspace_merges=tuple(
+                dict(item)
+                for item in (state.get("workspace_merges") or ())
+                if isinstance(item, dict)
+            ),
         )
 
     async def run(
@@ -1485,11 +1771,14 @@ class CollabOrchestrator:
         channel: str = "",
         target: str = "",
         user_id: str = "",
+        workspace_path: str = "",
+        verify_command: Sequence[str] | None = None,
     ) -> CollabResult:
         """跑一次协作。返回 ``CollabResult``（含中断时的挂起状态）。"""
         trace_id = trace_id or new_trace_id()
         sid = session_id or f"collab:{trace_id}"
         bind_trace(trace_id)
+        workspace = self._workspace_state(workspace_path, verify_command)
         initial: CollabState = {
             "trace_id": trace_id,
             "session_id": sid,
@@ -1498,6 +1787,7 @@ class CollabOrchestrator:
             "channel": channel,
             "target": target,
             "node_path": [],
+            **workspace,
         }
         state = await self._graph.ainvoke(initial, self._config(trace_id))
         return self._to_result(state)
@@ -1511,6 +1801,8 @@ class CollabOrchestrator:
         channel: str = "",
         target: str = "",
         user_id: str = "",
+        workspace_path: str = "",
+        verify_command: Sequence[str] | None = None,
     ) -> AsyncIterator[CollabEvent]:
         """跑一次协作，边跑边吐事件。
 
@@ -1525,6 +1817,7 @@ class CollabOrchestrator:
         trace_id = trace_id or new_trace_id()
         sid = session_id or f"collab:{trace_id}"
         bind_trace(trace_id)
+        workspace = self._workspace_state(workspace_path, verify_command)
         initial: CollabState = {
             "trace_id": trace_id,
             "session_id": sid,
@@ -1533,12 +1826,17 @@ class CollabOrchestrator:
             "channel": channel,
             "target": target,
             "node_path": [],
+            **workspace,
         }
         async for chunk in self._graph.astream(
             initial, self._config(trace_id), stream_mode="updates"
         ):
             for node, update in chunk.items():
-                yield CollabEvent(node=str(node), update=dict(update or {}))
+                node_name = str(node)
+                yield CollabEvent(
+                    node=node_name,
+                    update=_normalize_stream_update(node_name, update),
+                )
 
     def finish(self, trace_id: str) -> CollabResult:
         """从 checkpoint 取这次协作的结果（``run_streamed`` 跑完后调用）。
@@ -1548,6 +1846,14 @@ class CollabOrchestrator:
         走 ``ainvoke`` 时一致。
         """
         snapshot = self._graph.get_state(self._config(trace_id))
+        state = dict(snapshot.values or {})
+        if getattr(snapshot, "interrupts", ()) and "__interrupt__" not in state:
+            state["__interrupt__"] = snapshot.interrupts
+        return self._to_result(state)
+
+    async def afinish(self, trace_id: str) -> CollabResult:
+        """异步读取终态，兼容 AsyncSqliteSaver 的持久化 checkpoint。"""
+        snapshot = await self._graph.aget_state(self._config(trace_id))
         state = dict(snapshot.values or {})
         if getattr(snapshot, "interrupts", ()) and "__interrupt__" not in state:
             state["__interrupt__"] = snapshot.interrupts
@@ -1569,8 +1875,24 @@ class CollabOrchestrator:
         value = interrupts[0].value
         return dict(value) if isinstance(value, dict) else {"value": value}
 
+    async def apending_payload(
+        self, thread_id: str
+    ) -> dict[str, Any] | None:
+        """异步读取挂起负载，兼容 AsyncSqliteSaver。"""
+        snapshot = await self._graph.aget_state(self._config(thread_id))
+        interrupts = getattr(snapshot, "interrupts", ()) or ()
+        if not interrupts:
+            return None
+        value = interrupts[0].value
+        return dict(value) if isinstance(value, dict) else {"value": value}
+
     def describe(self) -> dict[str, str]:
         return {"pipeline": "collaboration"}
+
+    async def aclose(self) -> None:
+        if self._owned_checkpointer is not None:
+            await self._owned_checkpointer.aclose()
+            self._owned_checkpointer = None
 
 
 __all__ = [

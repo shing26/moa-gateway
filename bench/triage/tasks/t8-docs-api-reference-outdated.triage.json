@@ -1,0 +1,8 @@
+{
+  "task_id": "t8-docs-api-reference-outdated",
+  "issue_text": "API 参考文档还是 v1 的，v2 的字段全没有。/api/pr 现在返回 review_status 字段，文档里根本没有。团队准备接入 v2 但文档对不上。",
+  "expected_category": "docs",
+  "expected_priority": "P1",
+  "expected_route": "auto",
+  "note": "文档过时阻塞集成 → docs；阻塞第三方接入 → P1；不触发人工条件 → auto。"
+}

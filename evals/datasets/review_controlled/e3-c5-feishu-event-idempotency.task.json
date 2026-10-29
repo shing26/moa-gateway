@@ -1,0 +1,11 @@
+{
+  "task_id": "e3-c5-feishu-event-idempotency",
+  "base_commit": "910c865b0a75af1b745e3054555de5509c46a236",
+  "difficulty": "中",
+  "source": "E3",
+  "fix_surface": "medium",
+  "note": "同一飞书 event_id 的重投只能触发一次业务执行。",
+  "known_defect": "duplicate Feishu events are executed more than once",
+  "verify_command": ["{python}", "-m", "pytest", "tests/unit/test_e3_feishu_idempotency.py", "-q"],
+  "test_paths": ["tests/unit/test_e3_feishu_idempotency.py"]
+}

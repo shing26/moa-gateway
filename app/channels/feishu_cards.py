@@ -174,6 +174,41 @@ class FeishuCardSender:
             logger.exception("feishu card send error: %s", exc)
             return False
 
+    async def update_card(self, message_id: str, card: Any) -> bool:
+        """Replace an existing interactive card in place."""
+        if not message_id:
+            return False
+        if card.channel != "feishu":
+            return False
+        try:
+            token = await self._auth.get_token()
+            url = f"{self._auth.config.base_url}/im/v1/messages/{message_id}"
+            payload = {
+                "content": json.dumps(card.to_card_payload(), ensure_ascii=False)
+            }
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.patch(
+                    url,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if data.get("code") != 0:
+                    logger.error("feishu card update failed: %s", data)
+                    return False
+                return True
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.text[:500] if exc.response is not None else ""
+            logger.error("feishu card update http error: %s body=%s", exc, body)
+            return False
+        except Exception as exc:
+            logger.exception("feishu card update error: %s", exc)
+            return False
+
 
 def parse_card_callback(body: dict[str, Any]) -> tuple[str, str, str] | None:
     try:

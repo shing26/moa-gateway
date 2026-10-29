@@ -62,6 +62,10 @@ SINGLE_SOURCE_CONCEPTS = {
     "GitHub 令牌": ("GITHUB_TOKEN",),
     "审计日志目录": ("LOG_DIR",),
     "审计日志保留期": ("LOG_RETENTION_DAYS",),
+    "PR 审查工作区": (
+        "CODE_REVIEW_WORKSPACE_ROOT",
+        "CODE_REVIEW_VERIFY_COMMAND",
+    ),
     "主链路 LLM 配置": ("LLM_PROVIDER", "LLM_MODEL", "LLM_BASE_URL", "LLM_API_KEY"),
     "入口鉴权凭据": ("WEBHOOK_AUTH_TOKEN", "DASHBOARD_PASSWORD"),
 }

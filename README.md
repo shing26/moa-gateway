@@ -12,12 +12,12 @@
 [![pgvector](https://img.shields.io/badge/pgvector-4169E1?logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector)
 [![Elasticsearch](https://img.shields.io/badge/Elasticsearch-005571?logo=elasticsearch&logoColor=white)](https://www.elastic.co/elasticsearch)
 <br>
-[![Tests](https://img.shields.io/badge/tests-1388%20passed-brightgreen.svg)](https://github.com/shing26/moa-gateway/actions)
+[![CI](https://github.com/shing26/moa-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/shing26/moa-gateway/actions/workflows/ci.yml)
 [![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Security: Bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
 
 <p align="center">
-<b>1388</b> 自动化测试 · <b>22</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
+自动化测试门禁 · <b>24</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
 </p>
 
 <p align="center">
@@ -38,7 +38,7 @@
 > 这个项目是**一层 LLM 治理运行时**（`app/`：拦截、审批、留痕、回归）加**一个等预算的多智能体实验台**（`bench/`：同一任务集、同一预算下把 agent 结构从 L0 加到 L3，看边际收益）。
 > 三个词在这里**停用**：
 > - **网关**——设计文档 §2.1 判定不成立：请求进来之后是它在干活，不是转发给别人、也不替谁挡流量。"网关"会让人以为它只是中间层。仓库名是历史遗留。
-> - **多智能体系统**——产品层的主链路是 5 次**顺序** LLM 调用（`apps/code_review_pipeline`，没有 handoff、没有并行调度）。真有多个执行体分工的只有两处，且都不在请求主路径上：`app/orchestration/collaboration.py`（Supervisor + `Send` 扇出，`COLLAB_ENABLED=false`，显式入口，ADR-022）与 `bench/` 的剂量实验（L0–L3，人工跑，不进 CI，ADR-023）。
+> - **多智能体系统**——PR 审查 R0 是 5 段顺序 LLM 调用；R1 再加入逐 finding 的 Critic，并把 `revise` 的一次回边送回 Report。它不是无边界 handoff 或并行调度。真有多个执行体并发分工的只有两处，且都不在产品主路径上：`app/orchestration/collaboration.py`（Supervisor + `Send` 扇出，`COLLAB_ENABLED=false`，显式入口，ADR-022）与 `bench/` 的剂量实验（L0–L3，人工跑，不进 CI，ADR-023）。
 > - **开发辅助类 Agent**——改 bug / 审 PR 是**任务载体**，它们的价值是给治理层和实验台提供真实负载，不是要做成产品。
 >
 > 对外一句话：**"我建了个实验台，测出多智能体协作在编码任务上的边际收益在第几档转负——并且我能证明我的 agent 没有在撒谎。"**
@@ -67,8 +67,9 @@
 ### 2. 治理之下的专家分工与并发调度
 
 * **受控意图路由**：`route` 节点完成意图解析（正则 → 微模型 → 路由 LLM 三级降级），`execute` 节点把任务分发至专家池（`coder` / `general` / `review`，复用 `AGENT_REGISTRY`，不引入新的 Agent 实现）。
-* **Send 扇出并发治理**（`app/orchestration/collaboration.py`，ADR-022）：Supervisor 规划 → 按子任务 `Send` fan-out，多个 `execute_expert` 在同一 superstep 并发执行 → Critic 反思 → **有界** revise 回边（`COLLAB_MAX_ROUNDS=2` / `COLLAB_MAX_SUBTASKS=4`）→ 汇总后汇入同一条 guard/HITL/审计链。
-* **并发写收敛至单点裁决**：`status` / `raw_output` 等 LastValue 通道被多个 worker 并发写会直接 `InvalidUpdateError`（第一版实测正是这么崩的）。现在并发 worker 只碰带 reducer 的通道（`failure_reasons` / `outputs`），"是否升级、升成什么"由下游单个节点裁决；Critic 打回也只重跑 `targets` 指定的子任务，不全链重跑。
+* **Send 扇出与依赖波次**（`app/orchestration/collaboration.py`，ADR-022）：Supervisor 规划后，`dispatch` 只派 `depends_on` 已完成的 ready 子任务；同层 `execute_expert` 在同一 superstep 并发执行，完成后回到 `dispatch` 解锁下一层 → Critic 反思 → **有界** revise 回边（`COLLAB_MAX_ROUNDS=2` / `COLLAB_MAX_SUBTASKS=4`）→ 汇总后汇入同一条 guard/HITL/审计链。
+* **并发写收敛至单点裁决**：`status` / `raw_output` 等 LastValue 通道被多个 worker 并发写会直接 `InvalidUpdateError`（第一版实测正是这么崩的）。现在并发 worker 只碰带 reducer 的通道（`failure_reasons` / `outputs` / `completed_round`），"是否升级、升成什么"由下游单个节点裁决；Critic 打回会重跑 `targets` 及其全部下游，无关分支保留。
+* **业务专家可用工作区工具**：显式提供 `workspace_path` 与固定 `verify_command` 后，`coder` / `general` 获得 `read_file` / `write_file` / `list_files` / `search` / `run_tests`；宿主边界由 `COLLAB_WORKSPACE_ROOT` 决定，模型侧仍只能访问工作区内相对路径。
 * **默认关闭、显式入口**：`COLLAB_ENABLED=false`，不进意图路由；入口是 `POST /api/v1/collab`、`python -m app.cli collab` 与演示脚本。协作挂起活在 LangGraph checkpoint，由 `resume()` 放行（飞书卡片回调不服务协作）。
 
 ### 3. Evaluate + Guard 双层运行时防御与 HITL
@@ -86,7 +87,7 @@
 ### 5. 全链路审计与零成本 CI 确定性测试
 
 * **全生命周期记账**：共享 `trace_id` 经 ContextVar 贯穿路由、执行、质检全流程，协作层自身的 Token 与延迟也纳管记账；`budget_guard` 会话级成本熔断（`BUDGET_SESSION_LIMIT_USD`）；审计 WAL 写成链（`prev_hash` / `entry_hash`，能指出第一个被改过的行号——tamper-evident，不是 tamper-proof）。
-* **离线确定性保障**：Mock 协作 / 任务 LLM 与真机调合同构，CI 在 100% 零网络、零 Token 消耗下完成拓扑与流式验证，沉淀 **1388 passed / 4 skipped**。
+* **离线确定性保障**：Mock 协作 / 任务 LLM 与真机调合同构，CI 在 100% 零网络、零 Token 消耗下完成拓扑、流式链路与存储契约验证；具体测试数由当次 `pytest` 输出为准，不在 README 固化易漂移的数字。
 
 ---
 
@@ -145,11 +146,12 @@ flowchart TD
 多 Agent 协作线（ADR-022）是**另一张**真实运行的图，默认关闭、显式入口：
 
 ```text
-plan ──▶ dispatch ──▶ Send 扇出并发 ──▶ execute_expert ×N ──▶ critic ──▶ summarize
+plan ──▶ dispatch ──▶ Send 派 ready 子任务 ──▶ execute_expert ×N ──▶ dispatch
              ▲                                                    │
              └────────────────────────────────────────────────────┘
-                 Send 扇出：多个 execute_expert 在同一 superstep 并发执行；
-                 revise 回边只重跑 targets 子任务（有界 COLLAB_MAX_ROUNDS=2），其余产出保留
+                 同层 execute_expert 并发执行；所有依赖层完成后才进 critic
+                 revise 会重跑 targets 及其全部下游（有界 COLLAB_MAX_ROUNDS=2），
+                 无关分支的产出保留
 
 之后汇入同一条治理链：evaluate ──▶ guard ──▶ prepare_hitl ──▶ await_human ──▶ deliver
 收口节点：blocked / rejected / failed
@@ -172,6 +174,24 @@ plan ──▶ dispatch ──▶ Send 扇出并发 ──▶ execute_expert ×N
 - **能失败**：任务先跑一次 fail-first（基线必须红），agent 跑完再由固定验证命令判决；`fail` / `budget_exhausted` / `error` 是三种不同的结局，不当成同一种东西。
 - **防作弊靠还原**：验证前把测试文件还原到任务定义的 test patch 版本，并删掉 `tests/` 下新增的未跟踪文件。
 
+### 可验证实验台（Experiment Bench）
+
+剂量曲线之外，`bench/experiment/` 把每次执行统一落成
+`Experiment → Trial → Run Record`：任务、模型与配置快照、真实 prompt 指纹、计划与依赖、
+Critic/Guard/HITL 结果、token/成本/工具账本、工作区执行前后指纹都在同一条记录里。
+每条 Trial 独立写本地不可变 JSON，重复 Experiment ID 或覆盖旧 Trial 会直接失败。
+
+```powershell
+$verify = @("python", "-m", "pytest", "-q") | ConvertTo-Json -Compress
+.\.venv\Scripts\python.exe bench/run_experiment.py collab `
+  --task "读取 README.md 并总结" --mode mock --workspace . `
+  --verify-command-json $verify --out .bench-experiments/readme-check
+```
+
+本地真模型用 `--mode live --provider local --model qwen2.5:3b`；受控复跑传
+`--compare-to <baseline>/experiment.json`。完整 schema、比较语义与适配器边界见
+[multi-agent-experiment-bench.md](docs/multi-agent-experiment-bench.md)。
+
 ### 第一轮真实曲线（2026-10-19）
 
 模型 `nvidia/nemotron-3-super-120b-a12b`（免费端点，`temperature=1.0`），2 题 × 4 档 × 1 次：
@@ -190,6 +210,30 @@ plan ──▶ dispatch ──▶ Send 扇出并发 ──▶ execute_expert ×N
 > **这是方向性证据，不是统计结论**：`repeats=1`（报告里每个格子都标 `under_sampled`）、只有 2 题。单个 pass/fail 翻转就足以改变任何一列。
 
 复现：`uv run python bench/run_curve.py --tasks 988fccb a746b81 --repeats 3`（**真花钱、不进 CI**），归档在 `.bench-work/`（不入库）。
+
+### 正式批次结论（结论日期 2026-10-24）
+
+**口径**：v5 B1（采集 2026-10-23）授权分析 + v5/v8 B1/B3 四批次
+（2026-10-23 至 2026-10-24）384 条 Run Record 全量对账。
+只有 v5 B1 满足 `analysis_authorized=true`；v8 B1 被 L3 有效样本门禁挡住，
+v8 B3 存在 17 个截断 `error`。四批次全部对账通过，但对账 ≠ 授权分析。
+
+| 批次 | 结论 | L0 token | L2 token | L3 token |
+| :--- | :--- | ---: | ---: | ---: |
+| v5 B1（授权分析） | 四 arm 通过率均 0%，L3−L0 配对差 0.0，p=1.0 | 67,884 | 705,993 | 538,632 |
+| v8 B1 | 不可授权分析；L0 通过率 0% | 95,582 | 1,410,024 | 705,529 |
+
+**读法必须精确**：L0 通过率本身为 0%，所以"配对差 0.0"不能解读为
+"多智能体无增益"，只能解读为"当前模型与任务集下基线贴地板，增益不可测量"。
+不受地板效应污染的硬数字是 token 倍率：L2/L3 相对 L0 消耗 **7.9–14.8 倍**。
+**0 可测增益 × 8–15 倍成本**，是协作默认关闭的直接依据；默认开启的前提是
+基线通过率脱离地板后，新批次给出配对检验显著为正。
+
+这条教训已固化为 pilot 区分度门禁（`scripts/verify_pilot_runtime.py`）：
+正式批次授权前，基线 arm 必须有足够有效样本且通过率不得贴 0%/100%；
+落在 20%–80% 建议区间外会产生功效警告。v8 当年的 pilot 只有 1 条 L0
+样本且全 fail，若该门禁当时存在，正式批次会在授权阶段被挡下，而不是
+跑满 96 条后才发现数据没有区分力。
 
 ---
 
@@ -261,20 +305,21 @@ moa-gateway/
 ├── bench/       # §5.0 agent 原语 + §5.1 带工具专家 + harness + 预算 B1/B3 + 报告聚合 + 任务定义（剂量曲线实验）
 ├── delivery/    # 定位与减法清单（对外口径的单一来源）+ 交付材料摘要
 ├── docs/
-│   ├── adr/                           # ADR-002 ~ ADR-023（22 份）
+│   ├── adr/                           # ADR-002 ~ ADR-025
 │   ├── archive/                       # 历史文档 9 份（未按此实施，见 archive/README.md）
 │   ├── multi-agent-collaboration.md # 协作链路架构与并发写治理说明
+│   ├── multi-agent-experiment-bench.md # Experiment/Trial/Run Record 契约与复跑语义
 │   └── retrieval-evaluation.md      # 检索 gold set、度量基线与精排止损归档
 ├── evals/       # 数据集与 run_evals.py（intent / guard / e2e / retrieval / hitl_feedback）
 ├── scripts/     # 演示与验收：run_collaboration / rag_case / compare_rerank / doctor / redteam …
-└── tests/       # 1388 单元测试 + 双引擎 Parity 对照集成测试
+└── tests/       # 单元、契约、双引擎 Parity 与外部存储集成测试
 ```
 
 ---
 
 ## 📑 核心架构决策记录 (ADR)
 
-项目所有核心演化遵循「决策先行、代码在后」原则，完整归档于 `docs/adr/`（adr-002 ~ adr-023，共 22 份）：
+项目所有核心演化遵循「决策先行、代码在后」原则，完整归档于 `docs/adr/`（adr-002 ~ adr-025）：
 
 | ADR 编号 | 核心决策主题 | 关键设计与约束 |
 | :---: | :--- | :--- |
@@ -288,29 +333,34 @@ moa-gateway/
 | **ADR-021** | 审批门禁的合并通道 | PR 合并必须过人工审批门，全程留痕（谁批的、批了什么、何时） |
 | **ADR-022** | 多 Agent 协作立项 | 解除 R6 冻结：Supervisor + `Send` fan-out + Critic 有界回边；不进主路径、默认关闭、复用同一套治理原语 |
 | **ADR-023** | bench 内的 agent 原语 | 工具+循环+目标+记忆+预算六要素齐备、**能失败**的执行体；自报（`AgentRun`）与判决（`RunResult`）分离；落 `bench/`、不动 `app/` |
+| **ADR-024** | PR Review 价值闭环 | 候选与发布分离；逐条五态反馈；Run generation 隔离；Comment-only 人工写回与固定 `R0/R1/R1+I` 评测 |
+| **ADR-025** | 多智能体实验 Run Record | 固定 `Experiment → Trial → Run Record`；每条 Trial 不可变落盘；真实 prompt 指纹、模型/配置/工作区快照与受控复跑比较共同构成验收面 |
 
 ---
 
 ## 🔀 垂直应用：PR 审查与合并门禁
 
-`apps/code_review_pipeline/` 内置 GitHub PR 多阶段审查流水线：Triage → 静态分析 → 语义 RAG → 测试覆盖 → 汇总报告。
+`apps/code_review_pipeline/` 内置 GitHub PR 审查流水线：Triage → 静态分析 → 语义 RAG → 测试覆盖 → 汇总报告。默认配置再加一层 **Review L1**：Report 产出的候选 finding 先由 Critic 逐条 `keep / revise / drop`，`revise` 只允许一次回边，随后经过 evidence gate 才能进入人工逐条反馈。
 
 > [!IMPORTANT]
-> **口径说明**：这是**固定顺序的多阶段流水线**，不是"多智能体协同"——五个审查器由 `run()` 依次 `await`，彼此没有 handoff、没有并行调度，唯一的数据传递是上一阶段的产出喂给下一阶段。
+> **口径说明**：这条链路仍是**人工审批的 PR 审查助手**，不是自动合并门禁，也不是完整的 L2/L3 多智能体网络。R1 的 Critic 是一条有界回边；合并审批是另一条独立通道。
 
 - 入口：`POST /webhook/github/review`（GitHub webhook body）或指令 `/review` 后输入 `owner/repo#PR号`；无 `GITHUB_TOKEN` 时优雅降级，不崩溃。
 - 报告阶段出现 `critical` / `high` 发现，或 `medium` 发现 ≥3 条，或任一审查器返回无法解析的内容，即 `overall_need_human_review=True`，落库并进飞书卡片（2026-10-12 修复：此前该标记恒为 `False`，回归测试见 `tests/unit/test_review_hitl_escalation.py`）。
 - **合并是独立的经审批通道**（ADR-021，`CODE_REVIEW_MERGE_ENABLED=1`）：CI 绿 → 飞书弹审批卡片 → 人点批准 → 运行时合并 → 审计。合并必须过审批门，全程留痕。
+- 审查 finding 以候选、最终发布、Critic 丢弃和 superseded 状态落库；飞书逐条卡固定提供 `accepted_actionable` / `accepted_non_actionable` / `false_positive` / `duplicate` / `already_known` 五态。所有 finding 完成人工标注后，审批卡才允许写回 GitHub；写回固定为 `COMMENT`，不会自动批准或合并。
+- 固定评测语料、R0/R1/R1+I runner 与报告器见 [review-value-loop.md](docs/review-value-loop.md) 与 [review_pr_corpus.json](evals/datasets/review_pr_corpus.json)。当前尚未产生质量结论；这些离线历史样本也不是持续用户规模。
 
 ---
 
 ## 🧪 质量保障与门禁
 
 ```bash
-pytest tests/unit -q                          # 1388 passed / 4 skipped（零网络零 token）
+pytest tests/unit -q                          # 零网络零 token；以本地实际收集结果为准
 ruff check .                                  # 代码风格
 bandit -r app -q -s B105,B107,B110,B112,B324  # 安全扫描
 python evals/run_evals.py --offline           # e2e 真跑业务链路（真 pipeline + 正则路由 + mock agent）
+python bench/run_experiment.py collab --task "读取 README.md" --mode mock --workspace .
 python scripts/redteam/run_redteam.py         # 200 条对抗用例，零网络约 1 秒，CI 硬门禁
 python scripts/compare_rerank.py              # 精排 off/on 前后对比（gold set 23 条）
 ```
@@ -327,7 +377,7 @@ GitHub Actions CI（Python 3.12）依次执行：pytest → ruff → 防源码�
 - **HITL 不跨重启**：会话状态在进程内、挂起记录在 Redis，重启后未决审批按 ADR-012 惰性作废（审计 `hitl_expired`）并告知用户——这是有意为之，要么接外部状态存储，要么承认它只在进程生命周期内有效。
 - **同会话是排队的，不是并行的**：`MoAPipeline.run` 整个请求生命周期独占该会话（先到先处理，跨会话完全并行）——同会话并发投喂过去会撞出 `invalid_state_transition` 500，现在改为排队。代价是同一会话里一条慢请求会挡住下一条（LLM 超时上限之内）；不限流的匿名请求共用同一把锁（ADR-016 §五）。
 - **OTel 是预留接口，不是链路**：全仓只有 2 个 span、未声明 exporter 依赖，设了端点也只落到 console。
-- **协作链路五条边界**（ADR-022）：不进意图路由、不驱动会话 FSM、`depends_on` 只记录不调度、checkpointer 是进程内 `InMemorySaver`、`COLLAB_LLM=litellm` 解析失败会降级规则式 mock。
+- **协作链路边界**（ADR-022）：不进意图路由、不驱动会话 FSM、checkpointer 是进程内 `InMemorySaver`、`COLLAB_LLM=litellm` 解析失败会降级规则式 mock；`depends_on` 已按依赖波次真实调度，工作区工具必须显式配置 `COLLAB_WORKSPACE_ROOT`。
 - **成本量化本地不可验**：`avg_cost_usd` 恒 0（本地 Ollama 不计费）；`hitl_feedback` 4 条全是本地模拟种子，介入率无统计意义。
 - **评测没有"本次 vs 上次"的基线对比**：报告覆盖写且不入库，结论目前不回流到任何决策点——这是"改进闭环"缺失的如实记录。
 - 更完整的边界与残留项见各 ADR 的「后果 / 残留」节与 `delivery/` 文档；所有密钥经环境变量注入，`.env` / `logs/` / `data/` / `evals/reports/` 不入库。
@@ -337,5 +387,5 @@ GitHub Actions CI（Python 3.12）依次执行：pytest → ruff → 防源码�
 <div align="center">
 <sub><b>Python 3.12 · FastAPI · LangGraph · Redis · pgvector · Elasticsearch · uv</b></sub>
 <br>
-<sub>本 README 的每个定量声明都可用上文命令在本地复现（bench 曲线那条真花钱） · 架构决策归档于 docs/adr/（22 份）</sub>
+<sub>本 README 的每个定量声明都可用上文命令在本地复现（bench 曲线那条真花钱） · 架构决策归档于 docs/adr/（24 份）</sub>
 </div>

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import time
@@ -100,6 +102,11 @@ class ChatResult:
     messages: list[dict[str, Any]]
     content: str
     tool_calls: list[dict[str, Any]]
+    #: Provider 的停止原因。``length`` 表示输出额度耗尽；对推理模型来说它可能
+    #: 意味着 token 全花在 reasoning 上，最终 ``content`` 为空。
+    finish_reason: str = ""
+    #: reasoning 只保留长度，不把可能很长的思维链带进 Run Record。
+    reasoning_chars: int = 0
 
 
 def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
@@ -135,12 +142,56 @@ def _message_dict(message: Any) -> dict[str, Any]:
     return result
 
 
+def _prompt_hash(messages: list[dict], tools: list[dict] | None) -> str:
+    """Hash the exact request context without model/runtime metadata."""
+    payload = {"messages": messages, "tools": tools or []}
+    raw = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 class LLMClient:
     """Async LLM client backed by LiteLLM with model fallback and cost tracking."""
 
     def __init__(self, config: LLMConfig | None = None) -> None:
         self.config = config or LLMConfig()
         self.last_metrics: dict[str, Any] = {}
+        self._usage_totals: dict[str, Any] = self._empty_usage()
+
+    @staticmethod
+    def _empty_usage() -> dict[str, Any]:
+        return {
+            "llm_calls": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cost_usd": 0.0,
+            "llm_latency_ms": 0.0,
+            "models_used": {},
+            "prompt_hashes": [],
+        }
+
+    @property
+    def usage_totals(self) -> dict[str, Any]:
+        """本 client 自上次 reset 以来的累计用量。
+
+        实验记录不能在最后一轮调用后读 ``last_metrics``：多 Trial、工具循环与
+        supervisor/critic 会让最后一次覆盖前面所有调用。这里在每次调用完成的
+        同步段累计，供 Run Record 取整次 Trial 的账本。
+        """
+        return {
+            **self._usage_totals,
+            "models_used": dict(self._usage_totals.get("models_used") or {}),
+            "prompt_hashes": list(self._usage_totals.get("prompt_hashes") or ()),
+        }
+
+    def reset_usage(self) -> None:
+        self._usage_totals = self._empty_usage()
+        self.last_metrics = {}
 
     async def chat(
         self,
@@ -187,10 +238,15 @@ class LLMClient:
         updated_messages.append(assistant_message)
         tool_calls = assistant_message.get("tool_calls") or []
         content = "" if tool_calls else (assistant_message.get("content") or "")
+        reasoning = _get_attr(message, "reasoning_content", None) or _get_attr(
+            message, "reasoning", None
+        )
         return ChatResult(
             messages=updated_messages,
             content=content,
             tool_calls=tool_calls,
+            finish_reason=str(_get_attr(choice, "finish_reason", "") or ""),
+            reasoning_chars=len(str(reasoning or "")),
         )
 
     async def _acompletion(
@@ -205,6 +261,7 @@ class LLMClient:
     ) -> tuple[Any, str]:
         primary = model or self.config.model
         candidates = [primary, *self.config.fallback_models]
+        prompt_hash = _prompt_hash(messages, tools)
         last_exc: Exception | None = None
         start = time.monotonic()
         for candidate in candidates:
@@ -220,7 +277,13 @@ class LLMClient:
                 litellm_module = _get_litellm()
                 response = await litellm_module.acompletion(**kwargs)
                 fallback_used = candidate if candidate != primary else ""
-                self._record_metrics(response, candidate, fallback_used, start)
+                self._record_metrics(
+                    response,
+                    candidate,
+                    fallback_used,
+                    start,
+                    prompt_hash=prompt_hash,
+                )
                 return response, candidate
             except Exception as exc:
                 last_exc = exc
@@ -244,9 +307,13 @@ class LLMClient:
             "max_tokens": max_tokens or self.config.max_tokens,
             "temperature": temperature if temperature is not None else self.config.temperature,
             "stream": False,
+            # Retries are owned by LLMClient's fallback and the agent loop. Letting
+            # LiteLLM retry as well multiplies latency and hides the real attempt
+            # count (for example, 300s becomes roughly 900s before we see failure).
+            "num_retries": 0,
             # 调用方可覆盖单次超时（意图路由用它把超时"传进去"而不是从外部取消——
             # 外部取消会让 litellm 留下未 await 的内部协程，见 ADR-016/第十二轮）。
-            # 注意语义：timeout 是**每次尝试**的上限，fallback 链最坏 (1+N)*timeout。
+            # 注意语义：timeout 是**每个候选模型**的上限，fallback 链最坏 (1+N)*timeout。
             "timeout": timeout if timeout is not None else self.config.timeout,
         }
         custom_provider = self._custom_provider_for(model)
@@ -295,10 +362,17 @@ class LLMClient:
         model: str,
         fallback_used: str,
         start: float,
+        *,
+        prompt_hash: str,
     ) -> None:
         usage = _get_attr(response, "usage", None)
+        choice = _get_attr(response, "choices", [None])[0]
+        message = _get_attr(choice, "message", None)
         prompt_tokens = int(_get_attr(usage, "prompt_tokens", 0) or 0)
         completion_tokens = int(_get_attr(usage, "completion_tokens", 0) or 0)
+        reasoning = _get_attr(message, "reasoning_content", None) or _get_attr(
+            message, "reasoning", None
+        )
         cost_usd = 0.0
         litellm_module = _get_litellm()
         try:
@@ -321,7 +395,20 @@ class LLMClient:
             "fallback_used": fallback_used,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
+            "prompt_hash": prompt_hash,
+            "finish_reason": str(_get_attr(choice, "finish_reason", "") or ""),
+            "reasoning_chars": len(str(reasoning or "")),
         }
+        self._usage_totals["llm_calls"] += 1
+        self._usage_totals["prompt_tokens"] += prompt_tokens
+        self._usage_totals["completion_tokens"] += completion_tokens
+        self._usage_totals["cost_usd"] += cost_usd
+        self._usage_totals["llm_latency_ms"] += float(
+            self.last_metrics["llm_latency_ms"]
+        )
+        models = self._usage_totals["models_used"]
+        models[model] = int(models.get(model, 0) or 0) + 1
+        self._usage_totals["prompt_hashes"].append(prompt_hash)
 
     async def aclose(self) -> None:
         return None

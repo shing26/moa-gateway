@@ -2,7 +2,7 @@
 
 日期：2026-10-09
 状态：已实施
-关联：ADR-008（LangGraph 第二引擎，保持冻结）、ADR-016（剩余台账：精排与分块触发线）、ADR-020（混合检索与 gold set 验收）、`delivery/定位与减法清单.md`
+关联：ADR-008（LangGraph 第二引擎，保持冻结）、ADR-016（剩余台账：精排与分块触发线）、ADR-020（混合检索与 gold set 验收）、ADR-025（实验 Run Record）、`delivery/定位与减法清单.md`
 
 ## 背景
 
@@ -97,3 +97,18 @@ R6（多级 supervisor）在 `docs/archive/高层架构设计.md` 与 `docs/arch
 5. **CI 只门禁"检索维度真的跑过"，不设质量阈值**。23 条 gold set 上一行标注
    就是 4.3 个百分点，拿单次实测当阈值会让 CI 在合法增删标注时误红。
    加入条件写在 `docs/retrieval-evaluation.md`。
+
+## 后续实装（2026-10-21）
+
+原边界第 4 条已被实现取代：
+
+- `dispatch` 改为依赖波次调度：只派前置 `completed_round` 已满足
+  `required_round` 的 ready 子任务；无 ready 项时显式以循环依赖失败收口。
+- 下游专家的 `agent_local_slot["collab_dependency_outputs"]` 携带直接前置产物；
+  Critic 打回时目标及传递下游进入新轮次，无关分支保留。
+- 业务 `coder` / `general` 在显式提供 `workspace_path` 时切换到工作区工具集；
+  宿主访问边界由 `COLLAB_WORKSPACE_ROOT` 控制。
+- 流式 `__interrupt__` 帧规范化为 JSON-safe 的
+  `{"interrupts": [...]}`，不再把 LangGraph 的 `Interrupt` 元组强转 dict。
+- 新增 opt-in 本地 `qwen2.5:3b` 活体 smoke，验证 plan、专家工具调用、
+  Critic 与治理交付在同一条真实链路上完成；默认 CI 不访问网络。
