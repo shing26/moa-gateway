@@ -8,8 +8,10 @@
 from __future__ import annotations
 
 import logging
+import os
 # Fixed verification commands require a process boundary; task argv is never shell-expanded.
 import subprocess  # nosec B404
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +42,32 @@ def build_env(workspace: Path, base: Mapping[str, str] | None = None) -> dict[st
     return env
 
 
+def build_verify_env(
+    workspace: Path,
+    base: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the env used by the fixed verification command.
+
+    ``build_env`` is also a public harness contract and must remain a pure
+    allowlist. Verification is narrower: it must run with the Python toolchain
+    that launched the agent, because the copied workspace intentionally has no
+    ``.venv``.
+    """
+    env = build_env(workspace, base=base)
+    # Verification workspaces never contain .venv. Keep the interpreter that
+    # launched the agent ahead of the host PATH so `python -m pytest` resolves
+    # to the same toolchain even when several Python installs are present.
+    if sys.prefix != sys.base_prefix:
+        venv_bin = Path(sys.prefix) / ("Scripts" if os.name == "nt" else "bin")
+        if venv_bin.is_dir():
+            current = env.get("PATH", "")
+            env["PATH"] = (
+                f"{venv_bin}{os.pathsep}{current}" if current else str(venv_bin)
+            )
+            env["VIRTUAL_ENV"] = sys.prefix
+    return env
+
+
 def run_command(
     argv: Sequence[str],
     *,
@@ -57,7 +85,7 @@ def run_command(
         proc = subprocess.run(  # noqa: S603  # nosec B603
             list(argv),
             cwd=str(cwd),
-            env=build_env(cwd),
+            env=build_verify_env(cwd),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -96,4 +124,4 @@ def _clip(text: str, limit: int) -> str:
     return f"{text[:head]}\n…（中略 {len(text) - limit} 字符）…\n{text[-tail:]}"
 
 
-__all__ = ["CommandResult", "build_env", "run_command"]
+__all__ = ["CommandResult", "build_env", "build_verify_env", "run_command"]
