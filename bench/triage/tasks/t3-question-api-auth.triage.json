@@ -1,0 +1,8 @@
+{
+  "task_id": "t3-question-api-auth",
+  "issue_text": "请问 API 支持用 API Key 认证吗？文档里只写了 OAuth，但我想在 CI 里用，OAuth 不方便。如果没有，有计划吗？",
+  "expected_category": "question",
+  "expected_priority": "P2",
+  "expected_route": "auto",
+  "note": "询问现状与计划，无代码缺陷 → question；CI 集成受阻但非故障 → P2；不触发人工条件 → auto。"
+}

@@ -14,6 +14,7 @@ from apps.code_review_pipeline.storage.review_store import (
     PostgresReviewStore,
     ReviewRecord,
     ReviewStore,
+    StaleReviewTrace,
     TaskNotFound,
 )
 from apps.code_review_pipeline.task_state import (
@@ -24,7 +25,13 @@ from apps.code_review_pipeline.task_state import (
 
 IDENTITY = ("org/app", 7, "sha1")
 
-TASK_METHODS = ("get_task_state", "claim_task", "transition_task")
+TASK_METHODS = (
+    "get_task_state",
+    "claim_task",
+    "transition_task",
+    "start_review_run",
+    "get_review_run_id",
+)
 
 
 def _record(identity: tuple[str, int, str]) -> ReviewRecord:
@@ -97,6 +104,47 @@ def test_happy_path_through_store() -> None:
     assert store.transition_task(IDENTITY, "request_approval") == "waiting_approval"
     assert store.transition_task(IDENTITY, "approve") == "posting"
     assert store.transition_task(IDENTITY, "complete") == "done"
+
+
+def test_transition_rejects_stale_trace_atomically() -> None:
+    store = ReviewStore()
+    old = _record(IDENTITY)
+    store.save(old)
+    store.claim_task(IDENTITY)
+    store.transition_task(IDENTITY, "request_approval")
+
+    newer_identity = ("org/app", 7, "sha2")
+    newer = _record(newer_identity)
+    store.save(newer)
+
+    with pytest.raises(StaleReviewTrace):
+        store.transition_task(
+            IDENTITY,
+            "approve",
+            expected_trace_id=old.trace_id,
+            require_current_trace=True,
+        )
+    assert store.get_task_state(IDENTITY) == TaskState.WAITING_APPROVAL.value
+
+
+def test_transition_rejects_stale_run_within_same_trace() -> None:
+    store = ReviewStore()
+    record = _record(IDENTITY)
+    store.save(record)
+    store.claim_task(IDENTITY)
+    store.start_review_run(IDENTITY, "run-old")
+    store.transition_task(IDENTITY, "request_approval")
+    store.start_review_run(IDENTITY, "run-new")
+
+    with pytest.raises(StaleReviewTrace, match="stale review run"):
+        store.transition_task(
+            IDENTITY,
+            "approve",
+            expected_trace_id=record.trace_id,
+            require_current_trace=True,
+            expected_review_run_id="run-old",
+        )
+    assert store.get_review_run_id(record.trace_id) == "run-new"
 
 
 def test_terminal_task_cannot_be_reclaimed() -> None:

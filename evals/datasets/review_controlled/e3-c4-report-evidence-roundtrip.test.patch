@@ -1,0 +1,59 @@
+diff --git a/apps/code_review_pipeline/agents/report_agent.py b/apps/code_review_pipeline/agents/report_agent.py
+--- a/apps/code_review_pipeline/agents/report_agent.py
++++ b/apps/code_review_pipeline/agents/report_agent.py
+@@ -75,7 +75,6 @@ def _parse_report(raw: str, *, trace_id: str) -> AgentFindingResult:
+                 suggestion=str(item.get("suggestion", "")),
+                 confidence=float(item.get("confidence", 0.0) or 0.0),
+                 team_specific=bool(item.get("team_specific", False)),
+-                evidence=tuple(item.get("evidence", []) or []),
+             )
+         )
+     return AgentFindingResult(
+diff --git a/tests/unit/test_e3_report_evidence.py b/tests/unit/test_e3_report_evidence.py
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/test_e3_report_evidence.py
+@@ -0,0 +1,43 @@
++from __future__ import annotations
++
++import asyncio
++import json
++
++from app.agents.contract import AgentEnvelope
++from apps.code_review_pipeline.agents.report_agent import ReportAgent
++
++
++def test_report_keeps_citations_for_later_verification() -> None:
++    class FakeLLM:
++        async def chat(self, messages):
++            return json.dumps(
++                {
++                    "findings": [
++                        {
++                            "id": "final-1",
++                            "severity": "high",
++                            "category": "logic",
++                            "file": "app/service.py",
++                            "line": 12,
++                            "title": "Guard is skipped",
++                            "description": "A request can bypass the guard.",
++                            "suggestion": "Apply the guard before dispatch.",
++                            "confidence": 0.9,
++                            "evidence": ["diff:app/service.py:12"],
++                        }
++                    ],
++                    "summary": "issue found",
++                    "recommendation": "request_changes",
++                }
++            )
++
++    envelope = AgentEnvelope(
++        trace_id="e3-c4",
++        session_id="test",
++        user_raw_input="",
++        global_summary="",
++        agent_local_slot={},
++        history=(),
++    )
++    result = asyncio.run(ReportAgent(llm=FakeLLM()).execute(envelope))
++    assert result.findings[0].evidence == ("diff:app/service.py:12",)

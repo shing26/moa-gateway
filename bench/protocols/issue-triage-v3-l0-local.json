@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "protocol_id": "issue-triage",
+  "version": "v3-l0-local-qwen25-3b-temp0-512",
+  "frozen_at": "2026-10-25",
+  "tasks": [
+    {"task_id": "t1-crash-on-startup", "origin": "E3", "task_file": "bench/triage/tasks/t1-crash-on-startup.triage.json"},
+    {"task_id": "t2-feature-dark-mode", "origin": "E3", "task_file": "bench/triage/tasks/t2-feature-dark-mode.triage.json"},
+    {"task_id": "t3-question-api-auth", "origin": "E3", "task_file": "bench/triage/tasks/t3-question-api-auth.triage.json"},
+    {"task_id": "t4-docs-broken-link", "origin": "E3", "task_file": "bench/triage/tasks/t4-docs-broken-link.triage.json"},
+    {"task_id": "t5-privacy-data-leak", "origin": "E3", "task_file": "bench/triage/tasks/t5-privacy-data-leak.triage.json"},
+    {"task_id": "t6-funding-deduct-error", "origin": "E3", "task_file": "bench/triage/tasks/t6-funding-deduct-error.triage.json"},
+    {"task_id": "t7-unclear-crash-report", "origin": "E3", "task_file": "bench/triage/tasks/t7-unclear-crash-report.triage.json"},
+    {"task_id": "t8-docs-api-reference-outdated", "origin": "E3", "task_file": "bench/triage/tasks/t8-docs-api-reference-outdated.triage.json"}
+  ],
+  "arms": [
+    {"name": "L0", "version": "v1", "description": "单体 ReAct 循环（L0-only：多档在本配置下被 v2-r1 有效样本门禁拦截，重进多档须新协议重过 pilot）"}
+  ],
+  "model": {
+    "provider": "local",
+    "model": "qwen2.5:3b",
+    "base_url": "http://127.0.0.1:11434/v1",
+    "temperature": 0.0,
+    "timeout": 120.0,
+    "max_tokens": 512,
+    "cost_signal": false
+  },
+  "budget": {
+    "axis": "tokens",
+    "b1": {
+      "max_cost_usd": null,
+      "max_steps": 12,
+      "max_tokens": 60000
+    },
+    "b3": {
+      "max_cost_usd": null,
+      "max_steps": 36,
+      "max_tokens": 180000
+    }
+  },
+  "repeats": {"pilot": 1, "baseline": 1, "formal": 3},
+  "retry": {
+    "max_error_retries": 1,
+    "retry_on": ["error"],
+    "do_not_retry_on": ["fail", "budget_exhausted"]
+  },
+  "exclusions": {
+    "excluded_outcomes": ["error"],
+    "exclude_from_pass_rate": ["error"],
+    "invalid_task_fails_first": true
+  },
+  "reporting": {
+    "statistical_claims": false,
+    "directional_until_samples": 3,
+    "primary_metric": "pass_rate",
+    "cost_unavailable_reason": "本地 Ollama 端点没有美元成本信号，报告使用 token 轴；L0-only 无比较对象，不做配对声明",
+    "group_by": ["task_origin", "arm"]
+  },
+  "scope": {
+    "claim": "该配置下 Issue 分诊 L0 基线通过率与成本；不含多档比较",
+    "decision_fields": ["category", "route"],
+    "recorded_only": ["priority"],
+    "multi_arm_comparison": false
+  }
+}

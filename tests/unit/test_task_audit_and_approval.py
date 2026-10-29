@@ -10,7 +10,12 @@ from typing import Any
 
 import pytest
 
-from apps.code_review_pipeline.approval import approve_task, reject_task
+from apps.code_review_pipeline.approval import (
+    FeedbackIncomplete,
+    PublishInProgress,
+    approve_task,
+    reject_task,
+)
 from apps.code_review_pipeline.task_audit import (
     AGENT_NAMES,
     HUMAN_DECISION_AGENT,
@@ -111,19 +116,56 @@ async def test_human_decision_records_who(collector: _Collector) -> None:
     assert entry.extra["decision"] == "approve"
 
 
+@pytest.mark.asyncio
+async def test_human_decision_records_delivery_reconciliation_metadata(
+    collector: _Collector,
+) -> None:
+    await record_human_decision(
+        TASK_ID,
+        REPO,
+        operator="alice",
+        decision="approve_change:bundle-1",
+        run_id="run-1",
+        trace_id=TASK_ID,
+        bundle_hash="bundle-1",
+    )
+
+    entry = collector.entries[0]
+    assert entry.extra["run_id"] == "run-1"
+    assert entry.extra["trace_id"] == TASK_ID
+    assert entry.extra["bundle_hash"] == "bundle-1"
+
+
 class FakeStore:
     def __init__(self) -> None:
         self.posted_review_id: str | None = None
+        self.state = "waiting_approval"
         self.transitions: list[str] = []
+        self.transition_metadata: list[dict[str, Any]] = []
 
     def get_posted_review_id(self, identity: tuple[str, int, str]) -> str | None:
         return self.posted_review_id
 
+    def get_task_state(self, identity: tuple[str, int, str]) -> str:
+        return self.state
+
     def set_posted_review_id(self, identity: tuple[str, int, str], review_id: str) -> None:
         self.posted_review_id = review_id
 
-    def transition_task(self, identity: tuple[str, int, str], action: str) -> str:
+    def transition_task(
+        self,
+        identity: tuple[str, int, str],
+        action: str,
+        **kwargs: Any,
+    ) -> str:
         self.transitions.append(action)
+        self.transition_metadata.append(dict(kwargs))
+        self.state = {
+            "approve": "posting",
+            "complete": "done",
+            "fail": "failed",
+            "reject": "rejected",
+        }.get(action, self.state)
         return action
 
 
@@ -141,6 +183,20 @@ class FakeGitHub:
         return {"id": 4242}
 
 
+class FlakyGitHub(FakeGitHub):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next = True
+
+    async def create_review(
+        self, repo: Any, pr_number: int, body: str, *, event: str = "COMMENT"
+    ) -> dict[str, Any]:
+        if self.fail_next:
+            self.fail_next = False
+            raise RuntimeError("github unavailable")
+        return await super().create_review(repo, pr_number, body, event=event)
+
+
 @pytest.mark.asyncio
 async def test_approve_posts_records_id_and_completes(
     collector: _Collector,
@@ -156,14 +212,20 @@ async def test_approve_posts_records_id_and_completes(
 
 
 @pytest.mark.asyncio
-async def test_approve_writes_audit_before_posting(collector: _Collector) -> None:
-    """审计先于写回：崩在中间不能留下"已批准但无记录"。"""
+async def test_approve_persists_operator_before_external_audit(
+    collector: _Collector,
+) -> None:
+    """并发下只有一个动作能抢占状态，且 operator 随权威状态落库。"""
     store = FakeStore()
     gh = FakeGitHub()
     await approve_task(store, gh, IDENTITY, TASK_ID, operator="alice")
-    kinds = [e.agent_name for e in collector.entries]
-    assert kinds[0] == HUMAN_DECISION_AGENT
-    assert LIFECYCLE_AGENT in kinds
+    assert store.transition_metadata[0]["expected_trace_id"] == TASK_ID
+    assert store.transition_metadata[0]["metadata"] == {
+        "operator": "alice",
+        "decision": "approve",
+    }
+    kinds = [entry.agent_name for entry in collector.entries]
+    assert kinds[:2] == [HUMAN_DECISION_AGENT, LIFECYCLE_AGENT]
 
 
 @pytest.mark.asyncio
@@ -216,6 +278,88 @@ async def test_approve_twice_is_idempotent_not_a_crash(collector: _Collector) ->
     assert again.review_id == "4242"
     assert len(gh.posted) == 1, "第二次批准又发了一条评论"
 
+
+@pytest.mark.asyncio
+async def test_approve_repairs_a_recorded_review_stranded_in_posting(
+    collector: _Collector,
+) -> None:
+    store = FakeStore()
+    store.posted_review_id = "4242"
+    store.state = "posting"
+    gh = FakeGitHub()
+
+    outcome = await approve_task(store, gh, IDENTITY, TASK_ID, operator="alice")
+
+    assert outcome.status == "already_posted"
+    assert outcome.review_id == "4242"
+    assert store.transitions == ["complete"]
+    assert gh.posted == []
+
+
+@pytest.mark.asyncio
+async def test_approve_retries_after_github_failure_without_duplicate_audit(
+    collector: _Collector,
+) -> None:
+    store = FakeStore()
+    gh = FlakyGitHub()
+
+    with pytest.raises(RuntimeError, match="github unavailable"):
+        await approve_task(store, gh, IDENTITY, TASK_ID, operator="alice")
+
+    assert store.state == "posting"
+    assert store.posted_review_id is None
+    assert store.transitions == ["approve"]
+
+    outcome = await approve_task(store, gh, IDENTITY, TASK_ID, operator="alice")
+
+    assert outcome.status == "posted"
+    assert store.transitions == ["approve", "complete"]
+    assert len(gh.posted) == 1
+    kinds = [entry.agent_name for entry in collector.entries]
+    assert kinds == [HUMAN_DECISION_AGENT, LIFECYCLE_AGENT, LIFECYCLE_AGENT]
+
+
+@pytest.mark.asyncio
+async def test_approve_refuses_github_write_when_audit_append_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeStore()
+    gh = FakeGitHub()
+
+    async def _broken_audit(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("audit unavailable")
+
+    monkeypatch.setattr(
+        "apps.code_review_pipeline.approval.record_human_decision",
+        _broken_audit,
+    )
+
+    with pytest.raises(RuntimeError, match="audit unavailable"):
+        await approve_task(store, gh, IDENTITY, TASK_ID, operator="alice")
+
+    assert store.transitions == ["approve", "fail"]
+    assert store.state == "failed"
+    assert gh.posted == []
+    assert store.posted_review_id is None
+
+
+@pytest.mark.asyncio
+async def test_approve_refuses_when_another_publisher_holds_the_lease() -> None:
+    store = FakeStore()
+
+    def _claim(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    store.claim_publish_attempt = _claim  # type: ignore[attr-defined]
+    gh = FakeGitHub()
+
+    with pytest.raises(PublishInProgress, match="lease"):
+        await approve_task(store, gh, IDENTITY, TASK_ID, operator="alice")
+
+    assert store.transitions == ["approve"]
+    assert gh.posted == []
+
+
 @pytest.mark.asyncio
 async def test_reject_never_posts(collector: _Collector) -> None:
     """拒绝后不写任何评论：人已经否掉了，再留言只是噪声。"""
@@ -225,3 +369,87 @@ async def test_reject_never_posts(collector: _Collector) -> None:
     assert gh.posted == []
     assert store.posted_review_id is None
     assert store.transitions == ["reject"]
+
+
+@pytest.mark.asyncio
+async def test_approve_requires_every_published_finding_to_be_human_labelled(
+    collector: _Collector,
+) -> None:
+    from apps.code_review_pipeline.schemas.feedback import (
+        FindingFeedback,
+        persisted_finding_from_result,
+    )
+    from apps.code_review_pipeline.schemas.pipeline import Finding
+    from apps.code_review_pipeline.storage.review_store import ReviewRecord, ReviewStore
+
+    store = ReviewStore()
+    record = ReviewRecord(
+        trace_id=TASK_ID,
+        repo=REPO,
+        pr_number=42,
+        head_sha="abc1234",
+        author="dev",
+        findings_count=1,
+        need_human_review=True,
+        raw={},
+    )
+    finding = persisted_finding_from_result(
+        trace_id=TASK_ID,
+        agent="report",
+        finding=Finding(
+            id="f1",
+            severity="high",
+            category="logic",
+            file="app/x.py",
+            line=1,
+            title="bug",
+            description="desc",
+            suggestion="fix",
+            evidence=("diff",),
+        ),
+    )
+    store.save_review(record, (finding,))
+    assert store.claim_task(IDENTITY) is True
+    store.transition_task(IDENTITY, "request_approval")
+
+    with pytest.raises(FeedbackIncomplete, match="0/1"):
+        await approve_task(
+            store,
+            FakeGitHub(),
+            IDENTITY,
+            TASK_ID,
+            operator="alice",
+            require_feedback=True,
+        )
+    assert store.get_posted_review_id(IDENTITY) is None
+
+    store.record_feedback(
+        FindingFeedback(
+            event_id="evt-human",
+            trace_id=TASK_ID,
+            finding_uid=finding.finding_uid,
+            disposition="accepted_actionable",
+            reason_code="",
+            actor="alice",
+        )
+    )
+    outcome = await approve_task(
+        store,
+        FakeGitHub(),
+        IDENTITY,
+        TASK_ID,
+        operator="alice",
+        findings=(
+            {
+                "severity": "high",
+                "file": "app/x.py",
+                "line": 1,
+                "title": "bug",
+                "description": "desc",
+                "suggestion": "fix",
+                "evidence": ["diff"],
+            },
+        ),
+        require_feedback=True,
+    )
+    assert outcome.status == "posted"

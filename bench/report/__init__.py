@@ -15,6 +15,14 @@ from bench.report.aggregate import (
     load_rows_dir,
     render_markdown,
 )
+from bench.report.statistics import (
+    ModelArmSummary,
+    PairedComparison,
+    PairedTask,
+    model_arm_matrix,
+    paired_pass_rate_comparison,
+    render_paired_markdown,
+)
 
 __all__ = [
     "ARM_ORDER",
@@ -24,10 +32,16 @@ __all__ = [
     "CellResult",
     "DoseReport",
     "MarginalStep",
+    "ModelArmSummary",
     "OutcomeCounts",
+    "PairedComparison",
+    "PairedTask",
     "RunRow",
     "build_report",
     "load_rows",
     "load_rows_dir",
+    "model_arm_matrix",
+    "paired_pass_rate_comparison",
+    "render_paired_markdown",
     "render_markdown",
 ]

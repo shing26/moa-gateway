@@ -4,6 +4,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
 logger = logging.getLogger("moa.agents.tools")
 
@@ -17,8 +18,12 @@ class AgentTool:
 
 
 class ToolRegistry:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        workspace_factory: Callable[[Path], "ToolRegistry"] | None = None,
+    ) -> None:
         self._tools: dict[str, AgentTool] = {}
+        self._workspace_factory = workspace_factory
 
     def register(self, tool: AgentTool) -> None:
         self._tools[tool.name] = tool
@@ -38,6 +43,16 @@ class ToolRegistry:
             }
             for tool in self._tools.values()
         ]
+
+    def for_workspace(self, workspace: Path | str) -> "ToolRegistry":
+        """复制同一工具定义，但把所有文件操作重新绑定到另一个工作区。
+
+        并发 worker 不能共享闭包里的工作区根目录；该入口由 ``build_toolset``
+        注入，普通注册表（例如 planner 的空工具表）调用时明确报错。
+        """
+        if self._workspace_factory is None:
+            raise TypeError("该 ToolRegistry 不支持绑定到其他工作区")
+        return self._workspace_factory(Path(workspace))
 
 
 async def _knowledge_search_handler(query: str) -> str:

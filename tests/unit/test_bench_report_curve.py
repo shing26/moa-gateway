@@ -25,6 +25,7 @@ def _write_run(
         "arm": arm,
         "outcome": outcome,
         "budget_tier": tier,
+        "source": "E1",
         "agent_run": {"model": "m", "usage": {"cost_usd": cost}},
     }
     path = directory / name

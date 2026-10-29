@@ -2,15 +2,64 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
 
 from app.agents.contract import AgentEnvelope, SubAgent, register_agent
 from app.agents.provider import LLMClient, LLMConfig
 from app.agents.tool_contract import call_tool
 from app.agents.tools import tool_registry
+from app.agents.workspace_tools import build_toolset, call_workspace_tool
 from app.config import settings
 
 logger = logging.getLogger("moa.agents")
+
+
+@dataclass(frozen=True)
+class ToolLoopStep:
+    index: int
+    action: Literal["call_tool", "finish"]
+    tool: str
+    arguments: dict[str, Any]
+    observation: str
+    outcome: Literal["ok", "rejected", "failed", ""]
+    elapsed_ms: float
+
+
+@dataclass(frozen=True)
+class ToolLoopUsage:
+    llm_calls: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: float = 0.0
+    llm_latency_ms: float = 0.0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+    def add_metrics(self, metrics: dict[str, Any] | None) -> "ToolLoopUsage":
+        values = metrics or {}
+        return ToolLoopUsage(
+            llm_calls=self.llm_calls + 1,
+            prompt_tokens=self.prompt_tokens
+            + int(values.get("prompt_tokens", 0) or 0),
+            completion_tokens=self.completion_tokens
+            + int(values.get("completion_tokens", 0) or 0),
+            cost_usd=self.cost_usd + float(values.get("cost_usd", 0.0) or 0.0),
+            llm_latency_ms=self.llm_latency_ms
+            + float(values.get("llm_latency_ms", 0.0) or 0.0),
+        )
+
+
+@dataclass(frozen=True)
+class ToolLoopResult:
+    status: Literal["completed", "step_limit", "budget_exhausted", "error"]
+    content: str
+    steps: tuple[ToolLoopStep, ...]
+    usage: ToolLoopUsage
+    stop_reason: str
 
 
 class MockExpertLLM:
@@ -84,6 +133,256 @@ def _build_envelope_context(envelope: AgentEnvelope, role_tag: str) -> str:
     return "\n\n".join(parts)
 
 
+def _tool_runtime(envelope: AgentEnvelope):
+    """选择本次专家可用的工具集。
+
+    只有显式带有 ``workspace_path`` 的请求才切到工作区工具。这样普通业务
+    专家仍使用全局工具注册表，而协作/实验台可以在同一套 Agent 实现上获得
+    文件读写、搜索和固定命令验证能力。
+    """
+    raw_workspace = (envelope.agent_local_slot or {}).get("workspace_path")
+    if not raw_workspace:
+        return tool_registry, None
+
+    workspace = Path(str(raw_workspace)).resolve()
+    if not workspace.is_dir():
+        raise ValueError(f"工作区不存在或不是目录: {workspace}")
+    raw_verify = (envelope.agent_local_slot or {}).get("verify_command")
+    verify_command = (
+        tuple(str(token) for token in raw_verify)
+        if isinstance(raw_verify, (list, tuple))
+        else ()
+    )
+    names = ["read_file", "write_file", "list_files", "search"]
+    if verify_command:
+        names.append("run_tests")
+    return (
+        build_toolset(
+            workspace=workspace,
+            verify_command=verify_command,
+            names=tuple(names),
+        ),
+        workspace,
+    )
+
+
+async def execute_tool_loop(
+    *,
+    llm: Any,
+    messages: list[dict[str, Any]],
+    tools: Any,
+    workspace: Path | None,
+    agent_name: str,
+    max_steps: int,
+    max_tokens: int = 0,
+    slot: dict[str, object] | None = None,
+) -> ToolLoopResult:
+    import time
+
+    slot = slot if slot is not None else {}
+    logger.info("%s structured tool loop", agent_name)
+    chat_with_tools = getattr(llm, "chat_with_tools", None)
+    if chat_with_tools is None:
+        content = await llm.chat(messages)
+        return ToolLoopResult(
+            status="completed",
+            content=content,
+            steps=(
+                ToolLoopStep(
+                    index=1,
+                    action="finish",
+                    tool="",
+                    arguments={},
+                    observation=content[:200],
+                    outcome="",
+                    elapsed_ms=0.0,
+                ),
+            ),
+            usage=ToolLoopUsage(),
+            stop_reason="model finished",
+        )
+
+    schemas = tools.list_schemas()
+    steps: list[ToolLoopStep] = []
+    usage = ToolLoopUsage()
+    current_messages = list(messages)
+    executed_tool_calls = 0
+    def request_tokens() -> int | None:
+        if max_tokens <= 0:
+            return None
+        remaining = max_tokens - usage.total_tokens
+        if usage.llm_calls == 0:
+            return max(1, remaining)
+        return max(0, remaining)
+
+    def record_usage() -> None:
+        nonlocal usage
+        metrics = getattr(llm, "last_metrics", None) or {}
+        usage = usage.add_metrics(metrics)
+
+    try:
+        result = await chat_with_tools(
+            current_messages,
+            schemas,
+            max_tokens=request_tokens(),
+        )
+        record_usage()
+        while True:
+            if max_tokens > 0 and usage.total_tokens > max_tokens:
+                return ToolLoopResult(
+                    status="budget_exhausted",
+                    content=str(result.content or ""),
+                    steps=tuple(steps),
+                    usage=usage,
+                    stop_reason=(
+                        f"token budget exceeded: {usage.total_tokens} > {max_tokens}"
+                    ),
+                )
+            if not result.tool_calls:
+                steps.append(
+                    ToolLoopStep(
+                        index=len(steps) + 1,
+                        action="finish",
+                        tool="",
+                        arguments={},
+                        observation=str(result.content or "")[:200],
+                        outcome="",
+                        elapsed_ms=0.0,
+                    )
+                )
+                return ToolLoopResult(
+                    status="completed",
+                    content=str(result.content or ""),
+                    steps=tuple(steps),
+                    usage=usage,
+                    stop_reason="model finished",
+                )
+
+            if max_tokens > 0 and usage.total_tokens >= max_tokens:
+                return ToolLoopResult(
+                    status="budget_exhausted",
+                    content=str(result.content or ""),
+                    steps=tuple(steps),
+                    usage=usage,
+                    stop_reason=(
+                        f"token budget exhausted: {usage.total_tokens} >= {max_tokens}"
+                    ),
+                )
+
+            calls = list(result.tool_calls)
+            for call_index, call in enumerate(calls):
+                if executed_tool_calls >= max_steps:
+                    pending = ", ".join(
+                        str((call.get("function") or {}).get("name", ""))
+                        for call in calls[call_index:]
+                    )
+                    return ToolLoopResult(
+                        status="step_limit",
+                        content=str(result.content or ""),
+                        steps=tuple(steps),
+                        usage=usage,
+                        stop_reason=(
+                            "tool step limit reached; pending: " + pending
+                        ),
+                    )
+                started = time.monotonic()
+                name = str((call.get("function") or {}).get("name", ""))
+                arguments: dict[str, Any] = {}
+                slot["tool_calls_total"] = int(slot.get("tool_calls_total", 0) or 0) + 1
+                tool = tools.get(name)
+                outcome_kind: Literal["ok", "rejected", "failed", ""] = "failed"
+                if tool is None:
+                    observation = '{"error": "unknown tool"}'
+                    slot["tool_errors_total"] = int(
+                        slot.get("tool_errors_total", 0) or 0
+                    ) + 1
+                else:
+                    try:
+                        arguments = json.loads(
+                            (call.get("function") or {}).get("arguments") or "{}"
+                        )
+                    except json.JSONDecodeError as exc:
+                        observation = f'{{"error": "参数不是合法 JSON: {exc}"}}'
+                        outcome_kind = "rejected"
+                        slot["tool_arg_rejections_total"] = int(
+                            slot.get("tool_arg_rejections_total", 0) or 0
+                        ) + 1
+                    else:
+                        outcome = await (
+                            call_workspace_tool(
+                                tool,
+                                arguments,
+                                workspace=workspace,
+                            )
+                            if workspace is not None
+                            else call_tool(
+                                tool,
+                                arguments,
+                                session_id=str(slot.get("session_id", "")),
+                            )
+                        )
+                        outcome_kind = outcome.kind
+                        if outcome.kind == "ok":
+                            observation = outcome.detail
+                        elif outcome.kind == "rejected":
+                            observation = f'{{"error": "参数被拒：{outcome.detail}"}}'
+                            slot["tool_arg_rejections_total"] = int(
+                                slot.get("tool_arg_rejections_total", 0) or 0
+                            ) + 1
+                        else:
+                            observation = f'{{"error": "{outcome.detail}"}}'
+                            slot["tool_errors_total"] = int(
+                                slot.get("tool_errors_total", 0) or 0
+                            ) + 1
+                steps.append(
+                    ToolLoopStep(
+                        index=len(steps) + 1,
+                        action="call_tool",
+                        tool=name,
+                        arguments=(
+                            arguments if isinstance(arguments, dict) else {}
+                        ),
+                        observation=observation,
+                        outcome=outcome_kind,
+                        elapsed_ms=(time.monotonic() - started) * 1000,
+                    )
+                )
+                result.messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call["id"],
+                        "content": observation,
+                    }
+                )
+                executed_tool_calls += 1
+            current_messages = result.messages
+            allowance = request_tokens()
+            if max_tokens > 0 and allowance is not None and allowance <= 0:
+                return ToolLoopResult(
+                    status="budget_exhausted",
+                    content=str(result.content or ""),
+                    steps=tuple(steps),
+                    usage=usage,
+                    stop_reason=(
+                        f"token budget exhausted: {usage.total_tokens} >= {max_tokens}"
+                    ),
+                )
+            result = await chat_with_tools(
+                current_messages,
+                schemas,
+                max_tokens=allowance,
+            )
+            record_usage()
+    except Exception as exc:
+        return ToolLoopResult(
+            status="error",
+            content="",
+            steps=tuple(steps),
+            usage=usage,
+            stop_reason=f"{type(exc).__name__}: {exc}",
+        )
+
+
 async def _execute_with_tools(
     llm: LLMClient,
     envelope: AgentEnvelope,
@@ -92,55 +391,31 @@ async def _execute_with_tools(
     agent_name: str,
 ) -> str:
     override = (envelope.agent_local_slot or {}).get("system_prompt", "")
-    if override:
-        system = override
-    else:
-        system = _build_envelope_context(envelope, role_tag)
-        system += extra_instructions
-    history = list(envelope.history) if envelope.history else []
-    messages = [
-        {"role": "system", "content": system},
-    ]
-    messages.extend(history)
+    system = (
+        str(override)
+        if override
+        else _build_envelope_context(envelope, role_tag) + extra_instructions
+    )
+    messages = [{"role": "system", "content": system}]
+    messages.extend(envelope.history or ())
     messages.append({"role": "user", "content": envelope.user_raw_input})
-    logger.info("%s execute trace=%s session=%s", agent_name, envelope.trace_id, envelope.session_id)
-    chat_with_tools = getattr(llm, "chat_with_tools", None)
-    if chat_with_tools is None:
-        return await llm.chat(messages)
-    schemas = tool_registry.list_schemas()
-    result = await chat_with_tools(messages, schemas)
-    for _ in range(settings.agent_max_steps):
-        if not result.tool_calls:
-            break
-        for call in result.tool_calls:
-            tool = tool_registry.get(call["function"]["name"])
-            if tool is None:
-                output = '{"error": "unknown tool"}'
-            else:
-                try:
-                    arguments = json.loads(call["function"].get("arguments") or "{}")
-                except json.JSONDecodeError as exc:
-                    output = f'{{"error": "参数不是合法 JSON: {exc}"}}'
-                else:
-                    # 与 ReActLoop 共用同一份契约（ADR-018）：注入 session_id（覆盖式，
-                    # 模型自带的值作废）→ 校验 → 执行。此前这条路径既不注入也不校验，
-                    # 模型带上 session_id 就能直达 handler。
-                    outcome = await call_tool(
-                        tool, arguments, session_id=envelope.session_id
-                    )
-                    if outcome.kind == "ok":
-                        output = outcome.detail
-                    elif outcome.kind == "rejected":
-                        output = f'{{"error": "参数被拒：{outcome.detail}"}}'
-                    else:
-                        output = f'{{"error": "{outcome.detail}"}}'
-            result.messages.append(
-                {"role": "tool", "tool_call_id": call["id"], "content": output}
-            )
-        result = await chat_with_tools(result.messages, schemas)
-    if result.tool_calls:
-        pending = ", ".join(call["function"]["name"] for call in result.tool_calls)
-        return result.content + f"\n[工具调用已达上限，待处理工具: {pending}]"
+    tools, workspace = _tool_runtime(envelope)
+    slot = dict(envelope.agent_local_slot or {})
+    slot["session_id"] = envelope.session_id
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=messages,
+        tools=tools,
+        workspace=workspace,
+        agent_name=agent_name,
+        max_steps=settings.agent_max_steps,
+        slot=slot,
+    )
+    envelope.agent_local_slot.update(slot)
+    if result.status == "error":
+        raise RuntimeError(result.stop_reason)
+    if result.status == "step_limit":
+        return result.content + f"\n[工具调用已达上限] {result.stop_reason}"
     return result.content
 
 

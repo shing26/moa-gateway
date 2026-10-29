@@ -53,7 +53,7 @@
    | 项 | 触发线（什么条件出现才重新立项） |
    |---|---|
    | 回调 RBAC 角色校验 | 多角色共用同一套审批（当前白名单只答"能不能批"已够用） |
-   | PR 审查写回 GitHub | 有真实仓库的消费者使用该链路（现为只读审查） |
+   | PR 审查写回 GitHub | 有真实仓库的消费者使用该链路（2026-10-19 订正：写回与经审批合并通道**已落地**，触发线随之改成"真实消费者用起来"，不再是"先有写回"） |
    | OTel 真接线（OTLP exporter / collector） | 多实例部署或 >5 人日常使用 |
    | 评测基线对比（本次 vs 上次 delta） | 出现会消费评测结论的决策点——否则又是一个没人读的 JSON |
    | 语义级结果验证、LLM 摘要压缩 | "治理输出"定位变化或真实用户提出（与减法清单冲突） |
@@ -143,12 +143,24 @@
 `start_stack.ps1` 不把 `-GatewayPort` 传给网关（D1）、`/webhook/callback` 缺 token 放行 +
 v2 操作者不解析（D3）、非 UTF-8 请求体裸 500（D5）、deny 文案内部 ID 重复三遍（D10）。
 
-**待用户拍板（设计取舍，不擅动）**：
-- **D2 指令语义**：`_map_event` 用子串匹配，"怎么**取消**订阅"会被当成重置指令清空会话、
-  "看看这个**报错**"会挂起且无审批出口。修法要定"哪些输入算指令"（全等？前缀 `/`？
-  白名单短语？）——这是产品语义，不是 bug 修复。
-- **D4 同会话并发 → 500**：`engine.py` 的 `_session_states` 读改写无锁。修法二选一：
-  每会话 `asyncio.Lock` 串行化（简单，但排队语义要定义）或按会话排队丢弃/合并。
+**原记"待用户拍板"的两条，2026-10-19 订正为「已定并已实施」**——本行此前没跟上代码：
+
+- **D2 指令语义** → 定成**整条消息全等匹配**（大小写不敏感，含 `/` 前缀写法，中文用
+  `chr()` 拼）。`app/routes/webhook.py` 的 `_map_event` 改用 `_RESET_COMMANDS` /
+  `_SENSITIVE_COMMANDS` 两个 `frozenset` 做全等判定，子串匹配已删除："怎么**取消**订阅"
+  不再清空会话、"看看这个**报错**"不再挂起。钉住行为的用例：
+  `tests/unit/test_github_webhook_e2e.py::test_webhook_sentence_containing_command_words_is_not_a_command`。
+- **D4 同会话并发 → 500** → 定成**每会话串行化**（先到先处理，不是排队丢弃）。
+  2026-09-29 第一版把锁包在 `Engine.handle_event` 上；**2026-10-19 复验发现那一版
+  修不动这个 bug**——一次请求要连着推多个 FSM 事件、中间夹着 LLM 的 await，
+  只锁单次调用等于没锁：同会话 3 并发仍有 2 条在第一条的 `EXECUTING` 上再发
+  `TASK_STARTED`，报 `invalid_state_transition`（实测 10/15 失败）。锁已挪到请求入口
+  `MoAPipeline.run`（`app/pipeline.py`），引擎那把改造成**可重入**（`_ReentrantSessionLock`）
+  以便请求内嵌套取锁；复验 15/15 通过。钉住行为的用例：
+  `tests/unit/test_pipeline.py::test_same_session_concurrent_runs_are_serialized`
+  与 `::test_different_sessions_still_run_in_parallel`（跨会话不许被连坐串行）。
+  已知残留：锁字典不随会话回收（长跑多会话才需要 LRU）；ADR-008 的 LangGraph 适配器
+  直连 `handle_event`，拿到的是单次调用级互斥，不在生产路由上。
 
 **登记触发线**：
 - KB 重复上传不去重（同内容双份、检索翻倍）→ 有真实知识库维护者或检索结果开始误导时。

@@ -1,0 +1,1394 @@
+from __future__ import annotations
+
+import base64
+import hashlib
+import os
+import subprocess
+import sys
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from apps.code_review_pipeline.change import (
+    ChangeApproval,
+    ChangePipeline,
+    ChangeRequest,
+    ChangeStatus,
+    build_change_bundle,
+)
+from apps.code_review_pipeline.change.pipeline import ChangeBundleChanged
+from apps.code_review_pipeline.change.refs import PullRequestRef
+
+
+def _git(args: list[str], cwd: Path) -> str:
+    return subprocess.run(  # noqa: S603
+        ["git", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+@pytest.fixture()
+def repo(tmp_path: Path) -> Path:
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(["init", "-q"], root)
+    _git(["config", "user.email", "test@example.com"], root)
+    _git(["config", "user.name", "Test"], root)
+    (root / "app.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+    _git(["add", "."], root)
+    _git(["commit", "-q", "-m", "init"], root)
+    return root
+
+
+def _request() -> ChangeRequest:
+    return ChangeRequest(
+        repo="owner/name",
+        base_sha="a" * 40,
+        title="fix: correct add",
+        body="agent change",
+        goal="fix add",
+        branch="moa/change-1",
+        trace_id="trace-1",
+    )
+
+
+def _passing() -> tuple[str, ...]:
+    return (sys.executable, "-c", "raise SystemExit(0)")
+
+
+def _failing() -> tuple[str, ...]:
+    return (sys.executable, "-c", "raise SystemExit(1)")
+
+
+def _pr_ref(number: int = 1) -> PullRequestRef:
+    return PullRequestRef(
+        number=number,
+        url=f"https://example.com/pr/{number}",
+        head_sha="b" * 40,
+    )
+
+
+def test_verify_failure_blocks_export(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_failing(),
+        model_name="test-model",
+    )
+
+    import asyncio
+
+    result = asyncio.run(pipeline.run(_request()))
+
+    assert result.status is ChangeStatus.VERIFY_FAILED
+    assert result.ok is False
+    assert result.bundle is not None
+    assert result.bundle.patch.strip()
+
+
+@pytest.mark.asyncio
+async def test_verification_does_not_inherit_gateway_credentials(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+    monkeypatch.setenv("CUSTOM_API_KEY", "provider-secret")
+    dsn = "postgresql://user:" + "password" + "@db/gateway"
+    monkeypatch.setenv("VECTOR_DB_DSN", dsn)
+    monkeypatch.setenv("CODE_REVIEW_DATABASE_URL", dsn)
+    monkeypatch.setenv("DATABASE_URL", dsn)
+    monkeypatch.setenv("GH_TOKEN", "github-alias")
+    monkeypatch.setenv("FEISHU_APP_SECRET", "feishu-secret")
+    monkeypatch.setenv("WEBHOOK_AUTH_TOKEN", "webhook-secret")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "postgres-secret")
+    verify_command = (
+        sys.executable,
+        "-c",
+        (
+            "import os; "
+            "print(' '.join(sorted(key for key in os.environ if key in {"
+            "'GITHUB_TOKEN', 'CUSTOM_API_KEY', 'VECTOR_DB_DSN', "
+            "'CODE_REVIEW_DATABASE_URL', 'DATABASE_URL', 'GH_TOKEN', "
+            "'FEISHU_APP_SECRET', 'WEBHOOK_AUTH_TOKEN', 'POSTGRES_PASSWORD'"
+            "})) or 'missing')"
+        ),
+    )
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=verify_command,
+        model_name="test-model",
+    )
+
+    result = await pipeline.prepare_bundle(_request())
+
+    assert result.bundle is not None
+    assert result.bundle.verify_output.splitlines() == ["missing"]
+
+
+@pytest.mark.asyncio
+async def test_verification_cannot_read_git_metadata(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (repo / ".git" / "secret").write_text("git-secret\n", encoding="utf-8")
+    verify_command = (
+        sys.executable,
+        "-c",
+        (
+            "from pathlib import Path; "
+            "raise SystemExit(3 if Path('.git/secret').exists() else 0)"
+        ),
+    )
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=verify_command,
+        model_name="test-model",
+    )
+
+    result = await pipeline.prepare_bundle(_request())
+
+    assert result.bundle is not None
+    assert result.bundle.verify_exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_bundle_collection_ignores_agent_supplied_git_extensions(
+    repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    marker = tmp_path / "external-diff-executed"
+    external = (
+        f'cmd /c echo %GITHUB_TOKEN% > "{marker}"'
+        if sys.platform == "win32"
+        else f'sh -c \'printf %s "$GITHUB_TOKEN" > "{marker}"\''
+    )
+    _git(["config", "diff.external", external], repo)
+    monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+
+    bundle = build_change_bundle(
+        workspace=repo,
+        base_sha="a" * 40,
+        branch="moa/change-1",
+        title="fix: correct add",
+        body="agent change",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+        trace_id="trace-1",
+    )
+
+    assert "return a + b" in bundle.patch
+    assert not marker.exists()
+
+
+def test_no_changes_is_not_exportable(repo: Path) -> None:
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+    )
+
+    import asyncio
+
+    result = asyncio.run(pipeline.run(_request()))
+
+    assert result.status is ChangeStatus.NO_CHANGES
+    assert result.ok is False
+
+
+def test_dry_run_is_default_and_has_no_side_effect(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    class ExplodingGitHub:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"dry-run 不应调用 GitHub: {name}")
+
+    pipeline = ChangePipeline(
+        github=ExplodingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=False,
+    )
+
+    import asyncio
+
+    result = asyncio.run(pipeline.run(_request()))
+
+    assert result.status is ChangeStatus.PUSH_DISABLED
+    assert result.pr_url == ""
+    assert result.bundle is not None and result.bundle.is_verified
+
+
+def test_push_requires_approval_even_when_enabled(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    class ExplodingGitHub:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"未审批不应调用 GitHub: {name}")
+
+    pipeline = ChangePipeline(
+        github=ExplodingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+    )
+
+    import asyncio
+
+    result = asyncio.run(pipeline.run(_request()))
+
+    assert result.status is ChangeStatus.NOT_APPROVED
+    assert result.pr_url == ""
+
+
+def test_push_rejects_approval_without_approver(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    class ExplodingGitHub:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"无审批人不應调用 GitHub: {name}")
+
+    pipeline = ChangePipeline(
+        github=ExplodingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+    )
+
+    import asyncio
+
+    result = asyncio.run(
+        pipeline.run(
+            _request(),
+            approval=ChangeApproval(
+                approver="  ",
+                trace_id="trace-1",
+                bundle_hash="unused",
+            ),
+        )
+    )
+
+    assert result.status is ChangeStatus.NOT_APPROVED
+    assert "approver" in result.message.lower()
+
+
+def test_push_rejects_approval_for_a_different_bundle(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    class ExplodingGitHub:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"错误 bundle hash 不应调用 GitHub: {name}")
+
+    pipeline = ChangePipeline(
+        github=ExplodingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+    )
+
+    import asyncio
+
+    result = asyncio.run(
+        pipeline.run(
+            _request(),
+            approval=ChangeApproval(
+                approver="alice",
+                trace_id="trace-1",
+                bundle_hash="wrong-bundle",
+            ),
+        )
+    )
+
+    assert result.status is ChangeStatus.NOT_APPROVED
+    assert "bundle" in result.message.lower()
+
+
+def test_push_rejects_approval_for_a_different_trace(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    request = _request()
+
+    class ExplodingGitHub:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"错误 trace_id 不应调用 GitHub: {name}")
+
+    common = {
+        "repo": "owner/name",
+        "workspace": repo,
+        "verify_command": _passing(),
+        "model_name": "test-model",
+    }
+    import asyncio
+
+    dry_run = asyncio.run(
+        ChangePipeline(github=object(), push_enabled=False, **common).run(request)
+    )
+    assert dry_run.bundle is not None
+
+    result = asyncio.run(
+        ChangePipeline(
+            github=ExplodingGitHub(),
+            push_enabled=True,
+            **common,
+        ).run(
+            request,
+            approval=ChangeApproval(
+                approver="alice",
+                trace_id="different-trace",
+                bundle_hash=dry_run.bundle.bundle_hash,
+            ),
+        )
+    )
+
+    assert result.status is ChangeStatus.NOT_APPROVED
+    assert "trace" in result.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_publish_refuses_to_write_the_base_branch(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    calls: list[str] = []
+
+    class RecordingGitHub:
+        async def commit_exists(self, repo, sha):
+            calls.append("commit_exists")
+            return True
+
+        async def create_ref(self, repo, branch, base_sha):
+            calls.append("create_ref")
+            return {}
+
+        async def create_commit(self, repo, **kwargs):
+            calls.append("create_commit")
+            return "b" * 40
+
+        async def create_pull_request(self, repo, **kwargs):
+            calls.append("create_pull_request")
+            return _pr_ref()
+
+    pipeline = ChangePipeline(
+        github=RecordingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        base_branch="moa/change-1-trace-1",
+        push_enabled=True,
+    )
+    prepared = await pipeline.prepare_bundle(_request())
+    assert prepared.bundle is not None
+
+    result = await pipeline.publish_bundle(
+        prepared.bundle,
+        ChangeApproval(
+            approver="alice",
+            trace_id="trace-1",
+            bundle_hash=prepared.bundle.bundle_hash,
+            run_id="run-1",
+        ),
+    )
+
+    assert result.status is ChangeStatus.INVALID_BRANCH
+    assert calls == []
+
+
+def test_push_records_approval_before_any_remote_write(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    request = _request()
+    events: list[tuple[str, dict[str, str]]] = []
+
+    async def record_approval(**kwargs: str) -> None:
+        events.append(("approval", kwargs))
+
+    class RecordingGitHub:
+        async def commit_exists(self, repo, sha):
+            return True
+
+        async def create_ref(self, repo, branch, base_sha):
+            events.append(("ref", {"branch": branch}))
+
+        async def create_commit(self, repo, **kwargs):
+            events.append(("commit", {"branch": kwargs["branch"]}))
+            return "b" * 40
+
+        async def create_pull_request(self, repo, **kwargs):
+            events.append(("pr", {"branch": kwargs["branch"]}))
+            return _pr_ref()
+
+    common = {
+        "repo": "owner/name",
+        "workspace": repo,
+        "verify_command": _passing(),
+        "model_name": "test-model",
+    }
+    import asyncio
+
+    dry_run = asyncio.run(
+        ChangePipeline(github=object(), push_enabled=False, **common).run(request)
+    )
+    assert dry_run.bundle is not None
+
+    result = asyncio.run(
+        ChangePipeline(
+            github=RecordingGitHub(),
+            push_enabled=True,
+            approval_recorder=record_approval,
+            **common,
+        ).run(
+            request,
+            approval=ChangeApproval(
+                approver="alice",
+                trace_id="trace-1",
+                bundle_hash=dry_run.bundle.bundle_hash,
+                run_id="run-1",
+            ),
+        )
+    )
+
+    assert result.status is ChangeStatus.PUSHED
+    assert events[0] == (
+        "approval",
+        {
+            "task_id": "trace-1",
+            "repo": "owner/name",
+            "operator": "alice",
+            "decision": f"approve_change:{dry_run.bundle.bundle_hash}",
+            "run_id": "run-1",
+            "trace_id": "trace-1",
+            "bundle_hash": dry_run.bundle.bundle_hash,
+        },
+    )
+    assert [name for name, _ in events[1:]] == ["ref", "commit", "pr"]
+
+
+@pytest.mark.asyncio
+async def test_invalid_remote_base_is_rejected_before_approval_audit(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    approval_records: list[dict[str, str]] = []
+
+    class NoSuchCommitGitHub:
+        async def commit_exists(self, repo, sha):
+            return False
+
+    async def record_approval(**kwargs: str) -> None:
+        approval_records.append(kwargs)
+
+    pipeline = ChangePipeline(
+        github=NoSuchCommitGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+        approval_recorder=record_approval,
+    )
+    prepared = await pipeline.prepare_bundle(_request())
+    assert prepared.bundle is not None
+
+    with pytest.raises(ValueError, match="base_sha"):
+        await pipeline.publish_bundle(
+            prepared.bundle,
+            ChangeApproval(
+                approver="alice",
+                trace_id="trace-1",
+                bundle_hash=prepared.bundle.bundle_hash,
+                run_id="run-1",
+            ),
+        )
+
+    assert approval_records == []
+
+
+def test_push_calls_only_three_write_operations(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    request = _request()
+    calls: list[tuple[str, dict]] = []
+
+    class RecordingGitHub:
+        async def commit_exists(self, repo, sha):
+            return True
+
+        async def create_ref(self, repo, branch, base_sha):
+            calls.append(("ref", {"branch": branch, "base_sha": base_sha}))
+
+        async def create_commit(self, repo, **kwargs):
+            calls.append(("commit", kwargs))
+            return "b" * 40
+
+        async def create_pull_request(self, repo, **kwargs):
+            calls.append(("pr", kwargs))
+            return _pr_ref()
+
+    pipeline = ChangePipeline(
+        github=RecordingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+    )
+
+    import asyncio
+
+    dry_run = asyncio.run(
+        ChangePipeline(
+            github=object(),
+            repo="owner/name",
+            workspace=repo,
+            verify_command=_passing(),
+            model_name="test-model",
+            push_enabled=False,
+        ).run(request)
+    )
+    assert dry_run.bundle is not None
+
+    result = asyncio.run(
+        pipeline.run(
+            request,
+            approval=ChangeApproval(
+                approver="alice",
+                trace_id="trace-1",
+                bundle_hash=dry_run.bundle.bundle_hash,
+            ),
+        )
+    )
+
+    assert result.status is ChangeStatus.PUSHED
+    assert result.pr_url == "https://example.com/pr/1"
+    assert [name for name, _ in calls] == ["ref", "commit", "pr"]
+    files = calls[1][1]["files"]
+    assert [item["path"] for item in files] == ["app.py"]
+    assert result.audit["approver"] == "alice"
+
+
+def test_push_rejects_base_sha_missing_from_remote(repo: Path) -> None:
+    """本地临时 HEAD 不是远端 commit 时必须明确报错，而不是让它变成 422。"""
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    class NoCommitGitHub:
+        async def commit_exists(self, repo, sha):
+            return False
+
+        async def create_commit(self, *args, **kwargs):
+            raise AssertionError("不应在校验前建 commit")
+
+        async def create_pull_request(self, *args, **kwargs):
+            raise AssertionError("不应在校验前开 PR")
+
+        async def create_ref(self, *args, **kwargs):
+            raise AssertionError("不应在 base_sha 校验前建分支")
+
+    pipeline = ChangePipeline(
+        github=NoCommitGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+    )
+
+    import asyncio
+
+    dry_run = asyncio.run(
+        ChangePipeline(
+            github=object(),
+            repo="owner/name",
+            workspace=repo,
+            verify_command=_passing(),
+            model_name="test-model",
+            push_enabled=False,
+        ).run(_request())
+    )
+    assert dry_run.bundle is not None
+
+    with pytest.raises(ValueError, match="不存在于远端仓库"):
+        asyncio.run(
+            pipeline.run(
+                _request(),
+                approval=ChangeApproval(
+                    approver="alice",
+                    trace_id="trace-1",
+                    bundle_hash=dry_run.bundle.bundle_hash,
+                ),
+            )
+        )
+
+
+def test_missing_verify_command_refuses_to_export(repo: Path) -> None:
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=(),
+        model_name="test-model",
+    )
+
+    import asyncio
+
+    result = asyncio.run(pipeline.run(_request()))
+
+    assert result.status is ChangeStatus.NO_VERIFY_COMMAND
+    assert result.ok is False
+
+
+def test_missing_model_refuses_to_export(repo: Path) -> None:
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="  ",
+    )
+
+    import asyncio
+
+    result = asyncio.run(pipeline.run(_request()))
+
+    assert result.status is ChangeStatus.MODEL_NOT_CONFIGURED
+    assert result.ok is False
+
+
+def test_bundle_records_diff_and_hashes(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    bundle = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-1",
+        title="fix: correct add",
+        body="agent change",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+    )
+
+    assert bundle.is_verified is True
+    assert bundle.patch_hash
+    assert bundle.bundle_hash
+    assert [item.path for item in bundle.files] == ["app.py"]
+    assert bundle.files[0].kind == "modified"
+    assert bundle.files[0].before_hash
+    assert bundle.files[0].after_hash
+
+
+def test_bundle_includes_added_files_and_skips_cache_artifacts(repo: Path) -> None:
+    (repo / "new_module.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / "__pycache__").mkdir()
+    (repo / "__pycache__" / "junk.pyc").write_bytes(b"\x00\x01")
+
+    bundle = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-2",
+        title="feat: add module",
+        body="",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+    )
+
+    assert [item.path for item in bundle.files] == ["new_module.py"]
+    assert bundle.files[0].kind == "added"
+    assert "new_module.py" in bundle.patch
+    assert "__pycache__" not in bundle.patch
+
+
+def test_bundle_hash_covers_full_diff_when_display_is_truncated(repo: Path) -> None:
+    (repo / "app.py").write_text("x" * 250_000, encoding="utf-8")
+    full_diff = subprocess.run(  # noqa: S603
+        ["git", "diff", "--no-color", "--binary", "HEAD"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+
+    bundle = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-large",
+        title="test: large diff",
+        body="",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+    )
+
+    assert "diff 已截断" in bundle.patch
+    assert bundle.patch_hash == hashlib.sha256(full_diff.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_verification_hash_covers_full_stdout_and_stderr(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+    )
+
+    async def prepare_with_output(stdout: str, stderr: str):
+        async def fake_verify() -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=["verify"],
+                returncode=0,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        monkeypatch.setattr(pipeline, "_verify", fake_verify)
+        result = await pipeline.prepare_bundle(_request())
+        assert result.bundle is not None
+        return result.bundle
+
+    tail = "tail" * 1000
+    first = await prepare_with_output("first-prefix" * 100 + tail, "")
+    second = await prepare_with_output("second-prefix" * 100 + tail, "")
+    stdout_only = await prepare_with_output("same-output", "")
+    stderr_only = await prepare_with_output("", "same-output")
+
+    assert first.verify_output == second.verify_output
+    assert first.verify_output_hash != second.verify_output_hash
+    assert stdout_only.verify_output_hash != stderr_only.verify_output_hash
+
+
+def test_push_rejects_workspace_content_changed_after_bundle(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    request = _request()
+
+    async def mutate_after_bundle(**kwargs: str) -> None:
+        (repo / "app.py").write_text("def add(a, b):\n    return 999\n", encoding="utf-8")
+
+    class NoRemoteWriteGitHub:
+        async def commit_exists(self, repo, sha):
+            return True
+
+        async def create_ref(self, *args, **kwargs):
+            raise AssertionError("内容已变化时不应创建远端分支")
+
+        async def create_commit(self, *args, **kwargs):
+            raise AssertionError("内容已变化时不应创建 commit")
+
+        async def create_pull_request(self, *args, **kwargs):
+            raise AssertionError("内容已变化时不应创建 PR")
+
+    common = {
+        "repo": "owner/name",
+        "workspace": repo,
+        "verify_command": _passing(),
+        "model_name": "test-model",
+    }
+    import asyncio
+
+    dry_run = asyncio.run(
+        ChangePipeline(github=object(), push_enabled=False, **common).run(request)
+    )
+    assert dry_run.bundle is not None
+
+    with pytest.raises(ChangeBundleChanged, match="changed after bundle"):
+        asyncio.run(
+            ChangePipeline(
+                github=NoRemoteWriteGitHub(),
+                push_enabled=True,
+                approval_recorder=mutate_after_bundle,
+                **common,
+            ).run(
+                request,
+                approval=ChangeApproval(
+                    approver="alice",
+                    trace_id="trace-1",
+                    bundle_hash=dry_run.bundle.bundle_hash,
+                ),
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_publish_rejects_a_new_untracked_file_after_bundle(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+    )
+    prepared = await pipeline.prepare_bundle(_request())
+    assert prepared.bundle is not None
+    (repo / "late.txt").write_text("not in the approved bundle\n", encoding="utf-8")
+
+    with pytest.raises(ChangeBundleChanged, match="workspace changed after bundle"):
+        await pipeline.publish_bundle(
+            prepared.bundle,
+            ChangeApproval(
+                approver="alice",
+                trace_id="trace-1",
+                bundle_hash=prepared.bundle.bundle_hash,
+                run_id="run-1",
+            ),
+        )
+
+
+def test_push_uses_traceable_branch_and_commit_message(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    request = _request()
+    calls: dict[str, dict] = {}
+
+    class RecordingGitHub:
+        async def commit_exists(self, repo, sha):
+            return True
+
+        async def create_ref(self, repo, branch, base_sha):
+            calls["ref"] = {"branch": branch, "base_sha": base_sha}
+
+        async def create_commit(self, repo, **kwargs):
+            calls["commit"] = kwargs
+            return "b" * 40
+
+        async def create_pull_request(self, repo, **kwargs):
+            calls["pr"] = kwargs
+            return _pr_ref()
+
+    async def record_approval(**kwargs: str) -> None:
+        return None
+
+    common = {
+        "repo": "owner/name",
+        "workspace": repo,
+        "verify_command": _passing(),
+        "model_name": "test-model",
+    }
+    import asyncio
+
+    dry_run = asyncio.run(
+        ChangePipeline(github=object(), push_enabled=False, **common).run(request)
+    )
+    assert dry_run.bundle is not None
+
+    result = asyncio.run(
+        ChangePipeline(
+            github=RecordingGitHub(),
+            push_enabled=True,
+            approval_recorder=record_approval,
+            **common,
+        ).run(
+            request,
+            approval=ChangeApproval(
+                approver="alice",
+                trace_id="trace-1",
+                bundle_hash=dry_run.bundle.bundle_hash,
+            ),
+        )
+    )
+
+    assert result.status is ChangeStatus.PUSHED
+    assert calls["ref"]["branch"] == "moa/change-1-trace-1"
+    message = calls["commit"]["message"]
+    assert "MoA-Trace-Id: trace-1" in message
+    assert f"MoA-Bundle-Hash: {dry_run.bundle.bundle_hash}" in message
+
+
+def test_push_rejects_request_repo_that_differs_from_pipeline_repo(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    request = _request()
+
+    class ExplodingGitHub:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"仓库不一致不应调用 GitHub: {name}")
+
+    common = {
+        "repo": "owner/name",
+        "workspace": repo,
+        "verify_command": _passing(),
+        "model_name": "test-model",
+    }
+    import asyncio
+
+    dry_run = asyncio.run(
+        ChangePipeline(github=object(), push_enabled=False, **common).run(request)
+    )
+    assert dry_run.bundle is not None
+
+    with pytest.raises(ValueError, match="request repo"):
+        asyncio.run(
+            ChangePipeline(
+                github=ExplodingGitHub(),
+                push_enabled=True,
+                **common,
+            ).run(
+                replace(request, repo="other/name"),
+                approval=ChangeApproval(
+                    approver="alice",
+                    trace_id="trace-1",
+                    bundle_hash=dry_run.bundle.bundle_hash,
+                ),
+            )
+        )
+
+
+def test_push_refuses_when_remote_commit_probe_is_unavailable(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    request = _request()
+
+    class NoCommitProbeGitHub:
+        async def create_ref(self, *args, **kwargs):
+            raise AssertionError("无法验证 base sha 时不应创建远端分支")
+
+        async def create_commit(self, *args, **kwargs):
+            raise AssertionError("无法验证 base sha 时不应创建 commit")
+
+        async def create_pull_request(self, *args, **kwargs):
+            raise AssertionError("无法验证 base sha 时不应创建 PR")
+
+    common = {
+        "repo": "owner/name",
+        "workspace": repo,
+        "verify_command": _passing(),
+        "model_name": "test-model",
+    }
+    import asyncio
+
+    dry_run = asyncio.run(
+        ChangePipeline(github=object(), push_enabled=False, **common).run(request)
+    )
+    assert dry_run.bundle is not None
+
+    with pytest.raises(RuntimeError, match="commit_exists"):
+        asyncio.run(
+            ChangePipeline(
+                github=NoCommitProbeGitHub(),
+                push_enabled=True,
+                **common,
+            ).run(
+                request,
+                approval=ChangeApproval(
+                    approver="alice",
+                    trace_id="trace-1",
+                    bundle_hash=dry_run.bundle.bundle_hash,
+                ),
+            )
+        )
+
+
+def test_push_requires_trace_id_for_traceable_export(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    request = replace(_request(), trace_id="")
+
+    class NoRemoteWriteGitHub:
+        async def commit_exists(self, repo, sha):
+            return True
+
+        async def create_ref(self, *args, **kwargs):
+            raise AssertionError("缺少 trace_id 时不应创建远端分支")
+
+        async def create_commit(self, *args, **kwargs):
+            raise AssertionError("缺少 trace_id 时不应创建 commit")
+
+        async def create_pull_request(self, *args, **kwargs):
+            raise AssertionError("缺少 trace_id 时不应创建 PR")
+
+    common = {
+        "repo": "owner/name",
+        "workspace": repo,
+        "verify_command": _passing(),
+        "model_name": "test-model",
+    }
+    import asyncio
+
+    dry_run = asyncio.run(
+        ChangePipeline(github=object(), push_enabled=False, **common).run(request)
+    )
+    assert dry_run.bundle is not None
+
+    with pytest.raises(ValueError, match="trace_id"):
+        asyncio.run(
+            ChangePipeline(
+                github=NoRemoteWriteGitHub(),
+                push_enabled=True,
+                **common,
+            ).run(
+                request,
+                approval=ChangeApproval(
+                    approver="alice",
+                    trace_id="",
+                    bundle_hash=dry_run.bundle.bundle_hash,
+                ),
+            )
+        )
+
+
+def test_bundle_hash_covers_commit_metadata_and_trace(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    bundle = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-1-trace-1",
+        title="fix: correct add",
+        body="first body",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+        trace_id="trace-1",
+    )
+    variants = (
+        replace(bundle, body="second body"),
+        replace(bundle, title="fix: another title"),
+        replace(bundle, files=(replace(bundle.files[0], after_hash="0" * 64),)),
+        replace(bundle, model="another-model"),
+        replace(bundle, trace_id="trace-2"),
+    )
+
+    assert all(item.bundle_hash != bundle.bundle_hash for item in variants)
+
+
+def test_bundle_hash_covers_git_file_mode(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    bundle = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-mode",
+        title="fix: mode",
+        body="",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+    )
+
+    changed_mode = replace(
+        bundle,
+        files=(replace(bundle.files[0], mode="100755"),),
+    )
+
+    assert bundle.files[0].mode == "100644"
+    assert changed_mode.bundle_hash != bundle.bundle_hash
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX executable bits")
+def test_bundle_tracks_removing_the_executable_bit(repo: Path) -> None:
+    script = repo / "run.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.chmod(0o755)
+    first = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-executable",
+        title="fix: executable",
+        body="",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+    )
+    script.chmod(0o644)
+    second = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-executable",
+        title="fix: executable",
+        body="",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+    )
+
+    first_change = next(item for item in first.files if item.path == "run.sh")
+    second_change = next(item for item in second.files if item.path == "run.sh")
+    assert first_change.mode == "100755"
+    assert second_change.mode == "100644"
+    assert first.bundle_hash != second.bundle_hash
+
+
+def test_bundle_records_symlink_mode_and_link_target_hash(repo: Path) -> None:
+    target = repo / "target.txt"
+    target.write_text("target\n", encoding="utf-8")
+    link = repo / "link.txt"
+    try:
+        os.symlink("target.txt", link)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不允许创建符号链接")
+
+    bundle = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-link",
+        title="fix: link",
+        body="",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+    )
+    change = next(item for item in bundle.files if item.path == "link.txt")
+
+    assert change.mode == "120000"
+    assert change.after_hash == hashlib.sha256(b"target.txt").hexdigest()
+
+
+def test_push_payload_preserves_symlink_mode_and_content(repo: Path) -> None:
+    target = repo / "target.txt"
+    target.write_text("target\n", encoding="utf-8")
+    link = repo / "link.txt"
+    try:
+        os.symlink("target.txt", link)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不允许创建符号链接")
+
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+    )
+    bundle = build_change_bundle(
+        workspace=repo,
+        base_sha=_git(["rev-parse", "HEAD"], repo),
+        branch="moa/change-link",
+        title="fix: link",
+        body="",
+        verify_command=_passing(),
+        verify_exit_code=0,
+        verify_output="",
+        model="test-model",
+    )
+    payload = {item["path"]: item for item in pipeline._file_payload(bundle)}
+
+    assert payload["link.txt"]["mode"] == "120000"
+    assert base64.b64decode(payload["link.txt"]["content_b64"]) == b"target.txt"
+
+
+@pytest.mark.parametrize(
+    ("verify_command", "model_name", "request_repo", "expected_status", "error_match"),
+    [
+        (_passing(), "test-model", "other/name", None, "request repo"),
+        ((), "test-model", "owner/name", ChangeStatus.NO_VERIFY_COMMAND, None),
+        (_passing(), "  ", "owner/name", ChangeStatus.MODEL_NOT_CONFIGURED, None),
+    ],
+)
+def test_agent_does_not_run_when_preflight_rejects(
+    repo: Path,
+    verify_command: tuple[str, ...],
+    model_name: str,
+    request_repo: str,
+    expected_status: ChangeStatus | None,
+    error_match: str | None,
+) -> None:
+    agent_calls: list[str] = []
+
+    class RecordingAgent:
+        async def run(self, *, workspace: Path, goal: str) -> str:
+            agent_calls.append(goal)
+            return ""
+
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=verify_command,
+        model_name=model_name,
+    )
+    request = replace(_request(), repo=request_repo)
+
+    import asyncio
+
+    if error_match is not None:
+        with pytest.raises(ValueError, match=error_match):
+            asyncio.run(pipeline.run(request, agent=RecordingAgent()))
+    else:
+        result = asyncio.run(pipeline.run(request, agent=RecordingAgent()))
+        assert result.status is expected_status
+    assert agent_calls == []
+
+
+def test_prepare_bundle_has_no_remote_side_effect(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    calls: list[str] = []
+
+    class ExplodingGitHub:
+        def __getattr__(self, name: str) -> object:
+            calls.append(name)
+            raise AssertionError(f"prepare must not touch GitHub: {name}")
+
+    pipeline = ChangePipeline(
+        github=ExplodingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+    )
+
+    import asyncio
+
+    prepared = asyncio.run(pipeline.prepare_bundle(_request()))
+
+    assert prepared.status is ChangeStatus.VERIFIED
+    assert prepared.bundle is not None
+    assert calls == []
+
+
+def test_publish_bundle_does_not_run_verification_again(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    verify_calls = 0
+
+    class RecordingGitHub:
+        async def commit_exists(self, repo, sha):
+            return True
+
+        async def create_ref(self, repo, branch, base_sha):
+            return {"ref": branch}
+
+        async def create_commit(self, repo, **kwargs):
+            return "b" * 40
+
+        async def create_pull_request(self, repo, **kwargs):
+            return _pr_ref()
+
+    async def record_approval(**kwargs):
+        return None
+
+    pipeline = ChangePipeline(
+        github=RecordingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+        approval_recorder=record_approval,
+    )
+
+    async def counted_verify():
+        nonlocal verify_calls
+        verify_calls += 1
+        return await ChangePipeline._verify(pipeline)
+
+    pipeline._verify = counted_verify  # type: ignore[method-assign]
+
+    import asyncio
+
+    prepared = asyncio.run(pipeline.prepare_bundle(_request()))
+    assert prepared.bundle is not None
+    published = asyncio.run(
+        pipeline.publish_bundle(
+            prepared.bundle,
+            ChangeApproval(
+                approver="alice",
+                trace_id="trace-1",
+                bundle_hash=prepared.bundle.bundle_hash,
+            ),
+        )
+    )
+
+    assert verify_calls == 1
+    assert published.status is ChangeStatus.PUSHED
+    assert published.commit_sha == "b" * 40
+    assert published.pull_request == _pr_ref()
+
+
+def test_publish_rejects_a_bundle_changed_after_prepare(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    class NoRemoteWriteGitHub:
+        async def commit_exists(self, repo, sha):
+            return True
+
+        async def create_ref(self, *args, **kwargs):
+            raise AssertionError("changed bundle must not create a ref")
+
+    pipeline = ChangePipeline(
+        github=NoRemoteWriteGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+    )
+
+    import asyncio
+
+    prepared = asyncio.run(pipeline.prepare_bundle(_request()))
+    assert prepared.bundle is not None
+    (repo / "app.py").write_text("def add(a, b):\n    return 999\n", encoding="utf-8")
+
+    with pytest.raises(ChangeBundleChanged, match="changed after bundle"):
+        asyncio.run(
+            pipeline.publish_bundle(
+                prepared.bundle,
+                ChangeApproval(
+                    approver="alice",
+                    trace_id="trace-1",
+                    bundle_hash=prepared.bundle.bundle_hash,
+                ),
+            )
+        )
+
+
+def test_publish_rejects_a_bundle_file_deleted_after_prepare(repo: Path) -> None:
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    class ExplodingGitHub:
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"missing file must not touch GitHub: {name}")
+
+    async def record_approval(**kwargs):
+        return None
+
+    pipeline = ChangePipeline(
+        github=ExplodingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        push_enabled=True,
+        approval_recorder=record_approval,
+    )
+
+    import asyncio
+
+    prepared = asyncio.run(pipeline.prepare_bundle(_request()))
+    assert prepared.bundle is not None
+    (repo / "app.py").unlink()
+
+    with pytest.raises(ChangeBundleChanged, match="changed after bundle"):
+        asyncio.run(
+            pipeline.publish_bundle(
+                prepared.bundle,
+                ChangeApproval(
+                    approver="alice",
+                    trace_id="trace-1",
+                    bundle_hash=prepared.bundle.bundle_hash,
+                ),
+            )
+        )

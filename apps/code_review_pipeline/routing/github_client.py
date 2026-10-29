@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
 
+from apps.code_review_pipeline.archive import extract_repo_tarball
+from apps.code_review_pipeline.change.refs import PullRequestRef
+
 GITHUB_API = "https://api.github.com"
+
+
+class JobLogTooLarge(RuntimeError):
+    """A job log exceeded the bounded streaming collection limit."""
 
 
 def _trust_env_default() -> bool:
@@ -51,6 +61,11 @@ _FAILING_CONCLUSIONS = frozenset(
 _PENDING_CONCLUSIONS = frozenset(
     {"queued", "in_progress", "waiting", "requested", "pending"}
 )
+
+
+def is_failing_ci_conclusion(conclusion: str) -> bool:
+    """Whether a GitHub check/job conclusion represents a failed result."""
+    return str(conclusion or "").strip().lower() in _FAILING_CONCLUSIONS
 
 
 @dataclass(frozen=True)
@@ -200,6 +215,35 @@ class GitHubClient:
         resp.raise_for_status()
         return dict(resp.json())
 
+    async def download_archive(self, repo: GitHubRepo, ref: str, dest: Path) -> None:
+        """下载某个 commit 的 tarball 并解压到 ``dest``。
+
+        用归档 API 而不是 ``git clone``：token 不会出现在命令行里，工作区也不需要
+        依赖宿主机的 git 配置。GitHub 会在 302 后给出实际归档地址，因此必须跟随
+        重定向。
+        """
+        dest = Path(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        fd, raw_path = tempfile.mkstemp(prefix="moa-gh-archive-", suffix=".tar.gz")
+        os.close(fd)
+        archive = Path(raw_path)
+        try:
+            async with self._client.stream(
+                "GET",
+                f"/repos/{repo.owner}/{repo.name}/tarball/{ref}",
+                follow_redirects=True,
+            ) as response:
+                response.raise_for_status()
+                handle = await asyncio.to_thread(archive.open, "wb")
+                try:
+                    async for chunk in response.aiter_bytes():
+                        await asyncio.to_thread(handle.write, chunk)
+                finally:
+                    await asyncio.to_thread(handle.close)
+            await asyncio.to_thread(extract_repo_tarball, archive, dest)
+        finally:
+            archive.unlink(missing_ok=True)
+
     async def list_reviews(self, repo: GitHubRepo, pr_number: int) -> list[dict[str, Any]]:
         """列出 PR 上的 review（D4 幂等兜底要用）。
 
@@ -242,16 +286,9 @@ class GitHubClient:
         resp.raise_for_status()
         return dict(resp.json())
 
-    async def get_ci_status(self, repo: GitHubRepo, ref: str) -> CiStatus:
-        """读某个 commit 的 CI 结论（两套 API 合并，见 ``aggregate_ci_status``）。
-
-        ``ref`` 用**完整 sha**，不用分支名：分支名会在读取过程中移动，而这里要判断
-        的是"这个 PR 的这个版本"能不能合并。
-
-        check-runs 必须翻页。GitHub 默认每页 30 条，而 ``per_page`` 上限 100——
-        只取第一页会让"第 101 条红了"被静默漏掉。``list_reviews`` 已经吃过这个亏
-        （见其 docstring），同一个坑不再踩第二次。
-        """
+    async def _list_check_runs_for_sha(
+        self, repo: GitHubRepo, ref: str
+    ) -> list[dict[str, Any]]:
         check_runs: list[dict[str, Any]] = []
         page = 1
         while True:
@@ -263,14 +300,106 @@ class GitHubClient:
             batch = list(resp.json().get("check_runs") or ())
             check_runs.extend(batch)
             if len(batch) < 100:
-                break
+                return check_runs
             page += 1
 
+    async def get_check_run_status(self, repo: GitHubRepo, ref: str) -> CiStatus:
+        """Read check-runs only, without the legacy Commit Statuses API."""
+        check_runs = await self._list_check_runs_for_sha(repo, ref)
+        return aggregate_ci_status(check_runs)
+
+    async def get_ci_status(self, repo: GitHubRepo, ref: str) -> CiStatus:
+        """读某个 commit 的 CI 结论（两套 API 合并，见 ``aggregate_ci_status``）。
+
+        ``ref`` 用**完整 sha**，不用分支名：分支名会在读取过程中移动，而这里要判断
+        的是"这个 PR 的这个版本"能不能合并。
+
+        check-runs 必须翻页。GitHub 默认每页 30 条，而 ``per_page`` 上限 100——
+        只取第一页会让"第 101 条红了"被静默漏掉。``list_reviews`` 已经吃过这个亏
+        （见其 docstring），同一个坑不再踩第二次。
+        """
+        check_runs = await self._list_check_runs_for_sha(repo, ref)
         status_resp = await self._client.get(
             f"/repos/{repo.owner}/{repo.name}/commits/{ref}/status"
         )
         status_resp.raise_for_status()
         return aggregate_ci_status(check_runs, dict(status_resp.json()))
+
+    async def list_workflow_runs_for_sha(
+        self, repo: GitHubRepo, head_sha: str
+    ) -> list[dict[str, Any]]:
+        """List Actions workflow runs for one full commit SHA.
+
+        This is read-only evidence collection. Callers must not infer a failing
+        job from a check-run id: only Actions run/job ids can address job logs.
+        """
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            resp = await self._client.get(
+                f"/repos/{repo.owner}/{repo.name}/actions/runs",
+                params={
+                    "head_sha": head_sha,
+                    "per_page": 100,
+                    "page": page,
+                },
+            )
+            resp.raise_for_status()
+            batch = list(resp.json().get("workflow_runs") or ())
+            out.extend(batch)
+            if len(batch) < 100:
+                return out
+            page += 1
+
+    async def list_workflow_jobs(
+        self, repo: GitHubRepo, run_id: int
+    ) -> list[dict[str, Any]]:
+        """List the latest attempt's jobs for one workflow run."""
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            resp = await self._client.get(
+                f"/repos/{repo.owner}/{repo.name}/actions/runs/{run_id}/jobs",
+                params={
+                    "filter": "latest",
+                    "per_page": 100,
+                    "page": page,
+                },
+            )
+            resp.raise_for_status()
+            batch = list(resp.json().get("jobs") or ())
+            out.extend(batch)
+            if len(batch) < 100:
+                return out
+            page += 1
+
+    async def get_job_log(
+        self,
+        repo: GitHubRepo,
+        job_id: int,
+        *,
+        max_bytes: int = 2_000_000,
+    ) -> str:
+        """Download a job log, following GitHub's redirect to blob storage."""
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        async with self._client.stream(
+            "GET",
+            f"/repos/{repo.owner}/{repo.name}/actions/jobs/{job_id}/logs",
+            follow_redirects=True,
+        ) as resp:
+            resp.raise_for_status()
+            content = bytearray()
+            async for chunk in resp.aiter_bytes():
+                if len(content) + len(chunk) > max_bytes:
+                    raise JobLogTooLarge(
+                        f"job log exceeds the {max_bytes}-byte streaming limit"
+                    )
+                content.extend(chunk)
+            return bytes(content).decode(
+                resp.encoding or "utf-8",
+                errors="replace",
+            )
 
     async def merge_pr(
         self,
@@ -317,6 +446,139 @@ class GitHubClient:
             message=str(body.get("message") or ""),
             sha=str(body.get("sha") or ""),
         )
+
+    # ── 写侧（ADR-030）：只做建分支 / 建 commit / 开 PR ───────────────────
+
+    async def commit_exists(self, repo: GitHubRepo, sha: str) -> bool:
+        """远端是否存在该 commit。404 = 不存在；其它错误照常抛出。"""
+        resp = await self._client.get(
+            f"/repos/{repo.owner}/{repo.name}/git/commits/{sha}"
+        )
+        if resp.status_code == 404:
+            return False
+        resp.raise_for_status()
+        return True
+
+    async def create_ref(
+        self,
+        repo: GitHubRepo,
+        branch: str,
+        base_sha: str,
+    ) -> dict[str, Any]:
+        """从 ``base_sha`` 建一个分支。已存在时 GitHub 返回 422，如实抛出。"""
+        resp = await self._client.post(
+            f"/repos/{repo.owner}/{repo.name}/git/refs",
+            json={"ref": f"refs/heads/{branch}", "sha": base_sha},
+        )
+        resp.raise_for_status()
+        return dict(resp.json())
+
+    async def create_commit(
+        self,
+        repo: GitHubRepo,
+        *,
+        base_sha: str,
+        branch: str,
+        message: str,
+        files: list[dict[str, Any]],
+    ) -> str:
+        """用 Git Data API 建一个 commit，返回新 commit sha。
+
+        ``files`` 每项含 ``path`` / ``content_b64``；删除的文件用 ``sha=None``
+        表达。这里**不**走 Contents API：它一次只能写一个文件，多文件改动会变成
+        多个 commit，而"一次变更一个 commit"是变更包可复核的前提。
+        """
+        base_commit = await self._client.get(
+            f"/repos/{repo.owner}/{repo.name}/git/commits/{base_sha}"
+        )
+        base_commit.raise_for_status()
+        base_tree = str(dict(base_commit.json()).get("tree", {}).get("sha") or "")
+        if not base_tree:
+            raise RuntimeError(f"无法读取 base commit 的 tree: {base_sha}")
+
+        entries: list[dict[str, Any]] = []
+        for item in files:
+            path = str(item.get("path") or "")
+            content = item.get("content_b64")
+            mode = str(item.get("mode") or "100644")
+            if mode not in {"100644", "100755", "120000"}:
+                raise ValueError(f"不支持的 Git mode: {mode!r}")
+            if content is None:
+                # 删除：tree 项不带 sha 即表示该路径不存在
+                entries.append(
+                    {
+                        "path": path,
+                        "mode": mode,
+                        "type": "blob",
+                        "sha": None,
+                    }
+                )
+                continue
+            blob = await self._client.post(
+                f"/repos/{repo.owner}/{repo.name}/git/blobs",
+                json={"content": content, "encoding": "base64"},
+            )
+            blob.raise_for_status()
+            entries.append(
+                {
+                    "path": path,
+                    "mode": mode,
+                    "type": "blob",
+                    "sha": str(dict(blob.json()).get("sha") or ""),
+                }
+            )
+
+        tree_resp = await self._client.post(
+            f"/repos/{repo.owner}/{repo.name}/git/trees",
+            json={"base_tree": base_tree, "tree": entries},
+        )
+        tree_resp.raise_for_status()
+        tree_sha = str(dict(tree_resp.json()).get("sha") or "")
+
+        commit_resp = await self._client.post(
+            f"/repos/{repo.owner}/{repo.name}/git/commits",
+            json={"message": message, "tree": tree_sha, "parents": [base_sha]},
+        )
+        commit_resp.raise_for_status()
+        commit_sha = str(dict(commit_resp.json()).get("sha") or "")
+
+        # 分支 ref 推进到新 commit（非 force：GitHub 要求 fast-forward）
+        ref_resp = await self._client.patch(
+            f"/repos/{repo.owner}/{repo.name}/git/refs/heads/{branch}",
+            json={"sha": commit_sha, "force": False},
+        )
+        ref_resp.raise_for_status()
+        return commit_sha
+
+    async def create_pull_request(
+        self,
+        repo: GitHubRepo,
+        *,
+        branch: str,
+        base_branch: str,
+        title: str,
+        body: str,
+    ) -> PullRequestRef:
+        """Open a PR and return the identity required by the merge channel."""
+        resp = await self._client.post(
+            f"/repos/{repo.owner}/{repo.name}/pulls",
+            json={
+                "head": branch,
+                "base": base_branch,
+                "title": title,
+                "body": body,
+            },
+        )
+        resp.raise_for_status()
+        payload = dict(resp.json())
+        number = int(payload.get("number") or 0)
+        url = str(payload.get("html_url") or "")
+        head_sha = str(dict(payload.get("head") or {}).get("sha") or "")
+        if number <= 0 or not url or not head_sha:
+            raise RuntimeError(
+                "GitHub create_pull_request response lacks number/url/head.sha"
+            )
+        return PullRequestRef(number=number, url=url, head_sha=head_sha)
 
     @staticmethod
     def from_env() -> GitHubClient:

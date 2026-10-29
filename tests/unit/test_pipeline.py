@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -887,3 +888,65 @@ async def test_output_policy_exception_keeps_pipeline_ok(monkeypatch):
     result = await p.run(make_event(), channel="test", target="s1")
     assert result.status == "ok"
     assert result.policy_hits == ()
+
+
+class ConcurrencyProbeAgent:
+    """能观测"同一会话同时有几个请求在跑"的专家桩。"""
+
+    def __init__(self, delay: float = 0.02) -> None:
+        self.delay = delay
+        self.inflight = 0
+        self.max_inflight = 0
+
+    async def execute(self, envelope):
+        self.inflight += 1
+        self.max_inflight = max(self.max_inflight, self.inflight)
+        try:
+            await asyncio.sleep(self.delay)
+        finally:
+            self.inflight -= 1
+        return "agent reply"
+
+
+@pytest.mark.asyncio
+async def test_same_session_concurrent_runs_are_serialized(monkeypatch):
+    """D4（2026-10-19）：同会话并发必须串行，不能撞出非法迁移。
+
+    此前互斥只包住 ``Engine.handle_event`` 单次调用，而一次请求要连着推多个 FSM
+    事件、中间夹着 await：同会话 3 条并发消息里有 2 条会在第一条的 EXECUTING 上
+    再发 TASK_STARTED，直接 500 ``invalid_state_transition``（实测 10/15 失败）。
+    修法是把锁挪到请求入口 ``MoAPipeline.run``。本用例钉住两点：
+    并发不炸，且同一会话同一时刻只有一个请求在跑。
+    """
+    agent = ConcurrencyProbeAgent()
+    patch_agents(monkeypatch, agent)
+    engine = Engine()
+    p = make_pipeline(engine=engine)
+
+    results = await asyncio.gather(
+        *(p.run(make_event(session_id="lock-s1"), channel="test", target="lock-s1")
+          for _ in range(3)),
+        return_exceptions=True,
+    )
+
+    failures = [r for r in results if isinstance(r, BaseException)]
+    assert not failures, failures
+    assert [r.status for r in results] == ["ok", "ok", "ok"]
+    assert agent.max_inflight == 1
+
+
+@pytest.mark.asyncio
+async def test_different_sessions_still_run_in_parallel(monkeypatch):
+    """串行化只针对同一个会话；跨会话必须保持并行（否则就是拿锁当性能惩罚）。"""
+    agent = ConcurrencyProbeAgent(delay=0.05)
+    patch_agents(monkeypatch, agent)
+    p = make_pipeline()
+
+    results = await asyncio.gather(
+        *(p.run(make_event(session_id=f"par-{i}"), channel="test", target=f"par-{i}")
+          for i in range(3)),
+        return_exceptions=True,
+    )
+
+    assert [r.status for r in results] == ["ok", "ok", "ok"]
+    assert agent.max_inflight == 3

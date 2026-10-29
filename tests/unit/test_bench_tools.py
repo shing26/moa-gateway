@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -34,6 +35,20 @@ def test_resolve_rejects_parent_traversal(tmp_path: Path) -> None:
         resolve_in_workspace(tmp_path, "../../etc/passwd")
 
 
+@pytest.mark.parametrize(
+    "path",
+    (
+        ".git",
+        ".git/config",
+        ".GIT/config",
+        "nested/.git/config",
+    ),
+)
+def test_resolve_rejects_git_metadata(tmp_path: Path, path: str) -> None:
+    with pytest.raises(PathEscape, match="Git 元数据"):
+        resolve_in_workspace(tmp_path, path)
+
+
 @pytest.mark.asyncio
 async def test_read_outside_workspace_is_rejected_not_failed(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
@@ -62,6 +77,103 @@ async def test_symlink_escape_is_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_search_does_not_follow_symlinks_outside_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside needle\n", encoding="utf-8")
+    link = workspace / "linked.txt"
+    try:
+        os.symlink(outside, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不允许创建符号链接")
+
+    outcome = await call_bench_tool(
+        make_tools(workspace).get("search"),
+        {"pattern": "outside needle"},
+        workspace=workspace,
+    )
+
+    assert outcome.kind == "ok"
+    assert "无匹配" in outcome.detail
+    assert "outside needle" not in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_write_does_not_follow_a_symlink_final_component(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep\n", encoding="utf-8")
+    link = workspace / "linked.txt"
+    try:
+        os.symlink(outside, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不允许创建符号链接")
+
+    outcome = await call_bench_tool(
+        make_tools(workspace).get("write_file"),
+        {"path": "linked.txt", "content": "overwritten"},
+        workspace=workspace,
+    )
+
+    assert outcome.kind == "rejected"
+    assert outside.read_text(encoding="utf-8") == "keep\n"
+
+
+@pytest.mark.asyncio
+async def test_write_rejects_a_symlinked_parent_directory(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = workspace / "linked-dir"
+    try:
+        os.symlink(outside, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不允许创建符号链接")
+
+    outcome = await call_bench_tool(
+        make_tools(workspace).get("write_file"),
+        {"path": "linked-dir/escaped.txt", "content": "nope"},
+        workspace=workspace,
+    )
+
+    assert outcome.kind == "rejected"
+    assert not (outside / "escaped.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_run_tests_cannot_read_git_metadata(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    git_dir = workspace / ".git"
+    git_dir.mkdir()
+    (git_dir / "secret").write_text("git-secret\n", encoding="utf-8")
+    (workspace / "probe.py").write_text(
+        "from pathlib import Path\n"
+        "secret = Path('.git/secret')\n"
+        "raise SystemExit(0 if secret.exists() else 3)\n",
+        encoding="utf-8",
+    )
+    from app.agents.workspace_tools import build_toolset
+
+    tools = build_toolset(
+        workspace=workspace,
+        verify_command=(sys.executable, "probe.py"),
+        names=("run_tests",),
+    )
+    outcome = await call_bench_tool(
+        tools.get("run_tests"),
+        {},
+        workspace=workspace,
+    )
+
+    assert outcome.kind == "ok"
+    assert "退出码 3" in outcome.detail
+
+
+@pytest.mark.asyncio
 async def test_write_outside_workspace_is_rejected(tmp_path: Path) -> None:
     tools = make_tools(tmp_path)
     outcome = await call_bench_tool(
@@ -71,6 +183,89 @@ async def test_write_outside_workspace_is_rejected(tmp_path: Path) -> None:
     )
     assert outcome.kind == "rejected"
     assert not (tmp_path.parent / "escaped.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_workspace_toolset_can_be_rebound_for_an_isolated_copy(
+    tmp_path: Path,
+) -> None:
+    original = tmp_path / "original"
+    isolated = tmp_path / "isolated"
+    original.mkdir()
+    isolated.mkdir()
+    tools = make_tools(original)
+
+    rebound = tools.for_workspace(isolated)
+    outcome = await call_bench_tool(
+        rebound.get("write_file"),
+        {"path": "isolated.txt", "content": "only here"},
+        workspace=isolated,
+    )
+
+    assert outcome.kind == "ok"
+    assert (isolated / "isolated.txt").read_text(encoding="utf-8") == "only here\n"
+    assert not (original / "isolated.txt").exists()
+
+
+def test_verification_copy_rejects_workspace_symlinks(tmp_path: Path) -> None:
+    from app.agents.workspace_tools import create_verification_workspace
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret\n", encoding="utf-8")
+    try:
+        os.symlink(outside, workspace / "linked-dir", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不允许创建符号链接")
+
+    with pytest.raises(OSError, match="符号链接"):
+        create_verification_workspace(workspace)
+
+    assert not list(tmp_path.glob("moa-verify-*"))
+
+
+def test_verification_copy_excludes_nested_cache_directories(
+    tmp_path: Path,
+) -> None:
+    from app.agents.workspace_tools import create_verification_workspace
+
+    workspace = tmp_path / "workspace"
+    nested = workspace / "pkg" / "node_modules" / "dep"
+    nested.mkdir(parents=True)
+    (nested / "index.js").write_text("cached\n", encoding="utf-8")
+    ruff_cache = workspace / "pkg" / ".ruff_cache"
+    ruff_cache.mkdir()
+    (ruff_cache / "cache").write_text("cached\n", encoding="utf-8")
+    (workspace / "pkg" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    copied, parent = create_verification_workspace(workspace)
+    try:
+        assert (copied / "pkg" / "app.py").is_file()
+        assert not (copied / "pkg" / "node_modules").exists()
+        assert not (copied / "pkg" / ".ruff_cache").exists()
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
+
+
+def test_verification_copy_excludes_git_file_metadata(tmp_path: Path) -> None:
+    from app.agents.workspace_tools import create_verification_workspace
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / ".git").write_text(
+        "gitdir: /private/repository/.git/worktrees/example\n",
+        encoding="utf-8",
+    )
+    (workspace / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    copied, parent = create_verification_workspace(workspace)
+    try:
+        assert (copied / "app.py").is_file()
+        assert not (copied / ".git").exists()
+    finally:
+        shutil.rmtree(parent, ignore_errors=True)
 
 
 @pytest.mark.asyncio
@@ -193,7 +388,15 @@ async def test_run_tests_appends_selector_to_the_fixed_command(tmp_path: Path) -
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "selector",
-    ["--rootdir=/", "--confcutdir=..", "-p no:cacheprovider", "../outside.py", "/etc/passwd"],
+    [
+        "--rootdir=/",
+        "--confcutdir=..",
+        "-p no:cacheprovider",
+        "..",
+        "../outside.py",
+        "tests/../outside.py",
+        "/etc/passwd",
+    ],
 )
 async def test_run_tests_rejects_selector_outside_allowlist(
     tmp_path: Path, selector: str
@@ -215,3 +418,12 @@ def test_parse_selector_rejects_unknown_flag() -> None:
     tokens, reason = parse_selector("--import-mode=importlib")
     assert tokens == []
     assert reason is not None
+
+
+@pytest.mark.parametrize("selector", ["..", "../outside", "tests/../outside"])
+def test_parse_selector_rejects_parent_directory_components(selector: str) -> None:
+    tokens, reason = parse_selector(selector)
+
+    assert tokens == []
+    assert reason is not None
+    assert "上级目录" in reason

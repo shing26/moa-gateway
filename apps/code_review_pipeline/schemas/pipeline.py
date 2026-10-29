@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -17,6 +17,11 @@ class Finding:
     confidence: float = 0.0
     team_specific: bool = False
     evidence: tuple[str, ...] = ()
+    source_agents: tuple[str, ...] = ()
+    # Set by the ReportAgent when a Critic asked for a one-shot rewrite. It is
+    # intentionally part of the finding identity lineage, not a human-visible
+    # field.
+    revision_of: str | None = None
 
 
 @dataclass(frozen=True)
@@ -40,3 +45,5 @@ class PipelineResult:
     test_coverage: AgentFindingResult
     report: AgentFindingResult
     overall_need_human_review: bool = False
+    persisted_findings: tuple[Any, ...] = ()
+    critic_metrics: dict[str, Any] = field(default_factory=dict)

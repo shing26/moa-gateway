@@ -97,6 +97,7 @@ def materialize(
     base_commit: str,
     test_patch: Path,
     dest: Path,
+    allow_empty_patch: bool = False,
 ) -> Path:
     """把"基线 + test patch"物化成一个带 orphan 快照的工作区，返回其根目录。"""
     if dest.exists() and any(dest.iterdir()):
@@ -136,9 +137,11 @@ def materialize(
     git(["config", "user.email", "bench@localhost"], cwd=dest)
     git(["config", "user.name", "bench"], cwd=dest)
 
-    applied = git(
-        ["apply", "--whitespace=nowarn", str(test_patch)], cwd=dest, check=False
-    )
+    apply_argv = ["apply", "--whitespace=nowarn"]
+    if allow_empty_patch:
+        apply_argv.append("--allow-empty")
+    apply_argv.append(str(test_patch))
+    applied = git(apply_argv, cwd=dest, check=False)
     if applied.returncode != 0:
         raise RuntimeError(f"test patch 无法应用到基线: {applied.stderr.strip()}")
 

@@ -25,7 +25,6 @@ from typing import Any
 from bench.agent.types import (
     B1_TIER,
     B3_TIER,
-    E1_ORIGIN,
     BudgetTier,
     TaskOrigin,
 )
@@ -103,18 +102,20 @@ class RunRow:
     task_id: str
     arm: str
     outcome: str
+    #: 任务来源（E1 = 真实历史 bug，E3 = 合成缺陷）。§5.4 的曲线表要靠它把两类
+    #: 任务分开说——混在一起时"合成缺陷是不是把难度做成了可控变量"没有分母。
+    task_origin: TaskOrigin
     cost_usd: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
     budget_tier: str = B1_TIER
     model: str = ""
+    #: 模型配置身份（模型名 + 关键采样参数）。跨模型比较用它区分同名模型下
+    #: 的不同协议配置；为空时回落到 ``model``，兼容旧报告数据。
+    model_config: str = ""
     wall_clock_s: float = 0.0
     #: 这份 run 来自哪个文件——报告里的数字靠它追回具体 run。
     source: str = ""
-    #: 任务来源（E1 = 真实历史 bug，E3 = 合成缺陷）。§5.4 的曲线表要靠它把两类
-    #: 任务分开说——混在一起时"合成缺陷是不是把难度做成了可控变量"没有分母。
-    #: 名字用 ``task_origin`` 而不是 ``source``：后者在本模块已经是"哪份 run 文件"。
-    task_origin: TaskOrigin = E1_ORIGIN
     #: 同 (task, arm) 的 B1 花费；B3 复跑时才有意义。
     baseline_cost_usd: float = 0.0
     #: 同 (task, arm) 的 B1 token 用量；主轴是 token 时增量按它算。
@@ -123,6 +124,10 @@ class RunRow:
     @property
     def total_tokens(self) -> int:
         return self.prompt_tokens + self.completion_tokens
+
+    @property
+    def model_identity(self) -> str:
+        return self.model_config or self.model
 
     @property
     def incremental_cost_usd(self) -> float:
@@ -144,7 +149,7 @@ class RunRow:
         if tier not in (B1_TIER, B3_TIER):
             # 静默收下一个不认识的档位，会让它从曲线里"消失"又不报错——宁可炸。
             raise ValueError(f"未知预算档位: {tier!r}（只认 {B1_TIER} / {B3_TIER}）")
-        origin = str(payload.get("source", "") or E1_ORIGIN)
+        origin = str(payload.get("source", "") or "")
         if origin not in ("E1", "E3"):
             # 未知来源同理：不能悄悄归到 E1，否则报告口径会失真。
             raise ValueError(f"未知任务来源: {origin!r}（只认 E1 / E3）")
@@ -199,7 +204,7 @@ class CellResult:
     total_prompt_tokens: int = 0
     total_completion_tokens: int = 0
     #: 这个任务的来源（E1 / E3）。同格的多次 run 来源一致，取首个非空值。
-    task_origin: TaskOrigin = E1_ORIGIN
+    task_origin: TaskOrigin = ""
 
     @property
     def runs(self) -> int:
@@ -456,7 +461,7 @@ def _cell(rows: Sequence[RunRow], task_id: str, arm: str) -> CellResult:
         total_cost_usd=sum(row.cost_usd for row in chosen),
         total_prompt_tokens=sum(row.prompt_tokens for row in chosen),
         total_completion_tokens=sum(row.completion_tokens for row in chosen),
-        task_origin=chosen[0].task_origin if chosen else E1_ORIGIN,
+        task_origin=chosen[0].task_origin if chosen else "",
     )
 
 
@@ -485,6 +490,7 @@ def build_report(
     *,
     tier: BudgetTier = B1_TIER,
     tasks: Iterable[str] | None = None,
+    arms: Iterable[str] | None = None,
 ) -> DoseReport:
     """把一批 run 聚成 ``tier`` 档的剂量曲线报告。
 
@@ -495,16 +501,24 @@ def build_report(
     selected = [row for row in all_rows if row.budget_tier == tier]
 
     present_arms = {row.arm for row in selected}
-    # 规范档位即使一个 run 都没有也要出现在表里——缺了就是缺口，不是"这档不存在"。
-    arms = tuple(sorted(present_arms | set(ARM_ORDER), key=_arm_rank))
+    if arms is None:
+        # 完整曲线里，规范档位即使一个 run 都没有也要出现。
+        wanted_arms = present_arms | set(ARM_ORDER)
+    else:
+        wanted_arms = set(arms)
+    arm_columns = tuple(sorted(wanted_arms, key=_arm_rank))
     if tasks is not None:
         wanted = sorted({str(task) for task in tasks})
     else:
         wanted = sorted({row.task_id for row in selected})
     task_ids = tuple(wanted)
 
-    cells = tuple(_cell(selected, task_id, arm) for task_id in task_ids for arm in arms)
-    columns = tuple(_column(selected, arm) for arm in arms)
+    cells = tuple(
+        _cell(selected, task_id, arm)
+        for task_id in task_ids
+        for arm in arm_columns
+    )
+    columns = tuple(_column(selected, arm) for arm in arm_columns)
     marginals = tuple(
         MarginalStep(
             arm=columns[index].arm,
@@ -523,7 +537,7 @@ def build_report(
     )
     return DoseReport(
         tier=tier,
-        arms=arms,
+        arms=arm_columns,
         tasks=task_ids,
         cells=cells,
         columns=columns,

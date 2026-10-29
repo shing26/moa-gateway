@@ -224,9 +224,13 @@ def test_in_memory_vector_store_upsert_replaces_same_source() -> None:
 
 
 def test_build_vector_store_returns_in_memory_when_no_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("CODE_REVIEW_DATABASE_URL", raising=False)
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.delenv("POSTGRES_URL", raising=False)
+    from app.config import settings
+
+    # DSN 的读取点已统一到 settings；测试必须在 import 后直接钉住它。只删 env
+    # 会在 build_vector_store() 首次 import app.config 时重新触发 .env 装载
+    # （本机就是这么选到 PgVectorStore 的），用例结果会依赖执行顺序。
+    monkeypatch.setattr(settings, "vector_db_dsn", "")
+    monkeypatch.setenv("CODE_REVIEW_VECTOR_DB_PATH", "")
     store = build_vector_store()
     assert isinstance(store, InMemoryVectorStore)
 
@@ -372,7 +376,10 @@ async def test_knowledge_base_list_docs_uses_configured_embedding_dimension(
 
 @pytest.mark.asyncio
 async def test_knowledge_base_delete_doc_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CODE_REVIEW_DATABASE_URL", "")
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "vector_db_dsn", "")
+    monkeypatch.setenv("CODE_REVIEW_VECTOR_DB_PATH", "")
     from apps.code_review_pipeline.rag.knowledge_base import build_knowledge_base
     kb = build_knowledge_base()
     result = await kb.delete_doc("p1")

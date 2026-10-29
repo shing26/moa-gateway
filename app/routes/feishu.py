@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import json
 import logging
 import os
@@ -33,8 +34,43 @@ _MAX_SEEN = 100
 # fire-and-forget 的 HITL 闭环任务必须持引用：asyncio 只保留弱引用，
 # 请求作用域结束后任务可能被 GC 回收、中途静默消失（官方文档明确警告）。
 _background_tasks: set[asyncio.Task] = set()
+_review_store = None
+# Review-card callbacks are low volume. Serialize them inside the gateway so a
+# double-click cannot write two conflicting human-decision audits before the
+# database state transition rejects the loser.
+_review_action_lock = asyncio.Lock()
 
 logger = logging.getLogger("moa.routes.feishu")
+
+
+def _get_review_store():
+    global _review_store
+    if _review_store is None:
+        from apps.code_review_pipeline.storage.review_store import build_review_store
+
+        _review_store = build_review_store()
+    return _review_store
+
+
+def _review_task_id(trace_id: str) -> str:
+    return trace_id.removeprefix("cr_")
+
+
+def _review_finding_dicts(findings: tuple[object, ...]) -> tuple[dict, ...]:
+    return tuple(
+        {
+            "finding_uid": item.finding_uid,
+            "severity": item.severity,
+            "file": item.file,
+            "line": item.line,
+            "title": item.title,
+            "description": item.description,
+            "suggestion": item.suggestion,
+            "evidence": list(item.evidence),
+        }
+        for item in findings
+        if getattr(item, "status", "") == "published"
+    )
 
 async def get_adapter():
     global _adapter
@@ -183,6 +219,272 @@ async def _process_hitl_card(
             trace_id, action, outcome, duration_ms,
         )
 
+
+async def _process_review_card_action(
+    *,
+    action: str,
+    value: dict,
+    operator_id: str,
+    session_id: str,
+    event_id: str,
+    message_id: str = "",
+) -> None:
+    """Handle per-finding feedback and the terminal publish/reject decisions.
+
+    This path is intentionally separate from chat HITL and merge approval. It
+    only acts on persisted review findings and never calls the merge API.
+    """
+    trace_id = str(value.get("trace_id") or "")
+    head_sha = str(value.get("head_sha") or "")
+    gate_error = approver_gate_error(
+        operator_id,
+        settings.hitl_approver_ids,
+        raw_insecure=settings.gateway_allow_insecure,
+    )
+    if gate_error is not None:
+        logger.warning("review card action rejected: %s trace=%s", gate_error, trace_id)
+        await _safe_send(session_id, "你没有审批该请求的权限", trace_id)
+        return
+    if not trace_id:
+        await _safe_send(session_id, "卡片缺少 trace_id，已忽略", trace_id)
+        return
+    if not settings.code_review_finding_feedback_enabled:
+        await _safe_send(session_id, "PR finding 反馈闭环当前已关闭", trace_id)
+        return
+
+    store = _get_review_store()
+    record = store.get(trace_id)
+    if record is None:
+        await _safe_send(session_id, "审查记录不存在或已过期", trace_id)
+        return
+    current_trace = store.current_trace_id(record.repo, record.pr_number)
+    if current_trace and current_trace != trace_id:
+        await _safe_send(session_id, "该卡片对应的审查版本已过期，请使用最新卡片", trace_id)
+        return
+    identity = (record.repo, record.pr_number, record.head_sha)
+    if head_sha and head_sha != record.head_sha:
+        await _safe_send(session_id, "该卡片对应的 head SHA 已过期，请使用最新卡片", trace_id)
+        return
+    review_run_id = str(value.get("review_run_id") or "")
+    if review_run_id != record.review_run_id:
+        await _safe_send(session_id, "该卡片对应的审查运行版本已过期，请使用最新卡片", trace_id)
+        return
+    state = store.get_task_state(identity)
+    recorded_review_id = store.get_posted_review_id(identity)
+    if action == "review_publish" and recorded_review_id and state != "posting":
+        await _safe_send(
+            session_id,
+            f"该审查已写回 GitHub（already_posted, review={recorded_review_id}）",
+            trace_id,
+        )
+        return
+    posting_retry = action == "review_publish" and state == "posting"
+    if state not in {"running", "waiting_approval"} and not posting_retry:
+        await _safe_send(session_id, f"当前任务状态为 {state or 'unknown'}，不能再执行该操作", trace_id)
+        return
+
+    if action == "review_finding_feedback":
+        await _record_review_feedback(
+            store=store,
+            record=record,
+            value=value,
+            operator_id=operator_id,
+            session_id=session_id,
+            event_id=event_id,
+            message_id=message_id,
+        )
+        return
+    if action not in {"review_publish", "review_reject"}:
+        logger.warning("unknown review card action=%s trace=%s", action, trace_id)
+        return
+
+    status = store.feedback_status(trace_id)
+    if not status.complete and not posting_retry:
+        await _safe_send(
+            session_id,
+            f"还有 {status.total_findings - status.labelled_findings} 条 finding 未标注",
+            trace_id,
+        )
+        return
+
+    # Feedback can span minutes. Recheck immediately before the terminal action;
+    # the database transition remains the authoritative final guard.
+    current_trace = store.current_trace_id(record.repo, record.pr_number)
+    if current_trace and current_trace != trace_id:
+        await _safe_send(
+            session_id,
+            "该卡片对应的审查版本已过期，请使用最新卡片",
+            trace_id,
+        )
+        return
+
+    # Finding pages are delivered while the worker remains ``running`` so a
+    # crash before notification is still reclaimable. A terminal action that
+    # arrives before the worker's final transition can safely establish the
+    # waiting state itself once every finding has been labelled.
+    if state == "running":
+        try:
+            store.transition_task(
+                identity,
+                "request_approval",
+                expected_review_run_id=record.review_run_id,
+            )
+        except Exception:
+            current = store.get_task_state(identity)
+            if current != "waiting_approval":
+                raise
+
+    findings = store.list_findings(trace_id)
+    if action == "review_publish":
+        from apps.code_review_pipeline.approval import approve_task
+
+        github = build_github_client()
+        try:
+            outcome = await approve_task(
+                store,
+                github,
+                identity,
+                trace_id,
+                operator=operator_id,
+                summary=(
+                    f"moa code review: `{_review_task_id(trace_id)}`\n\n"
+                    f"人工已逐条标注 {status.total_findings} 条 finding。"
+                ),
+                findings=_review_finding_dicts(findings),
+                require_feedback=True,
+                dry_run=settings.code_review_publish_dry_run,
+                expected_review_run_id=record.review_run_id,
+            )
+        except Exception as exc:
+            logger.exception("review publish failed trace=%s", trace_id)
+            await _safe_send(session_id, f"写回 GitHub 失败：{exc}", trace_id)
+            return
+        finally:
+            close = getattr(github, "aclose", None)
+            if close is not None:
+                await close()
+        if outcome.status == "dry_run":
+            message = "审批已通过，但 CODE_REVIEW_PUBLISH_DRY_RUN 已开启；本次未写回 GitHub"
+        else:
+            message = (
+                "已批准并写回 GitHub"
+                f"（{outcome.status}, review={outcome.review_id or '-'}）"
+            )
+        await _safe_send(session_id, message, trace_id)
+        return
+
+    from apps.code_review_pipeline.approval import reject_task
+
+    await reject_task(
+        store,
+        identity,
+        trace_id,
+        operator=operator_id,
+        reason="rejected from Feishu finding review",
+        expected_review_run_id=record.review_run_id,
+    )
+    await _safe_send(session_id, "已拒绝，未写回 GitHub", trace_id)
+
+
+async def _process_review_card_action_serialized(**kwargs) -> None:
+    async with _review_action_lock:
+        await _process_review_card_action(**kwargs)
+
+
+async def _record_review_feedback(
+    *,
+    store,
+    record,
+    value: dict,
+    operator_id: str,
+    session_id: str,
+    event_id: str,
+    message_id: str = "",
+) -> None:
+    from apps.code_review_pipeline.schemas.feedback import FindingFeedback
+
+    disposition = str(value.get("disposition") or "")
+    finding_uid = str(value.get("finding_uid") or "")
+    reason_code = str(value.get("reason_code") or "")
+    if not finding_uid:
+        await _safe_send(session_id, "卡片缺少 finding_uid，已忽略", record.trace_id)
+        return
+    if not event_id:
+        await _safe_send(
+            session_id,
+            "卡片回调缺少 event_id，无法保证反馈幂等，已忽略",
+            record.trace_id,
+        )
+        return
+    callback_event_id = event_id
+    try:
+        feedback = FindingFeedback(
+            event_id=callback_event_id,
+            trace_id=record.trace_id,
+            finding_uid=finding_uid,
+            disposition=disposition,
+            reason_code=reason_code,
+            actor=operator_id,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            review_run_id=record.review_run_id,
+        )
+        inserted = store.record_feedback(feedback)
+    except ValueError as exc:
+        await _safe_send(session_id, f"反馈未保存：{exc}", record.trace_id)
+        return
+    if not inserted:
+        logger.info("duplicate finding feedback event=%s trace=%s", callback_event_id, record.trace_id)
+        return
+
+    status = store.feedback_status(record.trace_id)
+    if message_id:
+        from apps.code_review_pipeline.notifications.feishu_notifier import (
+            FeishuReviewNotifier,
+        )
+
+        updated = await FeishuReviewNotifier.from_env().update_feedback_card(
+            message_id=message_id,
+            trace_id=record.trace_id,
+            repo=record.repo,
+            pr_number=record.pr_number,
+            head_sha=record.head_sha,
+            review_run_id=record.review_run_id,
+            findings=store.list_findings(record.trace_id),
+            feedback_by_uid={
+                uid: event.disposition
+                for uid, event in status.latest_human_by_finding.items()
+            },
+            page=int(value.get("page") or 1),
+            total_pages=int(value.get("total_pages") or 1),
+        )
+        if not updated:
+            logger.warning("feedback card update failed trace=%s", record.trace_id)
+    if status.complete:
+        from apps.code_review_pipeline.notifications.feishu_notifier import (
+            FeishuReviewNotifier,
+        )
+
+        sent = await FeishuReviewNotifier.from_env().send_publish_control(
+            trace_id=record.trace_id,
+            repo=record.repo,
+            pr_number=record.pr_number,
+            head_sha=record.head_sha,
+            review_run_id=record.review_run_id,
+        )
+        if not sent:
+            logger.warning("publish control card not sent trace=%s", record.trace_id)
+            await _safe_send(
+                session_id,
+                "标注已保存，但发布控制卡发送失败；请重新点击任一 finding 标注按钮以重试",
+                record.trace_id,
+            )
+    else:
+        await _safe_send(
+            session_id,
+            f"已记录，还差 {status.total_findings - status.labelled_findings} 条 finding",
+            record.trace_id,
+        )
+
 @router.post("/feishu/event")
 async def feishu_event(request: Request):
     # 卡片回调有 3 秒响应窗口，处理耗时必须可观测（否则只能猜是不是网络）。
@@ -243,6 +545,19 @@ async def feishu_event(request: Request):
             # API 发消息会撑爆窗口，客户端报 200341"出错了，请稍后重试"。
             task = asyncio.create_task(
                 _process_hitl_card(action, trace_id, session_id, parsed.get("operator_id") or "")
+            )
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
+        elif action in ("review_finding_feedback", "review_publish", "review_reject"):
+            task = asyncio.create_task(
+                _process_review_card_action_serialized(
+                    action=action,
+                    value=action_value,
+                    operator_id=parsed.get("operator_id") or "",
+                    session_id=session_id,
+                    event_id=str(parsed.get("event_id") or body.get("event_id") or ""),
+                    message_id=str(parsed.get("message_id") or ""),
+                )
             )
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)

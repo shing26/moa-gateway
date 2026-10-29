@@ -19,8 +19,11 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
+import tempfile
 import time
+from pathlib import Path
 from typing import Any
 
 
@@ -222,13 +225,8 @@ def cmd_demo_status(args: argparse.Namespace) -> int:
 def _summary_from_audit(task_key: str) -> str:
     """从审计链里还原一条人读得懂的结论摘要。
 
-    为什么绕审计取：**逐条 finding 目前没有持久化**——``code_review_findings`` 这张
-    表建了但全仓库没有任何写入方（只有 schema.sql 与一条外键注释提到它）。所以拿不
-    到每条 finding 的 file/line。审计里存的是每个 agent 的**严重度计数**，那是被
-    真正落盘、并且有哈希链保护的部分，就用它。
-
-    这是一个已知的欠账而不是权宜：要让 PR 评论里有逐条定位，得先把 findings 写进
-    ``code_review_findings``。本轮不补——它属于"结论存储"，不在可靠执行底座范围内。
+    审计链保留每个 agent 的严重度计数，即使审查结论行尚未写入，也能给 CLI
+    一个可解释的摘要。逐条 finding 的定位与反馈由 review store 单独持久化。
     """
     from app.audit.recorder import entries_for_trace
     from app.config import settings
@@ -250,6 +248,25 @@ def _summary_from_audit(task_key: str) -> str:
     return f"moa code review: `{task_key}`\n\n发现：{breakdown}。"
 
 
+def _finding_dicts_for_task(store: Any, task_key: str) -> tuple[dict[str, Any], ...]:
+    trace_id = task_key if task_key.startswith("cr_") else f"cr_{task_key}"
+    rows = store.list_findings(trace_id)
+    return tuple(
+        {
+            "finding_uid": item.finding_uid,
+            "severity": item.severity,
+            "file": item.file,
+            "line": item.line,
+            "title": item.title,
+            "description": item.description,
+            "suggestion": item.suggestion,
+            "evidence": list(item.evidence),
+        }
+        for item in rows
+        if getattr(item, "status", "") == "published"
+    )
+
+
 def cmd_demo_approve(args: argparse.Namespace) -> int:
     identity = _identity_from_task_key(args.task_key)
 
@@ -260,21 +277,26 @@ def cmd_demo_approve(args: argparse.Namespace) -> int:
         from apps.code_review_pipeline.storage.review_store import build_review_store
 
         store = build_review_store()
+        review_trace_id = args.task_key if args.task_key.startswith("cr_") else f"cr_{args.task_key}"
         if args.reject:
             return await reject_task(
-                store, identity, args.task_key,
+                store, identity, review_trace_id,
                 operator=args.operator, reason=args.reject,
             )
         github = build_github_client()
         try:
+            findings = _finding_dicts_for_task(store, args.task_key)
             # --real 才真发；默认与 settings 一致（dry-run）。dry-run 走的是**完全
             # 相同**的判定路径（主判据 -> marker 兜底），只在最后一步停下。
             dry_run = not args.real and settings.code_review_publish_dry_run
             outcome = await approve_task(
-                store, github, identity, args.task_key,
+                store, github, identity, review_trace_id,
                 operator=args.operator,
                 summary=_summary_from_audit(args.task_key),
                 dry_run=dry_run,
+                findings=findings,
+                require_feedback=bool(findings)
+                and settings.code_review_finding_feedback_enabled,
             )
         finally:
             close = getattr(github, "aclose", None)
@@ -284,6 +306,296 @@ def cmd_demo_approve(args: argparse.Namespace) -> int:
 
     print(f"task_key : {args.task_key}")
     print(f"result   : {asyncio.run(run())}")
+    return 0
+
+
+class TerminalPushApprovalPort:
+    async def request(self, *, run_id: str, bundle) -> Any:
+        from apps.code_review_pipeline.change.pipeline import ChangeApproval
+
+        print(f"run_id   : {run_id}")
+        print(f"branch   : {bundle.branch}")
+        print(f"bundle   : {bundle.bundle_hash}")
+        print(f"patch    : {bundle.patch_hash}")
+        print(f"verify   : exit={bundle.verify_exit_code}")
+        if not sys.stdin.isatty():
+            print("non-interactive stdin; push approval denied")
+            return None
+        operator = (await asyncio.to_thread(input, "approver: ")).strip()
+        answer = (
+            await asyncio.to_thread(
+                input,
+                "type APPROVE to push this exact bundle: ",
+            )
+        ).strip()
+        if not operator or answer != "APPROVE":
+            return None
+        return ChangeApproval(
+            approver=operator,
+            trace_id=bundle.trace_id,
+            bundle_hash=bundle.bundle_hash,
+            run_id=run_id,
+        )
+
+
+def cmd_delivery_run(args: argparse.Namespace) -> int:
+    from app.agents.provider import LLMClient, LLMConfig
+    from app.config import settings
+    from apps.code_review_pipeline.change.pipeline import (
+        ChangePipeline,
+        verify_command_from_env,
+    )
+    from apps.code_review_pipeline.delivery.adapters.github import (
+        GitHubChangeAdapter,
+    )
+    from apps.code_review_pipeline.delivery.adapters.production_agent import (
+        ProductionImplementer,
+    )
+    from apps.code_review_pipeline.delivery.audit import WalDeliveryAudit
+    from apps.code_review_pipeline.delivery.flow import DeliveryFlow
+    from apps.code_review_pipeline.delivery.models import (
+        DeliveryPolicy,
+        DeliveryRequest,
+    )
+    from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
+    from apps.code_review_pipeline.delivery.workspace import (
+        GitHubWorkspaceProvisioner,
+    )
+    from apps.code_review_pipeline.merge_store import (
+        PostgresMergeStore,
+        build_merge_store,
+    )
+    from apps.code_review_pipeline.routing.github_provider import build_github_client
+
+    if not settings.change_agent_push_enabled:
+        print(
+            "CHANGE_AGENT_PUSH_ENABLED=0；delivery run 是真实交付入口。"
+            "dry-run 请使用 scripts/run_change_demo.py。",
+            file=sys.stderr,
+        )
+        return 2
+    if settings.delivery_topology != "single":
+        print(
+            "delivery run 当前只支持 single topology；verified topology "
+            "属于另行规划的 S1 实验，不能静默降级。",
+            file=sys.stderr,
+        )
+        return 2
+    if not settings.change_agent_model.strip():
+        print("CHANGE_AGENT_MODEL 未配置", file=sys.stderr)
+        return 2
+    verify_command = verify_command_from_env(settings.change_agent_verify_command)
+    if not verify_command:
+        print("CHANGE_AGENT_VERIFY_COMMAND 未配置", file=sys.stderr)
+        return 2
+    if not settings.github_token:
+        print("GITHUB_TOKEN 未配置", file=sys.stderr)
+        return 2
+
+    merge_store = build_merge_store()
+    if not isinstance(merge_store, PostgresMergeStore):
+        print(
+            "delivery run 需要共享 MergeStore；请配置 "
+            "VECTOR_DB_DSN 或 CODE_REVIEW_DATABASE_URL",
+            file=sys.stderr,
+        )
+        return 2
+
+    config = LLMConfig.from_env("LLM")
+    config.model = settings.change_agent_model
+    llm = LLMClient(config)
+    github = build_github_client()
+    policy = DeliveryPolicy(
+        verify_command=verify_command,
+        topology=settings.delivery_topology,
+        max_steps=settings.delivery_max_steps,
+        max_tokens=settings.delivery_max_tokens,
+    )
+    request = DeliveryRequest(
+        trace_id=args.trace_id,
+        repo=args.repo,
+        base_sha=args.base_sha,
+        base_branch=args.base_branch,
+        branch=args.branch,
+        goal=args.goal,
+        title=args.title,
+        body=args.body,
+        origin=args.origin,
+        source_ref=args.source_ref,
+    )
+
+    async def execute():
+        try:
+            with tempfile.TemporaryDirectory(prefix="moa-delivery-") as raw:
+                workspace = await GitHubWorkspaceProvisioner(
+                    github=github
+                ).materialize(
+                    repo=args.repo,
+                    base_sha=args.base_sha,
+                    destination=Path(raw) / "workspace",
+                )
+                pipeline = ChangePipeline(
+                    github=github,
+                    repo=args.repo,
+                    workspace=workspace,
+                    verify_command=verify_command,
+                    model_name=settings.change_agent_model,
+                    base_branch=args.base_branch,
+                    push_enabled=True,
+                )
+                adapter = GitHubChangeAdapter(
+                    pipeline=pipeline,
+                    merge_store=merge_store,
+                )
+                flow = DeliveryFlow(
+                    workspace=workspace,
+                    policy=policy,
+                    implementer=ProductionImplementer(
+                        llm=llm,
+                        verify_command=verify_command,
+                    ),
+                    preparer=adapter,
+                    approval=TerminalPushApprovalPort(),
+                    publisher=adapter,
+                    recorder=DeliveryRunStore(settings.delivery_run_record_dir),
+                    audit=WalDeliveryAudit(),
+                )
+                return await flow.run(request)
+        finally:
+            await merge_store.close()
+            await llm.aclose()
+            await github.aclose()
+
+    run = asyncio.run(execute())
+    print(f"run_id    : {run.run_id}")
+    print(f"state     : {run.state.value}")
+    print(f"failure   : {run.failure.to_dict() if run.failure else '-'}")
+    if run.push is not None:
+        print(f"pr        : {run.push.pull_request.url}")
+        print(f"head_sha  : {run.push.pull_request.head_sha}")
+    print(f"record    : {settings.delivery_run_record_dir}/{run.run_id}.json")
+    return 0 if run.state.value in {"waiting_ci", "ready_for_push_approval"} else 1
+
+
+def cmd_delivery_view(args: argparse.Namespace) -> int:
+    """Show the current DeliveryRun view with the latest MergeRecord."""
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
+    from apps.code_review_pipeline.merge_store import build_merge_store
+
+    store = DeliveryRunStore(settings.delivery_run_record_dir)
+    run = store.load(args.run_id)
+    merge_store = build_merge_store()
+
+    async def read() -> object:
+        try:
+            return await asyncio.to_thread(store.view, run, merge_store)
+        finally:
+            close = getattr(merge_store, "close", None)
+            if close is not None:
+                await close()
+
+    current = asyncio.run(read())
+    print(json.dumps(current.to_dict(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
+    """Collect and diagnose failed CI evidence without writing to GitHub."""
+    import httpx
+
+    from app.config import settings
+
+    if not settings.github_token:
+        print("GITHUB_TOKEN 未配置", file=sys.stderr)
+        return 2
+
+    from apps.code_review_pipeline.delivery.adapters import github_ci
+    from apps.code_review_pipeline.delivery.ci_triage import (
+        build_ci_triage_report,
+        invalidate_ci_triage_request,
+        write_ci_triage_artifacts,
+        write_ci_triage_unavailable_artifacts,
+    )
+    from apps.code_review_pipeline.routing.github_provider import (
+        build_github_client,
+    )
+
+    github = build_github_client()
+
+    async def execute():
+        try:
+            collector = github_ci.GitHubCiEvidenceCollector(
+                github=github,
+                max_jobs=settings.ci_triage_max_jobs,
+                max_log_chars=settings.ci_triage_max_log_chars,
+            )
+            evidence = await collector.collect(
+                repo=args.repo,
+                head_sha=args.sha,
+            )
+            report = build_ci_triage_report(
+                evidence,
+                base_branch=args.base_branch,
+                branch=args.branch,
+                trace_id=args.trace_id,
+            )
+            return write_ci_triage_artifacts(
+                report,
+                settings.ci_triage_output_dir,
+            )
+        finally:
+            await github.aclose()
+
+    try:
+        artifacts = asyncio.run(execute())
+    except github_ci.CiNotFailed as exc:
+        invalidate_ci_triage_request(
+            trace_id=args.trace_id,
+            head_sha=args.sha,
+            directory=settings.ci_triage_output_dir,
+        )
+        print(f"CI triage skipped: {exc}", file=sys.stderr)
+        return 1
+    except httpx.HTTPStatusError as exc:
+        unavailable = write_ci_triage_unavailable_artifacts(
+            repo=args.repo,
+            head_sha=args.sha,
+            trace_id=args.trace_id,
+            directory=settings.ci_triage_output_dir,
+            status_code=exc.response.status_code,
+        )
+        print(
+            "CI triage failed: GitHub API returned "
+            f"HTTP {exc.response.status_code}",
+            file=sys.stderr,
+        )
+        print(f"report    : {unavailable.json_path}", file=sys.stderr)
+        print(f"markdown  : {unavailable.markdown_path}", file=sys.stderr)
+        print(
+            "human review required; CI failure status was not established; "
+            "no GitHub writes performed.",
+            file=sys.stderr,
+        )
+        return 1
+    except Exception as exc:
+        invalidate_ci_triage_request(
+            trace_id=args.trace_id,
+            head_sha=args.sha,
+            directory=settings.ci_triage_output_dir,
+        )
+        print(f"CI triage failed: {exc}", file=sys.stderr)
+        print(
+            "human review required; CI failure status was not established; "
+            "no GitHub writes performed.",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"report    : {artifacts.json_path}")
+    print(f"markdown  : {artifacts.markdown_path}")
+    print(f"request   : {artifacts.request_path}")
+    print("human review required; no GitHub writes performed.")
     return 0
 
 
@@ -338,6 +650,40 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--reject", default="", metavar="REASON", help="拒绝而不是批准")
     approve.set_defaults(func=cmd_demo_approve)
 
+    delivery = sub.add_parser("delivery", help="受治理的仓库交付")
+    delivery_sub = delivery.add_subparsers(dest="command", required=True)
+    delivery_run = delivery_sub.add_parser("run", help="实现、验证、审批、推送并登记 PR")
+    delivery_run.add_argument("--repo", required=True)
+    delivery_run.add_argument("--base-sha", required=True)
+    delivery_run.add_argument("--base-branch", default=None)
+    delivery_run.add_argument("--branch", required=True)
+    delivery_run.add_argument("--title", required=True)
+    delivery_run.add_argument("--body", default="")
+    delivery_run.add_argument("--goal", required=True)
+    delivery_run.add_argument(
+        "--origin",
+        choices=["manual", "issue", "ci_failure"],
+        default="manual",
+    )
+    delivery_run.add_argument("--source-ref", default="")
+    delivery_run.add_argument("--trace-id", default=None)
+    delivery_run.set_defaults(func=cmd_delivery_run)
+
+    delivery_view = delivery_sub.add_parser(
+        "view",
+        help="读取 DeliveryRun 快照并叠加最新 MergeRecord",
+    )
+    delivery_view.add_argument("--run-id", required=True)
+    delivery_view.set_defaults(func=cmd_delivery_view)
+
+    delivery_ci_triage = delivery_sub.add_parser(
+        "ci-triage",
+        help="只读收集失败 CI 证据并生成本地诊断报告",
+    )
+    delivery_ci_triage.add_argument("--repo", required=True)
+    delivery_ci_triage.add_argument("--sha", required=True)
+    delivery_ci_triage.set_defaults(func=cmd_delivery_ci_triage)
+
     return parser
 
 
@@ -356,16 +702,24 @@ def cmd_collab(args: argparse.Namespace) -> int:
         ScriptedExpert,
     )
 
-    if args.live:
-        orchestrator = CollabOrchestrator.from_deps()
-    else:
-        orchestrator = CollabOrchestrator(
-            collaboration_llm=MockCollaborationLLM(),
-            experts={key: ScriptedExpert() for key in ("coder", "general", "review")},
-        )
-
     async def run():
-        return await orchestrator.run(task=args.task, session_id="collab-cli")
+        if args.live:
+            orchestrator = CollabOrchestrator.from_deps()
+        else:
+            from langgraph.checkpoint.memory import InMemorySaver
+
+            orchestrator = CollabOrchestrator(
+                collaboration_llm=MockCollaborationLLM(),
+                experts={
+                    key: ScriptedExpert()
+                    for key in ("coder", "general", "review")
+                },
+                checkpointer=InMemorySaver(),
+            )
+        try:
+            return await orchestrator.run(task=args.task, session_id="collab-cli")
+        finally:
+            await orchestrator.aclose()
 
     result = asyncio.run(run())
     print(f"trace_id : {result.trace_id}")
@@ -382,8 +736,32 @@ def cmd_collab(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_delivery_defaults(args: argparse.Namespace) -> None:
+    if getattr(args, "group", "") != "delivery":
+        return
+    from app.config import settings
+
+    if getattr(args, "base_branch", None) is None:
+        args.base_branch = settings.change_agent_base_branch
+    if getattr(args, "command", "") == "ci-triage":
+        sha_prefix = args.sha
+        trace_repo = re.sub(r"[^A-Za-z0-9]+", "-", args.repo).strip("-").lower()
+        if getattr(args, "branch", None) is None:
+            args.branch = f"moa/ci-fix-{sha_prefix}"
+        if getattr(args, "trace_id", None) is None:
+            args.trace_id = f"ci-{trace_repo}-{sha_prefix}"
+        return
+    if getattr(args, "command", "") != "run":
+        return
+    if getattr(args, "trace_id", None) is None:
+        args.trace_id = f"delivery-{time.time_ns()}"
+    if not getattr(args, "body", ""):
+        args.body = args.goal
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _apply_delivery_defaults(args)
     # Windows 下 psycopg 拒绝 ProactorEventLoop（与 app/__main__.py 同一处理）。
     if os.name == "nt":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

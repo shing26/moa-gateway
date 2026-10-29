@@ -23,8 +23,12 @@ cloudflared.exe
 .zcode/
 # bench 实验台的工作区与 RunResult 落盘目录（手动跑 bench/run_task.py 时产生）
 .bench-work/
+.bench-experiments/
+.scratch/m2-batch-proof/
 __pycache__/
 
 logs/
 data/
 evals/reports/
+# 分诊 workspace 物化时生成的空 patch 临时文件
+bench/triage/_empty.patch

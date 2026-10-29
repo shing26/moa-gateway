@@ -29,7 +29,10 @@ dev = ["pytest>=8.2", "pytest-asyncio>=0.23", "ruff>=0.6", "bandit>=1.7"]
 # adapter (app/orchestration/graph.py). Resolving it pulls ~20 packages
 # including langsmith, which is exactly the dependency surface the default
 # (self-built FSM) runtime avoids. Install with: uv sync --extra langgraph
-langgraph = ["langgraph>=1.2"]
+langgraph = [
+    "langgraph>=1.2",
+    "langgraph-checkpoint-sqlite>=3.0",
+]
 
 [tool.pytest.ini_options]
 # 只收集 tests/：根目录的临时探测脚本和 apps/ 下的生产模块
@@ -39,6 +42,7 @@ pythonpath = ["."]
 markers = [
   "postgres: 需要真实 PostgreSQL 的集成用例（compose 起 postgres；连不上则 skip）",
   "redis: 需要真实 Redis 的集成用例（compose 起 redis；连不上则 skip）",
+  "live: 需要真实模型的显式手工 smoke；默认 CI 不设置运行开关",
 ]
 
 [tool.ruff]

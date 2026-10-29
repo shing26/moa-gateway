@@ -111,6 +111,9 @@ async def record_human_decision(
     operator: str,
     decision: str,
     duration_ms: float = 0.0,
+    run_id: str = "",
+    trace_id: str = "",
+    bundle_hash: str = "",
 ) -> None:
     """人工批准/拒绝写一行——这是"谁让这条 agent 结论生效"的唯一记录。"""
     await record(
@@ -125,6 +128,9 @@ async def record_human_decision(
                 "operator": operator,
                 "decision": decision,
                 "hitl_duration_ms": duration_ms,
+                "run_id": run_id,
+                "trace_id": trace_id,
+                "bundle_hash": bundle_hash,
             },
         )
     )

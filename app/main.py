@@ -18,8 +18,9 @@ from app.middleware.auth import AuthMiddleware, insecure_mode_enabled
 from app.middleware.flags import FeatureFlagMiddleware
 from app.config import settings
 from app.routes.chat import router as chat_router
-from app.routes.collab import router as collab_router
+from app.routes.collab import close_collab, router as collab_router
 from app.routes.dashboard import router as dashboard_router
+from app.routes.experiments import router as experiments_router
 from app.routes.feishu import router as feishu_router
 from app.routes.health import router as health_router
 from app.routes.webhook import webhook_router
@@ -71,6 +72,7 @@ async def lifespan(_: FastAPI):
         await es_writer.aclose()
     await obsidian_sync.close()
     await vector_client.close()
+    await close_collab()
     engine.session_store.clear_all()
     _flag_client.invalidate()
 
@@ -79,6 +81,7 @@ app = FastAPI(title="Agent Gateway", version="0.1.0", lifespan=lifespan)
 STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
 app.mount("/dashboard/static", StaticFiles(directory=STATIC_DIR), name="dashboard-static")
 app.include_router(dashboard_router)
+app.include_router(experiments_router)
 app.include_router(chat_router)
 app.include_router(collab_router)
 app.include_router(feishu_router)

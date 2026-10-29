@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -79,6 +79,22 @@ class Step:
 
 
 @dataclass(frozen=True)
+class LLMRetryEvent:
+    """一次失败的真实 LLM 尝试；用于区分“最终成功”与“贯穿 429 后成功”。"""
+
+    call_index: int
+    failed_attempt: int
+    max_attempts: int
+    delay_ms: int
+    error_type: str
+    status_code: int | None = None
+    rate_limited: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class Usage:
     """一次 run 的账本。来源是 ``LLMClient.last_metrics``（N3 已建好的通道）。"""
 
@@ -87,6 +103,17 @@ class Usage:
     completion_tokens: int = 0
     cost_usd: float = 0.0
     llm_latency_ms: float = 0.0
+    #: 每次真实 LLM 请求的稳定摘要（messages + tool schemas），用于复核实验
+    #: 时确认输入上下文没有在静默变化。
+    prompt_hashes: tuple[str, ...] = ()
+    #: 每次调用的 provider 停止原因。``length`` 必须在账本里可见，否则空输出
+    #: 只能被解释成"模型没想好"，无法区分是输出额度问题。
+    finish_reasons: tuple[str, ...] = ()
+    #: reasoning 总字符数。只记规模，不把思维链正文写进 Run Record。
+    reasoning_chars: int = 0
+    #: 被有界重试吸收的调用故障。没有它，一次先 429 后成功的 run 看起来与
+    #: 全程稳定成功的 run 完全相同，容量门禁就无法复核。
+    retry_events: tuple[LLMRetryEvent, ...] = ()
 
     @property
     def total_tokens(self) -> int:
@@ -96,6 +123,8 @@ class Usage:
     def add_call(self, metrics: Mapping[str, Any] | None) -> "Usage":
         """并入一次 LLM 调用的用量。``llm_calls`` 每次 +1，与 metrics 是否为空无关。"""
         values = metrics or {}
+        prompt_hash = str(values.get("prompt_hash", "") or "")
+        finish_reason = str(values.get("finish_reason", "") or "")
         return Usage(
             llm_calls=self.llm_calls + 1,
             prompt_tokens=self.prompt_tokens + int(values.get("prompt_tokens", 0) or 0),
@@ -104,7 +133,21 @@ class Usage:
             cost_usd=self.cost_usd + float(values.get("cost_usd", 0.0) or 0.0),
             llm_latency_ms=self.llm_latency_ms
             + float(values.get("llm_latency_ms", 0.0) or 0.0),
+            prompt_hashes=(
+                self.prompt_hashes + (prompt_hash,) if prompt_hash else self.prompt_hashes
+            ),
+            finish_reasons=(
+                self.finish_reasons + (finish_reason,)
+                if finish_reason
+                else self.finish_reasons
+            ),
+            reasoning_chars=self.reasoning_chars
+            + int(values.get("reasoning_chars", 0) or 0),
+            retry_events=self.retry_events,
         )
+
+    def add_retry(self, event: LLMRetryEvent) -> "Usage":
+        return replace(self, retry_events=(*self.retry_events, event))
 
     def __add__(self, other: "Usage") -> "Usage":
         """把多段执行体的账并进同一份。"""
@@ -116,6 +159,10 @@ class Usage:
             completion_tokens=self.completion_tokens + other.completion_tokens,
             cost_usd=self.cost_usd + other.cost_usd,
             llm_latency_ms=self.llm_latency_ms + other.llm_latency_ms,
+            prompt_hashes=self.prompt_hashes + other.prompt_hashes,
+            finish_reasons=self.finish_reasons + other.finish_reasons,
+            reasoning_chars=self.reasoning_chars + other.reasoning_chars,
+            retry_events=self.retry_events + other.retry_events,
         )
 
 
@@ -189,6 +236,14 @@ class AgentRun:
     #: 每个子任务的账本切片。串行档可以留空；并发档必须填，否则共享的
     #: ``Usage`` 只能说明总成本，不能说明是谁花的。
     subtask_usage: tuple[SubtaskUsage, ...] = ()
+    #: 并行 worker 的写集摘要。正文只留在内部合并过程中，不进入 Run Record。
+    workspace_writes: tuple[dict[str, Any], ...] = ()
+    #: 同一路径的分歧写入。冲突时目标文件保留合并前内容，候选摘要留在这里。
+    workspace_conflicts: tuple[dict[str, Any], ...] = ()
+    #: 已确定合并到主工作区的文件级变更。
+    workspace_merges: tuple[dict[str, Any], ...] = ()
+    #: planner 实际产出的结构化计划。L0/L1 为空。
+    plan: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -220,8 +275,8 @@ class RunResult:
     #: 增量按它算——"多花了多少"在免费端点上只能是 token 口径。
     baseline_tokens: int = 0
     #: 任务来源（``E1`` = 真实历史 bug / ``E3`` = 合成缺陷）。从任务定义透传到判决，
-    #: 报告靠它把两类任务分开说；缺省按 ``E1`` 读（既有任务全是 E1）。
-    source: TaskOrigin = E1_ORIGIN
+    #: 报告靠它把两类任务分开说；来源必须显式透传，不提供静默默认。
+    source: TaskOrigin = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -266,6 +321,7 @@ __all__ = [
     "CodingAgent",
     "E1_ORIGIN",
     "E3_ORIGIN",
+    "LLMRetryEvent",
     "Outcome",
     "RunResult",
     "Step",

@@ -1,0 +1,8 @@
+{
+  "task_id": "t2-feature-dark-mode",
+  "issue_text": "希望增加深色模式。现在晚上看 dashboard 太刺眼，系统开了深色模式但应用还是白的。建议跟随系统设置，也提供手动开关。这是个改善体验的小功能，不急。",
+  "expected_category": "feature",
+  "expected_priority": "P3",
+  "expected_route": "auto",
+  "note": "明确的 enhancement 诉求 → feature；纯体验改善无时间压力 → P3；不触发人工条件 → auto。"
+}

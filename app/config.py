@@ -189,6 +189,13 @@ class Settings:
         self.collab_max_subtasks: int = _parse_int(
             os.getenv("COLLAB_MAX_SUBTASKS"), 4, name="COLLAB_MAX_SUBTASKS"
         )
+        # 工作区工具的宿主边界。空值 = 协作入口不允许传 workspace_path；
+        # 只有显式配置一个根目录后，请求才能把该目录内的子目录交给专家。
+        self.collab_workspace_root: str = os.getenv("COLLAB_WORKSPACE_ROOT", "")
+        # HITL 挂起必须跨进程恢复；:memory: 仅用于显式临时运行。
+        self.collab_checkpoint_path: str = os.getenv(
+            "COLLAB_CHECKPOINT_PATH", "data/collab-checkpoints.sqlite3"
+        )
 
         # ── Embedding ─────────────────────────────────────────────────────
         # 未配置则整条语义检索关闭，走 BD-01 关键词回退。仅在配置了
@@ -223,12 +230,80 @@ class Settings:
         self.code_review_auto_migrate: bool = _parse_bool(
             os.getenv("CODE_REVIEW_AUTO_MIGRATE"), True
         )
+        # PR 审查工作区：chroot 在临时目录里，测试命令可由仓库显式覆盖。
+        # 留空时使用系统临时目录 / 自动探测 pytest。
+        self.code_review_workspace_root: str = os.getenv(
+            "CODE_REVIEW_WORKSPACE_ROOT", ""
+        )
+        self.code_review_verify_command: str = os.getenv(
+            "CODE_REVIEW_VERIFY_COMMAND", ""
+        )
 
         # 写回 GitHub 默认**关**（即 dry-run）。刻意与"功能开关"的直觉相反：
         # 往真实 PR 上贴评论是有外部后果的动作，而漏发只是少一次自动化。
         # 所以默认走 dry-run（判定路径完全相同，只在最后一步停下），要真发显式开。
         self.code_review_publish_dry_run: bool = _parse_bool(
             os.getenv("CODE_REVIEW_PUBLISH_DRY_RUN"), True
+        )
+        # Review L1 / feedback are demo defaults, but both have explicit kill
+        # switches so an operator can return to the R0 pipeline without a code
+        # change.
+        self.code_review_critic_enabled: bool = _parse_bool(
+            os.getenv("CODE_REVIEW_CRITIC_ENABLED"), True
+        )
+        self.code_review_finding_feedback_enabled: bool = _parse_bool(
+            os.getenv("CODE_REVIEW_FINDING_FEEDBACK_ENABLED"), True
+        )
+
+        # ── 变更管线（ADR-030）────────────────────────────────────────────
+        # 默认关：推送分支/开 PR 是外部写操作，必须显式开启且经人工审批。
+        self.change_agent_push_enabled: bool = _parse_bool(
+            os.getenv("CHANGE_AGENT_PUSH_ENABLED"), False
+        )
+        # 变更 agent 的模型。留空则管线以 model_not_configured 终止，
+        # 不会静默降级成本机小模型（ADR-030 决策 8）。
+        self.change_agent_model: str = os.getenv("CHANGE_AGENT_MODEL", "")
+        self.change_agent_verify_command: str = os.getenv(
+            "CHANGE_AGENT_VERIFY_COMMAND",
+            self.code_review_verify_command,
+        )
+        self.change_agent_base_branch: str = os.getenv(
+            "CHANGE_AGENT_BASE_BRANCH", "main"
+        )
+
+        # ── 受治理仓库交付（ADR-031）────────────────────────────────────
+        self.delivery_topology: str = (
+            os.getenv("DELIVERY_TOPOLOGY", "single") or "single"
+        ).strip().lower()
+        self.delivery_max_steps: int = _parse_int(
+            os.getenv("DELIVERY_MAX_STEPS"),
+            40,
+            name="DELIVERY_MAX_STEPS",
+        )
+        self.delivery_max_tokens: int = _parse_int(
+            os.getenv("DELIVERY_MAX_TOKENS"),
+            400_000,
+            name="DELIVERY_MAX_TOKENS",
+        )
+        self.delivery_run_record_dir: str = (
+            os.getenv("DELIVERY_RUN_RECORD_DIR", "data/delivery-runs")
+            or "data/delivery-runs"
+        ).strip()
+        # CI triage is read-only evidence collection. These limits bound local
+        # artifacts and downloaded logs; none of them enable GitHub writes.
+        self.ci_triage_output_dir: str = (
+            os.getenv("CI_TRIAGE_OUTPUT_DIR", "data/ci-triage")
+            or "data/ci-triage"
+        ).strip()
+        self.ci_triage_max_jobs: int = _parse_int(
+            os.getenv("CI_TRIAGE_MAX_JOBS"),
+            10,
+            name="CI_TRIAGE_MAX_JOBS",
+        )
+        self.ci_triage_max_log_chars: int = _parse_int(
+            os.getenv("CI_TRIAGE_MAX_LOG_CHARS"),
+            50_000,
+            name="CI_TRIAGE_MAX_LOG_CHARS",
         )
 
         # ── 合并通道（ADR-021）────────────────────────────────────────────
@@ -360,6 +435,32 @@ class Settings:
                 f"CODE_REVIEW_MERGE_POLL_INTERVAL_S 必须为正整数，"
                 f"得到 {self.code_review_merge_poll_interval_s}"
             )
+        if self.delivery_topology not in {"single", "verified"}:
+            raise ValueError(
+                "DELIVERY_TOPOLOGY 只允许 single 或 verified，"
+                f"得到 {self.delivery_topology!r}"
+            )
+        if self.delivery_max_steps <= 0:
+            raise ValueError(
+                f"DELIVERY_MAX_STEPS 必须为正整数，得到 {self.delivery_max_steps}"
+            )
+        if self.delivery_max_tokens <= 0:
+            raise ValueError(
+                f"DELIVERY_MAX_TOKENS 必须为正整数，得到 {self.delivery_max_tokens}"
+            )
+        if not self.delivery_run_record_dir:
+            raise ValueError("DELIVERY_RUN_RECORD_DIR 不能为空")
+        if self.ci_triage_max_jobs <= 0:
+            raise ValueError(
+                f"CI_TRIAGE_MAX_JOBS 必须为正整数，得到 {self.ci_triage_max_jobs}"
+            )
+        if self.ci_triage_max_log_chars <= 0:
+            raise ValueError(
+                "CI_TRIAGE_MAX_LOG_CHARS 必须为正整数，"
+                f"得到 {self.ci_triage_max_log_chars}"
+            )
+        if not self.ci_triage_output_dir:
+            raise ValueError("CI_TRIAGE_OUTPUT_DIR 不能为空")
         # 合并通道由**独立 worker 进程**轮询（app/merge_worker.py），网关与 worker
         # 各建一份 merge_store。无共享 DSN 时两边都是进程内存，worker 看不到网关
         # 建的记录，通道永远不动、也不报错。这是"配了却静默不生效"，所以在启动时
