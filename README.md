@@ -1,9 +1,9 @@
 <div align="center">
 
 # MoA Gateway
-### 可验证的 AI 工程：LLM 治理运行时 + 多智能体实验台
+### 受治理的仓库交付 Agent
 
-仓库名保留历史写法（`Gateway` / `MoA` 两个词在正文口径里停用，理由见下）。项目本身是**一层 LLM 治理运行时**（`app/`）加**一个等预算的多智能体实验台**（`bench/`）；受治理的仓库交付 Agent 是当前产品负载，默认单 Implementer，只读 Verifier 是预注册实验 S1。
+仓库名保留历史写法（`Gateway` / `MoA` 两个词在正文口径里停用，理由见下）。**产品是受治理的仓库交付 Agent**：入口为 `DeliveryRequest -> DeliveryRun`，默认单 Implementer，负责在隔离工作区中修改、验证并产出可审批的 PR；推送和合并仍必须经过 bundle、人工审批与审计。`app/` 是支撑交付链的 LLM 治理运行时，`bench/` 是验证多智能体编排是否值得的等预算实验台。S0 已实现，真实仓库端到端验收尚待完成；只读 Verifier 是预注册实验 S1，默认关闭。
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688.svg)](https://fastapi.tiangolo.com/)
@@ -35,14 +35,13 @@
 
 > [!NOTE]
 > **这是什么、不是什么**：
-> 这个项目是**一层 LLM 治理运行时**（`app/`：拦截、审批、留痕、回归）加**一个等预算的多智能体实验台**（`bench/`：同一任务集、同一预算下把 agent 结构从 L0 加到 L3，看边际收益）。
-> 这里**停用两个词**，并把“开发辅助类 Agent”收窄为受治理的交付负载：
+> 这个项目的**产品**是受治理的仓库交付 Agent；**支撑层**是 `app/` 的治理运行时（拦截、审批、留痕、回归）；**验证层**是 `bench/` 的等预算实验台（同一任务集、同一预算下把 agent 结构从 L0 加到 L3，看边际收益）。三层不能倒过来读成“平台已经支撑多场景”。
+> 这里**停用两个词**，并明确交付 Agent 的当前边界：
 > - **网关**——设计文档 §2.1 判定不成立：请求进来之后是它在干活，不是转发给别人、也不替谁挡流量。"网关"会让人以为它只是中间层。仓库名是历史遗留。
 > - **多智能体系统**——PR 审查 R0 是 5 段顺序 LLM 调用；R1 再加入逐 finding 的 Critic，并把 `revise` 的一次回边送回 Report。它不是无边界 handoff 或并行调度。真有多个执行体并发分工的只有两处，且都不在产品主路径上：`app/orchestration/collaboration.py`（Supervisor + `Send` 扇出，`COLLAB_ENABLED=false`，显式入口，ADR-022）与 `bench/` 的剂量实验（L0–L3，人工跑，不进 CI，ADR-023）。
-> - **开发辅助类 Agent**——这里指受治理的仓库交付 Agent。它默认是单 Implementer，
->   负责改代码、验证、产出可审批的 PR；只读 Verifier 是预注册实验，不是默认拓扑。
+> - **交付 Agent**——默认是单 Implementer，负责改代码、验证、产出可审批的 PR；只读 Verifier 是预注册实验 S1，不是默认拓扑。CI 失败诊断是只读辅助入口，不是 CI 自动修复。
 >
-> 对外一句话：**"我建了个实验台，测出多智能体协作在编码任务上的边际收益在第几档转负——并且我能证明我的 agent 没有在撒谎。"**
+> 对外一句话：**"我让 Agent 把仓库变更做完，但推送、CI 与合并都必须留下可复核证据并经过人批准。"**
 
 ---
 
