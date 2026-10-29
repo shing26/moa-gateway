@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import types
 
 import pytest
@@ -25,6 +26,7 @@ from app.orchestration.collaboration import (
     EXPERT_KEYS,
     CollabOrchestrator,
     CollabResult,
+    LiteLLMCollaborationLLM,
     MockCollaborationLLM,
     ScriptedExpert,
     SubtaskAssignment,
@@ -234,8 +236,9 @@ async def test_max_rounds_bounds_the_reflection_back_edge() -> None:
     assert result.need_human_review is True
     # 到上限仍不通过：**必须说出来**，不能伪装成成功
     assert "critic 未通过" in result.final_text
-    # 2 轮执行，不是无限循环
-    assert result.node_path.count("dispatch") == 2
+    # 依赖链按 wave 返回 dispatch；两轮各含两个执行层和一个收敛到 Critic 的
+    # 空派发，因此是 6 次，而不是无限空转。
+    assert result.node_path.count("dispatch") == 6
     assert result.node_path.count("critic:3") == 0
 
 
@@ -843,3 +846,319 @@ async def test_two_envelope_subtasks_together_does_not_break_the_graph() -> None
     result = await orch.run(task="一起做两件事", trace_id="t-two-envelope")
     assert result.status == "error"
     assert result.error_code == "agent_failed"
+
+
+# ── 工作区写隔离 ─────────────────────────────────────────────────────────
+
+
+class _FileWritingExpert:
+    def __init__(self, files: dict[str, str], *, sleep_s: float = 0.0) -> None:
+        self._files = files
+        self._sleep_s = sleep_s
+
+    async def execute(self, envelope):
+        from pathlib import Path
+
+        slot = dict(envelope.agent_local_slot or {})
+        workspace = Path(slot["workspace_path"])
+        if self._sleep_s:
+            await asyncio.sleep(self._sleep_s)
+        for relative, content in self._files.items():
+            target = workspace / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8", newline="\n")
+        return f"wrote {sorted(self._files)}"
+
+
+@pytest.mark.asyncio
+async def test_parallel_experts_with_same_path_conflict_leave_original_untouched(
+    tmp_path,
+) -> None:
+    (tmp_path / "shared.txt").write_text("base\n", encoding="utf-8")
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(
+            lambda task: [
+                {
+                    "index": 0,
+                    "instruction": "写左边",
+                    "agent": "coder",
+                    "depends_on": [],
+                },
+                {
+                    "index": 1,
+                    "instruction": "写右边",
+                    "agent": "general",
+                    "depends_on": [],
+                },
+            ]
+        ),
+        experts={
+            "coder": _FileWritingExpert(
+                {"shared.txt": "left\n", "left.txt": "left\n"}, sleep_s=0.03
+            ),
+            "general": _FileWritingExpert(
+                {"shared.txt": "right\n", "right.txt": "right\n"}
+            ),
+        },
+        settings_obj=_cfg(),
+        workspace_root=tmp_path,
+    )
+
+    result = await orch.run(
+        task="并行写工作区",
+        trace_id="t-write-conflict",
+        workspace_path=str(tmp_path),
+    )
+
+    assert (tmp_path / "shared.txt").read_text(encoding="utf-8") == "base\n"
+    assert (tmp_path / "left.txt").read_text(encoding="utf-8") == "left\n"
+    assert (tmp_path / "right.txt").read_text(encoding="utf-8") == "right\n"
+    assert result.status == "ok"
+    assert len(result.workspace_conflicts) == 1
+    assert result.workspace_conflicts[0]["path"] == "shared.txt"
+    assert {item["writer"] for item in result.workspace_writes} == {
+        "round-0/subtask-0",
+        "round-0/subtask-1",
+    }
+    assert len(result.workspace_merges) == 2
+
+
+@pytest.mark.asyncio
+async def test_parallel_experts_writing_different_files_keep_both(tmp_path) -> None:
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(
+            lambda task: [
+                {
+                    "index": 0,
+                    "instruction": "写甲",
+                    "agent": "coder",
+                    "depends_on": [],
+                },
+                {
+                    "index": 1,
+                    "instruction": "写乙",
+                    "agent": "general",
+                    "depends_on": [],
+                },
+            ]
+        ),
+        experts={
+            "coder": _FileWritingExpert({"a.txt": "a\n"}),
+            "general": _FileWritingExpert({"b.txt": "b\n"}),
+        },
+        settings_obj=_cfg(),
+        workspace_root=tmp_path,
+    )
+
+    result = await orch.run(
+        task="并行写不同文件",
+        trace_id="t-write-independent",
+        workspace_path=str(tmp_path),
+    )
+
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "a\n"
+    assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "b\n"
+    assert result.workspace_conflicts == ()
+    assert len(result.workspace_merges) == 2
+
+
+# ── 依赖感知调度 ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_dependent_subtask_never_starts_before_its_prerequisite() -> None:
+    completed: set[int] = set()
+    violations: list[str] = []
+
+    class DependencyProbe:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def execute(self, envelope):
+            slot = dict(envelope.agent_local_slot or {})
+            index = int(slot["collab_subtask_index"])
+            for dep in slot.get("collab_depends_on") or ():
+                if int(dep) not in completed:
+                    violations.append(f"{index} started before {dep}")
+            if index == 0:
+                await asyncio.sleep(0.05)
+            completed.add(index)
+            return f"{self.name}-{index}"
+
+    from app.orchestration.collaboration import SubtaskAssignment
+
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(
+            lambda task: [
+                {"index": 0, "instruction": "先做根任务", "agent": "coder", "depends_on": []},
+                {
+                    "index": 1,
+                    "instruction": "依赖根任务",
+                    "agent": "general",
+                    "depends_on": [0],
+                },
+            ]
+        ),
+        experts={
+            "coder": DependencyProbe("coder"),
+            "general": DependencyProbe("general"),
+        },
+        settings_obj=_cfg(),
+    )
+
+    result = await orch.run(task="先根后叶", trace_id="t-dependency-order")
+
+    assert result.plan == (
+        SubtaskAssignment(0, "先做根任务", "coder", ()),
+        SubtaskAssignment(1, "依赖根任务", "general", (0,)),
+    )
+    assert violations == []
+
+
+@pytest.mark.asyncio
+async def test_dependent_subtask_receives_prerequisite_output() -> None:
+    seen_slots: dict[int, dict] = {}
+
+    class SlotRecordingExpert:
+        async def execute(self, envelope):
+            slot = dict(envelope.agent_local_slot or {})
+            index = int(slot["collab_subtask_index"])
+            seen_slots[index] = slot
+            return "上游结论：使用 locking"
+
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(
+            lambda task: [
+                {"index": 0, "instruction": "分析", "agent": "coder", "depends_on": []},
+                {
+                    "index": 1,
+                    "instruction": "根据分析写总结",
+                    "agent": "general",
+                    "depends_on": [0],
+                },
+            ]
+        ),
+        experts={"coder": SlotRecordingExpert(), "general": SlotRecordingExpert()},
+        settings_obj=_cfg(),
+    )
+
+    await orch.run(task="分析后总结", trace_id="t-dependency-output")
+
+    assert seen_slots[1]["collab_dependency_outputs"] == {
+        "0": "上游结论：使用 locking"
+    }
+
+
+@pytest.mark.asyncio
+async def test_dependency_cycle_fails_explicitly_instead_of_spinning() -> None:
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(
+            lambda task: [
+                {"index": 0, "instruction": "A", "agent": "coder", "depends_on": [1]},
+                {"index": 1, "instruction": "B", "agent": "general", "depends_on": [0]},
+            ]
+        ),
+        experts=_experts(),
+        settings_obj=_cfg(),
+    )
+
+    result = await orch.run(task="循环依赖", trace_id="t-dependency-cycle")
+
+    assert result.status == "error"
+    assert "循环依赖" in result.final_text
+    assert result.node_path[-1] == "failed"
+
+
+def test_workspace_path_must_stay_inside_the_configured_root(tmp_path) -> None:
+    allowed = tmp_path / "allowed"
+    outside = tmp_path / "outside"
+    allowed.mkdir()
+    outside.mkdir()
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(lambda task: TWO_SUBTASKS),
+        experts=_experts(),
+        settings_obj=_cfg(),
+        workspace_root=allowed,
+    )
+
+    with pytest.raises(ValueError, match="越出工作区"):
+        orch._workspace_state(str(outside), ())
+
+
+@pytest.mark.asyncio
+async def test_revise_reruns_target_and_all_downstream_dependents() -> None:
+    rounds: dict[int, list[int]] = {0: [], 1: [], 2: []}
+
+    class RoundRecordingExpert:
+        async def execute(self, envelope):
+            slot = dict(envelope.agent_local_slot or {})
+            index = int(slot["collab_subtask_index"])
+            rounds[index].append(int(slot["collab_round"]))
+            return f"子任务 {index} 第 {slot['collab_round']} 轮"
+
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(
+            lambda task: [
+                {"index": 0, "instruction": "根任务", "agent": "coder", "depends_on": []},
+                {
+                    "index": 1,
+                    "instruction": "下游任务",
+                    "agent": "general",
+                    "depends_on": [0],
+                },
+                {
+                    "index": 2,
+                    "instruction": "独立任务",
+                    "agent": "coder",
+                    "depends_on": [],
+                },
+            ],
+            critiques=[
+                {"decision": "revise", "reasons": ["根任务要改"], "targets": [0]},
+                {"decision": "approve", "reasons": [], "targets": []},
+            ],
+        ),
+        experts={"coder": RoundRecordingExpert(), "general": RoundRecordingExpert()},
+        settings_obj=_cfg(),
+    )
+
+    result = await orch.run(task="根改则下游重跑", trace_id="t-dependency-revise")
+
+    assert result.status == "ok"
+    assert rounds[0] == [0, 1]
+    assert rounds[1] == [0, 1]
+    assert rounds[2] == [0]
+
+
+@pytest.mark.asyncio
+async def test_streamed_hitl_interrupt_frame_is_json_safe() -> None:
+    events = []
+    orch = CollabOrchestrator(
+        collaboration_llm=StubLLM(
+            lambda task: [
+                {"index": 0, "instruction": "写点啥", "agent": "general", "depends_on": []}
+            ]
+        ),
+        experts={"general": ScriptedExpert(reply="TODO: 需要人工复核")},
+        settings_obj=_cfg(hitl_enabled=True),
+    )
+
+    async for event in orch.run_streamed(task="审查", trace_id="t-stream-hitl"):
+        events.append(event)
+
+    interrupt_events = [event for event in events if event.node == "__interrupt__"]
+    assert len(interrupt_events) == 1
+    payload = interrupt_events[0].update
+    assert isinstance(payload, dict)
+    assert payload["interrupts"][0]["kind"] == "collab_hitl"
+    assert orch.finish("t-stream-hitl").status == "pending_review"
+
+
+def test_litellm_collaboration_parser_accepts_js_like_model_json() -> None:
+    assert LiteLLMCollaborationLLM._loads(
+        "{decision: 'approve', reasons: ['ready'], targets: []}"
+    ) == {
+        "decision": "approve",
+        "reasons": ["ready"],
+        "targets": [],
+    }

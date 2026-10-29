@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
+
+from apps.code_review_pipeline.schemas.feedback import (
+    FINDING_STATUS_PUBLISHED,
+    FeedbackStatus,
+    FindingFeedback,
+)
 
 try:
     from psycopg.types.json import Jsonb
@@ -51,6 +58,10 @@ class TaskNotFound(LookupError):
     不一致，通常意味着入队时任务行没落库），后者是"任务在，但这一步不该发生"。
     两者在 worker 里的处置不同——前者要报警，后者多数是正常竞争的结果。
     """
+
+
+class StaleReviewTrace(RuntimeError):
+    """A callback no longer points at the current review attempt for its PR."""
 
 
 def _missing_deps() -> list[str]:
@@ -156,6 +167,7 @@ class ReviewRecord:
     findings_count: int
     need_human_review: bool
     raw: dict[str, Any]
+    review_run_id: str = ""
 
 
 class ReviewStore:
@@ -163,9 +175,38 @@ class ReviewStore:
         self._records: dict[str, ReviewRecord] = {}
         self._states: dict[str, str] = {}
         self._posted: dict[tuple[str, int, str], str] = {}
+        self._publish_leases: dict[tuple[str, int, str], tuple[str, float]] = {}
+        self._findings: dict[str, tuple[Any, ...]] = {}
+        self._finding_events: dict[str, dict[tuple[str, str, str], Any]] = {}
+        self._feedback_events: dict[str, FindingFeedback] = {}
+        self._latest_human_feedback: dict[tuple[str, str, str], FindingFeedback] = {}
 
     def get(self, trace_id: str) -> ReviewRecord | None:
         return self._records.get(trace_id)
+
+    def current_trace_id(self, repo: str, pr_number: int) -> str | None:
+        """Return the newest review attempt for a PR.
+
+        The trace identity includes the head SHA. A callback from an older
+        card must not be accepted just because its own task row still exists.
+        """
+        for trace_id in reversed(tuple(self._records)):
+            record = self._records[trace_id]
+            if record.repo == repo and record.pr_number == int(pr_number):
+                return trace_id
+        return None
+
+    def _record_for_identity(
+        self, identity: tuple[str, int, str]
+    ) -> ReviewRecord | None:
+        for record in reversed(tuple(self._records.values())):
+            if (
+                record.repo,
+                record.pr_number,
+                record.head_sha,
+            ) == identity:
+                return record
+        return None
 
     # 任务状态方法的签名**必须与 PostgresReviewStore 完全一致**（都用
     # identity 三元组，不用 trace_id）。此前内存版按 trace_id、PG 版按 identity，
@@ -180,6 +221,11 @@ class ReviewStore:
         identity: tuple[str, int, str],
         action: Any,
         allowed_from: tuple[str, ...],
+        *,
+        expected_trace_id: str | None = None,
+        require_current_trace: bool = False,
+        expected_review_run_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         from apps.code_review_pipeline.task_state import (
             ACTION_TARGET,
@@ -187,10 +233,26 @@ class ReviewStore:
             TaskState,
         )
 
+        if require_current_trace:
+            current_trace = self.current_trace_id(identity[0], identity[1])
+            if expected_trace_id is None or current_trace != expected_trace_id:
+                raise StaleReviewTrace(
+                    f"stale review trace: expected {expected_trace_id!r}, current {current_trace!r}"
+                )
         target = ACTION_TARGET[action]
         current = self._states.get(identity)
         if current is None:
             raise TaskNotFound(f"no task for {identity!r}")
+        if expected_review_run_id is not None:
+            current_record = self._record_for_identity(identity)
+            current_run_id = (
+                current_record.review_run_id if current_record is not None else ""
+            )
+            if current_run_id != expected_review_run_id:
+                raise StaleReviewTrace(
+                    "stale review run: "
+                    f"expected {expected_review_run_id!r}, current {current_run_id!r}"
+                )
         if current not in allowed_from:
             raise InvalidTaskTransition(TaskState(current), action)
         self._states[identity] = target.value
@@ -228,28 +290,174 @@ class ReviewStore:
             return False
         return True
 
-    def transition_task(self, identity: tuple[str, int, str], action: str) -> str:
+    def transition_task(
+        self,
+        identity: tuple[str, int, str],
+        action: str,
+        *,
+        expected_trace_id: str | None = None,
+        require_current_trace: bool = False,
+        expected_review_run_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         from apps.code_review_pipeline.task_state import ALLOWED_ACTIONS, TaskAction
 
         act = TaskAction(action)
         allowed = tuple(sorted(s.value for s, acts in ALLOWED_ACTIONS.items() if act in acts))
-        return self._transition(identity, act, allowed)
+        return self._transition(
+            identity,
+            act,
+            allowed,
+            expected_trace_id=expected_trace_id,
+            require_current_trace=require_current_trace,
+            expected_review_run_id=expected_review_run_id,
+            metadata=metadata,
+        )
 
     def get_posted_review_id(self, identity: tuple[str, int, str]) -> str | None:
         """已写回的 GitHub review id；None = 还没写回（D4 幂等的主判据）。"""
         return self._posted.get(identity)
 
+    def start_review_run(
+        self, identity: tuple[str, int, str], review_run_id: str
+    ) -> None:
+        if not review_run_id:
+            raise ValueError("review_run_id is required")
+        record = self._record_for_identity(identity)
+        if record is None:
+            raise TaskNotFound(f"no task for {identity!r}")
+        self._records[record.trace_id] = replace(
+            record, review_run_id=review_run_id
+        )
+
+    def get_review_run_id(self, trace_id: str) -> str | None:
+        record = self._records.get(trace_id)
+        return record.review_run_id if record is not None else None
+
     def set_posted_review_id(self, identity: tuple[str, int, str], review_id: str) -> None:
         self._posted[identity] = review_id
+        self._publish_leases.pop(identity, None)
+
+    def claim_publish_attempt(
+        self,
+        identity: tuple[str, int, str],
+        *,
+        owner: str,
+        lease_seconds: int,
+        expected_review_run_id: str | None = None,
+    ) -> bool:
+        """Claim the single cross-process GitHub write lease while in posting."""
+        if lease_seconds <= 0 or not owner:
+            raise ValueError("publish lease owner and positive duration are required")
+        if self._states.get(identity) != "posting" or identity in self._posted:
+            return False
+        if expected_review_run_id is not None:
+            record = self._record_for_identity(identity)
+            if record is None or record.review_run_id != expected_review_run_id:
+                return False
+        current = self._publish_leases.get(identity)
+        now = time.monotonic()
+        if current is not None and current[0] != owner and current[1] > now:
+            return False
+        self._publish_leases[identity] = (owner, now + lease_seconds)
+        return True
+
+    def release_publish_attempt(
+        self,
+        identity: tuple[str, int, str],
+        *,
+        owner: str,
+    ) -> None:
+        current = self._publish_leases.get(identity)
+        if current is not None and current[0] == owner:
+            self._publish_leases.pop(identity, None)
 
     def save(self, record: ReviewRecord) -> None:
+        existing = self._records.get(record.trace_id)
+        if existing is not None and not record.review_run_id:
+            record = replace(record, review_run_id=existing.review_run_id)
         self._records[record.trace_id] = record
         identity = (record.repo, record.pr_number, record.head_sha)
         self._states.setdefault(identity, TASK_STATE_QUEUED)
         logger.info("review saved trace=%s findings=%d", record.trace_id, record.findings_count)
 
+    def save_review(self, record: ReviewRecord, findings: tuple[Any, ...]) -> None:
+        snapshot = _dedupe_findings(findings, trace_id=record.trace_id)
+        for finding in findings:
+            events = self._finding_events.setdefault(record.trace_id, {})
+            events.setdefault(_finding_event_key(finding), finding)
+        self.save(record)
+        self._findings[record.trace_id] = snapshot
+
+    def list_findings(self, trace_id: str) -> tuple[Any, ...]:
+        return self._findings.get(trace_id, ())
+
+    def list_finding_events(self, trace_id: str) -> tuple[Any, ...]:
+        """Return the append-only finding lineage in first-seen order."""
+        return tuple(self._finding_events.get(trace_id, {}).values())
+
+    def record_feedback(self, feedback: FindingFeedback) -> bool:
+        if feedback.event_id in self._feedback_events:
+            return False
+        current_run_id = self.get_review_run_id(feedback.trace_id)
+        if current_run_id is None or feedback.review_run_id != current_run_id:
+            raise ValueError("feedback belongs to a stale review run")
+        published = {
+            str(getattr(item, "finding_uid", ""))
+            for item in self.list_findings(feedback.trace_id)
+            if str(getattr(item, "status", "")) == FINDING_STATUS_PUBLISHED
+        }
+        if feedback.finding_uid not in published:
+            raise ValueError("feedback references a finding that is not published")
+        self._feedback_events[feedback.event_id] = feedback
+        if feedback.label_source == "human":
+            current = self._latest_human_feedback.get(
+                (feedback.trace_id, feedback.review_run_id, feedback.finding_uid)
+            )
+            if current is None or (
+                (feedback.created_at or ""),
+                feedback.event_id,
+            ) >= (
+                (current.created_at or ""),
+                current.event_id,
+            ):
+                self._latest_human_feedback[
+                    (feedback.trace_id, feedback.review_run_id, feedback.finding_uid)
+                ] = feedback
+        return True
+
+    def feedback_status(self, trace_id: str) -> FeedbackStatus:
+        published = tuple(
+            str(getattr(item, "finding_uid", ""))
+            for item in self.list_findings(trace_id)
+            if str(getattr(item, "status", "")) == FINDING_STATUS_PUBLISHED
+        )
+        latest = {
+            finding_uid: feedback
+            for finding_uid in published
+            if (
+                feedback := self._latest_human_feedback.get(
+                    (trace_id, self.get_review_run_id(trace_id) or "", finding_uid)
+                )
+            )
+            is not None
+        }
+        missing = tuple(item for item in published if item not in latest)
+        return FeedbackStatus(
+            trace_id=trace_id,
+            total_findings=len(published),
+            labelled_findings=len(latest),
+            missing_finding_uids=missing,
+            latest_human_by_finding=latest,
+        )
+
     async def close(self) -> None:
         self._records.clear()
+        self._findings.clear()
+        self._finding_events.clear()
+        self._feedback_events.clear()
+        self._latest_human_feedback.clear()
+        self._publish_leases.clear()
 
 
 class PostgresReviewStore:
@@ -266,6 +474,30 @@ class PostgresReviewStore:
             self._conn = self._psycopg.connect(
                 self._dsn, connect_timeout=_CONNECT_TIMEOUT_S
             )
+
+    @staticmethod
+    def _record_params(record: ReviewRecord) -> dict[str, Any]:
+        return {
+            "trace_id": record.trace_id,
+            "repo": record.repo,
+            "pr_number": int(record.pr_number or 0),
+            "head_sha": record.head_sha,
+            "base_sha": record.raw.get("base_sha", ""),
+            "title": record.raw.get("title", ""),
+            "author": record.author,
+            "html_url": record.raw.get("html_url", ""),
+            "diff_url": record.raw.get("diff_url", ""),
+            "changed_files_count": int(record.raw.get("changed_files_count", 0) or 0),
+            "labels": record.raw.get("labels", []),
+            "reviewers": record.raw.get("reviewers", []),
+            "overall_need_human_review": bool(record.need_human_review),
+            "review_metrics": Jsonb(record.raw.get("critic_metrics", {})),
+            "review_run_id": record.review_run_id,
+            "status": TASK_STATE_QUEUED,
+            "state_transitions": Jsonb(
+                [{"from": None, "to": TASK_STATE_QUEUED, "at": _now_iso()}]
+            ),
+        }
 
     def save(self, record: ReviewRecord) -> None:
         """写入/复用一条任务行（D2）。
@@ -291,18 +523,23 @@ class PostgresReviewStore:
                     """
                     INSERT INTO code_review_prs (
                         trace_id, repo, pr_number, head_sha, base_sha, title, author, html_url, diff_url,
-                        changed_files_count, labels, reviewers, overall_need_human_review, status,
-                        state_transitions
+                        changed_files_count, labels, reviewers, overall_need_human_review,
+                        review_metrics, review_run_id, status, state_transitions
                     ) VALUES (
                         %(trace_id)s, %(repo)s, %(pr_number)s, %(head_sha)s, %(base_sha)s, %(title)s,
                         %(author)s, %(html_url)s, %(diff_url)s, %(changed_files_count)s,
-                        %(labels)s, %(reviewers)s, %(overall_need_human_review)s, %(status)s,
-                        %(state_transitions)s
+                        %(labels)s, %(reviewers)s, %(overall_need_human_review)s,
+                        %(review_metrics)s, %(review_run_id)s, %(status)s, %(state_transitions)s
                     )
                     ON CONFLICT (repo, pr_number, head_sha) DO UPDATE SET
                         changed_files_count = EXCLUDED.changed_files_count,
                         reviewers = EXCLUDED.reviewers,
                         overall_need_human_review = EXCLUDED.overall_need_human_review,
+                        review_metrics = CASE
+                            WHEN EXCLUDED.review_metrics = '{}'::jsonb
+                                THEN code_review_prs.review_metrics
+                            ELSE EXCLUDED.review_metrics
+                        END,
                         updated_at = NOW()
                     """,
                     {
@@ -334,6 +571,8 @@ class PostgresReviewStore:
                         "labels": record.raw.get("labels", []),
                         "reviewers": record.raw.get("reviewers", []),
                         "overall_need_human_review": bool(record.need_human_review),
+                        "review_metrics": Jsonb(record.raw.get("critic_metrics", {})),
+                        "review_run_id": record.review_run_id,
                         "status": TASK_STATE_QUEUED,
                         # psycopg3 会把 Python 的 list 适配成 PG **数组**（oid 1005），
                         # 而 state_transitions 是 jsonb 列——不显式包 Jsonb 的话，
@@ -350,15 +589,368 @@ class PostgresReviewStore:
                 self._conn.rollback()
             raise
 
+    def save_review(self, record: ReviewRecord, findings: tuple[Any, ...]) -> None:
+        """Atomically upsert task state and replace the current finding snapshot."""
+        for finding in findings:
+            if str(getattr(finding, "trace_id", "")) != record.trace_id:
+                raise ValueError("all findings must belong to the review trace")
+        finding_events = findings
+        findings = _dedupe_findings(findings, trace_id=record.trace_id)
+        self._connect()
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO code_review_prs (
+                        trace_id, repo, pr_number, head_sha, base_sha, title, author, html_url, diff_url,
+                        changed_files_count, labels, reviewers, overall_need_human_review,
+                        review_metrics, review_run_id, status, state_transitions
+                    ) VALUES (
+                        %(trace_id)s, %(repo)s, %(pr_number)s, %(head_sha)s, %(base_sha)s, %(title)s,
+                        %(author)s, %(html_url)s, %(diff_url)s, %(changed_files_count)s,
+                        %(labels)s, %(reviewers)s, %(overall_need_human_review)s,
+                        %(review_metrics)s, %(review_run_id)s, %(status)s, %(state_transitions)s
+                    )
+                    ON CONFLICT (repo, pr_number, head_sha) DO UPDATE SET
+                        changed_files_count = EXCLUDED.changed_files_count,
+                        reviewers = EXCLUDED.reviewers,
+                        overall_need_human_review = EXCLUDED.overall_need_human_review,
+                        review_metrics = CASE
+                            WHEN EXCLUDED.review_metrics = '{}'::jsonb
+                                THEN code_review_prs.review_metrics
+                            ELSE EXCLUDED.review_metrics
+                        END,
+                        review_run_id = CASE
+                            WHEN EXCLUDED.review_run_id = ''
+                                THEN code_review_prs.review_run_id
+                            ELSE EXCLUDED.review_run_id
+                        END,
+                        updated_at = NOW()
+                    """,
+                    self._record_params(record),
+                )
+                for finding in finding_events:
+                    cur.execute(
+                        """
+                        INSERT INTO code_review_finding_events (
+                            trace_id, finding_uid, fingerprint, agent, finding_id,
+                            status, revision_of, severity, category, file, line,
+                            title, description, suggestion, confidence, team_specific,
+                            evidence, evidence_verified, source_agents, critic_decision, critic_reason
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                        ON CONFLICT (trace_id, finding_uid, status, critic_decision)
+                        DO NOTHING
+                        """,
+                        (
+                            finding.trace_id,
+                            finding.finding_uid,
+                            finding.fingerprint,
+                            finding.agent,
+                            finding.raw_finding_id,
+                            finding.status,
+                            finding.revision_of,
+                            finding.severity,
+                            finding.category,
+                            finding.file,
+                            finding.line,
+                            finding.title,
+                            finding.description,
+                            finding.suggestion,
+                            finding.confidence,
+                            finding.team_specific,
+                            list(finding.evidence),
+                            bool(finding.evidence_verified),
+                            list(finding.source_agents),
+                            finding.critic_decision,
+                            finding.critic_reason,
+                        ),
+                    )
+                # Feedback is append-only. A reclaim may rewrite the finding
+                # snapshot, but it must never erase who labelled what; events
+                # are joined back by finding_uid and later events win.
+                cur.execute(
+                    "DELETE FROM code_review_findings WHERE trace_id = %s",
+                    (record.trace_id,),
+                )
+                for finding in findings:
+                    cur.execute(
+                        """
+                        INSERT INTO code_review_findings (
+                            trace_id, agent, finding_id, severity, category, file, line,
+                            title, description, suggestion, confidence, team_specific, evidence,
+                            evidence_verified, finding_uid, fingerprint, status, revision_of, source_agents,
+                            critic_decision, critic_reason
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s, %s, %s
+                        )
+                        """,
+                        (
+                            finding.trace_id,
+                            finding.agent,
+                            finding.raw_finding_id,
+                            finding.severity,
+                            finding.category,
+                            finding.file,
+                            finding.line,
+                            finding.title,
+                            finding.description,
+                            finding.suggestion,
+                            finding.confidence,
+                            finding.team_specific,
+                            list(finding.evidence),
+                            bool(finding.evidence_verified),
+                            finding.finding_uid,
+                            finding.fingerprint,
+                            finding.status,
+                            finding.revision_of,
+                            list(finding.source_agents),
+                            finding.critic_decision,
+                            finding.critic_reason,
+                        ),
+                    )
+            self._conn.commit()
+        except Exception:
+            if self._conn:
+                self._conn.rollback()
+            raise
+
+    def list_findings(self, trace_id: str) -> tuple[Any, ...]:
+        from apps.code_review_pipeline.schemas.feedback import PersistedFinding
+
+        self._connect()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT finding_uid, fingerprint, trace_id, agent, finding_id, status,
+                       revision_of, severity, category, file, line, title, description,
+                       suggestion, confidence, team_specific, evidence, source_agents,
+                       critic_decision, critic_reason, evidence_verified
+                FROM code_review_findings
+                WHERE trace_id = %s
+                ORDER BY id
+                """,
+                (trace_id,),
+            )
+            rows = cur.fetchall()
+        self._conn.rollback()
+        return tuple(
+            PersistedFinding(
+                finding_uid=row[0],
+                fingerprint=row[1],
+                trace_id=row[2],
+                agent=row[3],
+                raw_finding_id=row[4],
+                status=row[5],
+                revision_of=row[6],
+                severity=row[7],
+                category=row[8],
+                file=row[9],
+                line=int(row[10]),
+                title=row[11],
+                description=row[12],
+                suggestion=row[13],
+                confidence=float(row[14]),
+                team_specific=bool(row[15]),
+                evidence=tuple(row[16] or ()),
+                source_agents=tuple(row[17] or ()),
+                critic_decision=row[18] or "",
+                critic_reason=row[19] or "",
+                evidence_verified=bool(row[20]),
+            )
+            for row in rows
+        )
+
+    def list_finding_events(self, trace_id: str) -> tuple[Any, ...]:
+        from apps.code_review_pipeline.schemas.feedback import PersistedFinding
+
+        self._connect()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT finding_uid, fingerprint, trace_id, agent, finding_id, status,
+                       revision_of, severity, category, file, line, title, description,
+                       suggestion, confidence, team_specific, evidence, source_agents,
+                       critic_decision, critic_reason, evidence_verified
+                FROM code_review_finding_events
+                WHERE trace_id = %s
+                ORDER BY event_id
+                """,
+                (trace_id,),
+            )
+            rows = cur.fetchall()
+        self._conn.rollback()
+        return tuple(
+            PersistedFinding(
+                finding_uid=row[0],
+                fingerprint=row[1],
+                trace_id=row[2],
+                agent=row[3],
+                raw_finding_id=row[4],
+                status=row[5],
+                revision_of=row[6],
+                severity=row[7],
+                category=row[8],
+                file=row[9],
+                line=int(row[10]),
+                title=row[11],
+                description=row[12],
+                suggestion=row[13],
+                confidence=float(row[14]),
+                team_specific=bool(row[15]),
+                evidence=tuple(row[16] or ()),
+                source_agents=tuple(row[17] or ()),
+                critic_decision=row[18] or "",
+                critic_reason=row[19] or "",
+                evidence_verified=bool(row[20]),
+            )
+            for row in rows
+        )
+
+    def record_feedback(self, feedback: FindingFeedback) -> bool:
+        self._connect()
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO code_review_finding_feedback (
+                        event_id, trace_id, finding_uid, disposition, reason_code,
+                        reason_note, actor, label_source, review_run_id, created_at
+                    )
+                    SELECT
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        COALESCE(NULLIF(%s, '')::timestamptz, NOW())
+                    FROM code_review_findings f
+                    JOIN code_review_prs p ON p.trace_id = f.trace_id
+                    WHERE f.trace_id = %s
+                      AND f.finding_uid = %s
+                      AND f.status = %s
+                      AND p.review_run_id = %s
+                    ON CONFLICT (event_id) DO NOTHING
+                    RETURNING event_id
+                    """,
+                    (
+                        feedback.event_id,
+                        feedback.trace_id,
+                        feedback.finding_uid,
+                        feedback.disposition,
+                        feedback.reason_code,
+                        feedback.reason_note,
+                        feedback.actor,
+                        feedback.label_source,
+                        feedback.review_run_id,
+                        feedback.created_at,
+                        feedback.trace_id,
+                        feedback.finding_uid,
+                        FINDING_STATUS_PUBLISHED,
+                        feedback.review_run_id,
+                    ),
+                )
+                inserted = cur.fetchone() is not None
+                if not inserted:
+                    cur.execute(
+                        "SELECT 1 FROM code_review_finding_feedback WHERE event_id = %s",
+                        (feedback.event_id,),
+                    )
+                    if cur.fetchone() is None:
+                        raise ValueError(
+                            "feedback references a stale or unpublished finding"
+                        )
+            self._conn.commit()
+            return inserted
+        except Exception:
+            if self._conn:
+                self._conn.rollback()
+            raise
+
+    def feedback_status(self, trace_id: str) -> FeedbackStatus:
+        self._connect()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT f.finding_uid, p.review_run_id
+                FROM code_review_findings f
+                JOIN code_review_prs p ON p.trace_id = f.trace_id
+                WHERE f.trace_id = %s AND f.status = %s
+                ORDER BY f.id
+                """,
+                (trace_id, FINDING_STATUS_PUBLISHED),
+            )
+            published_rows = cur.fetchall()
+            published = tuple(str(row[0]) for row in published_rows)
+            review_run_id = str(published_rows[0][1]) if published_rows else ""
+            if not published_rows:
+                cur.execute(
+                    "SELECT review_run_id FROM code_review_prs WHERE trace_id = %s",
+                    (trace_id,),
+                )
+                run_row = cur.fetchone()
+                review_run_id = str(run_row[0] or "") if run_row is not None else ""
+            cur.execute(
+                """
+                SELECT DISTINCT ON (finding_uid)
+                       event_id, trace_id, finding_uid, disposition, reason_code,
+                       reason_note, actor, label_source, created_at
+                FROM code_review_finding_feedback
+                WHERE trace_id = %s AND label_source = 'human'
+                  AND review_run_id = %s
+                ORDER BY finding_uid, created_at DESC, event_id DESC
+                """,
+                (trace_id, review_run_id or ""),
+            )
+            events = cur.fetchall()
+        self._conn.rollback()
+        latest = {
+            str(row[2]): FindingFeedback(
+                event_id=row[0],
+                trace_id=row[1],
+                finding_uid=row[2],
+                disposition=row[3],
+                reason_code=row[4],
+                reason_note=row[5],
+                actor=row[6],
+                label_source=row[7],
+                created_at=row[8].isoformat() if row[8] is not None else "",
+                review_run_id=review_run_id or "",
+            )
+            for row in events
+            if str(row[2]) in published
+        }
+        missing = tuple(item for item in published if item not in latest)
+        return FeedbackStatus(
+            trace_id=trace_id,
+            total_findings=len(published),
+            labelled_findings=len(latest),
+            missing_finding_uids=missing,
+            latest_human_by_finding=latest,
+        )
+
     def get(self, trace_id: str) -> ReviewRecord | None:
         self._connect()
         try:
             with self._conn.cursor() as cur:
-                cur.execute("SELECT trace_id, repo, pr_number, head_sha, author, changed_files_count, overall_need_human_review FROM code_review_prs WHERE trace_id = %s", (trace_id,))
+                cur.execute(
+                    "SELECT trace_id, repo, pr_number, head_sha, author, "
+                    "changed_files_count, overall_need_human_review, review_run_id "
+                    "FROM code_review_prs WHERE trace_id = %s",
+                    (trace_id,),
+                )
                 row = cur.fetchone()
                 if not row:
                     return None
-                trace_id, repo, pr_number, head_sha, author, changed_files_count, overall_need_human_review = row
+                (
+                    trace_id,
+                    repo,
+                    pr_number,
+                    head_sha,
+                    author,
+                    changed_files_count,
+                    overall_need_human_review,
+                    review_run_id,
+                ) = row
                 return ReviewRecord(
                     trace_id=trace_id,
                     repo=repo,
@@ -368,9 +960,23 @@ class PostgresReviewStore:
                     findings_count=int(changed_files_count or 0),
                     need_human_review=bool(overall_need_human_review),
                     raw={},
+                    review_run_id=review_run_id or "",
                 )
         except Exception:
             return None
+
+    def current_trace_id(self, repo: str, pr_number: int) -> str | None:
+        self._connect()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT trace_id FROM code_review_prs "
+                "WHERE repo = %s AND pr_number = %s "
+                "ORDER BY attempt_id DESC LIMIT 1",
+                (repo, int(pr_number)),
+            )
+            row = cur.fetchone()
+        self._conn.rollback()
+        return str(row[0]) if row else None
 
     # ── 任务状态（D3）────────────────────────────────────────────────────
     #
@@ -413,6 +1019,35 @@ class PostgresReviewStore:
             return None
         return str(row[0])
 
+    def start_review_run(
+        self, identity: tuple[str, int, str], review_run_id: str
+    ) -> None:
+        if not review_run_id:
+            raise ValueError("review_run_id is required")
+        repo, pr_number, head_sha = identity
+        self._connect()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE code_review_prs SET review_run_id = %s, updated_at = NOW() "
+                "WHERE " + self._IDENTITY,
+                (review_run_id, repo, pr_number, head_sha),
+            )
+            if cur.rowcount != 1:
+                self._conn.rollback()
+                raise TaskNotFound(f"no task for {identity!r}")
+        self._conn.commit()
+
+    def get_review_run_id(self, trace_id: str) -> str | None:
+        self._connect()
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT review_run_id FROM code_review_prs WHERE trace_id = %s",
+                (trace_id,),
+            )
+            row = cur.fetchone()
+        self._conn.rollback()
+        return None if row is None else str(row[0] or "")
+
     def set_posted_review_id(self, identity: tuple[str, int, str], review_id: str) -> None:
         repo, pr_number, head_sha = identity
         self._connect()
@@ -424,11 +1059,82 @@ class PostgresReviewStore:
             )
         self._conn.commit()
 
+    def claim_publish_attempt(
+        self,
+        identity: tuple[str, int, str],
+        *,
+        owner: str,
+        lease_seconds: int,
+        expected_review_run_id: str | None = None,
+    ) -> bool:
+        if lease_seconds <= 0 or not owner:
+            raise ValueError("publish lease owner and positive duration are required")
+        repo, pr_number, head_sha = identity
+        run_predicate = ""
+        params: list[Any] = [
+            owner,
+            lease_seconds,
+            owner,
+            repo,
+            pr_number,
+            head_sha,
+        ]
+        if expected_review_run_id is not None:
+            run_predicate = " AND review_run_id = %s"
+            params.append(expected_review_run_id)
+        self._connect()
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE code_review_prs SET posting_owner = %s, "
+                    "posting_lease_until = NOW() + make_interval(secs => %s), "
+                    "updated_at = NOW() "
+                    "WHERE status = 'posting' AND posted_review_id IS NULL "
+                    "AND (posting_lease_until IS NULL OR posting_lease_until < NOW() "
+                    "OR posting_owner = %s) "
+                    "AND " + self._IDENTITY + run_predicate + " RETURNING trace_id",
+                    tuple(params),
+                )
+                claimed = cur.fetchone() is not None
+            self._conn.commit()
+            return claimed
+        except Exception:
+            if self._conn:
+                self._conn.rollback()
+            raise
+
+    def release_publish_attempt(
+        self,
+        identity: tuple[str, int, str],
+        *,
+        owner: str,
+    ) -> None:
+        repo, pr_number, head_sha = identity
+        self._connect()
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE code_review_prs SET posting_owner = NULL, "
+                    "posting_lease_until = NULL, updated_at = NOW() "
+                    "WHERE " + self._IDENTITY + " AND posting_owner = %s",
+                    (repo, pr_number, head_sha, owner),
+                )
+            self._conn.commit()
+        except Exception:
+            if self._conn:
+                self._conn.rollback()
+            raise
+
     def _transition(
         self,
         identity: tuple[str, int, str],
         action: Any,
         allowed_from: tuple[str, ...],
+        *,
+        expected_trace_id: str | None = None,
+        require_current_trace: bool = False,
+        expected_review_run_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """把任务从 ``allowed_from`` 之一推进到 ``action`` 的目标状态。"""
         from apps.code_review_pipeline.task_state import (
@@ -440,15 +1146,41 @@ class PostgresReviewStore:
         target = ACTION_TARGET[action]
         repo, pr_number, head_sha = identity
         stamp = _now_iso()
+        transition_detail = dict(metadata or {})
         rows_in = []
         for src in allowed_from:
-            rows_in.append({"from": src, "to": target.value, "at": stamp})
+            rows_in.append(
+                {
+                    "from": src,
+                    "to": target.value,
+                    "at": stamp,
+                    **transition_detail,
+                }
+            )
+        trace_predicate = ""
+        trace_params: tuple[Any, ...] = ()
+        if require_current_trace:
+            trace_predicate = (
+                " AND trace_id = ("
+                "SELECT current.trace_id FROM code_review_prs current "
+                "WHERE current.repo = %s AND current.pr_number = %s "
+                "ORDER BY current.attempt_id DESC LIMIT 1)"
+            )
+            trace_params = (repo, pr_number)
+        run_predicate = ""
+        run_params: tuple[Any, ...] = ()
+        if expected_review_run_id is not None:
+            run_predicate = " AND review_run_id = %s"
+            run_params = (expected_review_run_id,)
         self._connect()
         with self._conn.cursor() as cur:
             cur.execute(
                 "UPDATE code_review_prs SET status = %s, "
                 "state_transitions = state_transitions || %s::jsonb, updated_at = NOW() "
-                "WHERE " + self._IDENTITY + " AND status = ANY(%s) RETURNING status",
+                "WHERE " + self._IDENTITY + " AND status = ANY(%s)"
+                + trace_predicate
+                + run_predicate
+                + " RETURNING status",
                 # 顺序必须与 SQL 里占位符的出现顺序一致：status、jsonb、
                 # 然后是 _IDENTITY 的 repo/pr_number/head_sha，最后是 ANY。
                 # 少传会在真库上直接报 "6 placeholders but 3 parameters"；
@@ -460,12 +1192,44 @@ class PostgresReviewStore:
                     pr_number,
                     head_sha,
                     list(allowed_from),
+                    *trace_params,
+                    *run_params,
                 ),
             )
             row = cur.fetchone()
             if row is not None:
                 self._conn.commit()
                 return str(row[0])
+            if require_current_trace or expected_review_run_id is not None:
+                cur.execute(
+                    "SELECT trace_id, review_run_id FROM code_review_prs "
+                    "WHERE repo = %s AND pr_number = %s "
+                    "ORDER BY attempt_id DESC LIMIT 1",
+                    (repo, pr_number),
+                )
+                current_trace = cur.fetchone()
+                if require_current_trace and (
+                    current_trace is None
+                    or expected_trace_id is None
+                    or str(current_trace[0]) != expected_trace_id
+                ):
+                    self._conn.rollback()
+                    raise StaleReviewTrace(
+                        "stale review trace: "
+                        f"expected {expected_trace_id!r}, "
+                        f"current {current_trace[0] if current_trace else None!r}"
+                    )
+                if (
+                    expected_review_run_id is not None
+                    and current_trace is not None
+                    and str(current_trace[1] or "") != expected_review_run_id
+                ):
+                    self._conn.rollback()
+                    raise StaleReviewTrace(
+                        "stale review run: "
+                        f"expected {expected_review_run_id!r}, "
+                        f"current {current_trace[1]!r}"
+                    )
             cur.execute(
                 "SELECT status FROM code_review_prs WHERE " + self._IDENTITY,
                 (repo, pr_number, head_sha),
@@ -520,13 +1284,30 @@ class PostgresReviewStore:
             return False
         return True
 
-    def transition_task(self, identity: tuple[str, int, str], action: str) -> str:
+    def transition_task(
+        self,
+        identity: tuple[str, int, str],
+        action: str,
+        *,
+        expected_trace_id: str | None = None,
+        require_current_trace: bool = False,
+        expected_review_run_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         """按动作推进任务；当前状态不允许则抛 InvalidTaskTransition。"""
         from apps.code_review_pipeline.task_state import ALLOWED_ACTIONS, TaskAction
 
         act = TaskAction(action)
         allowed = tuple(sorted(s.value for s, acts in ALLOWED_ACTIONS.items() if act in acts))
-        return self._transition(identity, act, allowed)
+        return self._transition(
+            identity,
+            act,
+            allowed,
+            expected_trace_id=expected_trace_id,
+            require_current_trace=require_current_trace,
+            expected_review_run_id=expected_review_run_id,
+            metadata=metadata,
+        )
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -535,6 +1316,33 @@ class PostgresReviewStore:
             except Exception:
                 pass
             self._conn = None
+
+
+def _dedupe_findings(findings: tuple[Any, ...], *, trace_id: str) -> tuple[Any, ...]:
+    """Keep one row per stable finding identity within a review snapshot.
+
+    Re-claiming a task can regenerate the same semantic finding. PostgreSQL's
+    unique key is deliberately finding_uid, so letting duplicates reach the
+    INSERT loop would make an otherwise valid review fail. The later value wins
+    so a final ``published`` state replaces an earlier candidate row.
+    """
+    by_uid: dict[str, Any] = {}
+    for finding in findings:
+        if str(getattr(finding, "trace_id", "")) != trace_id:
+            raise ValueError("all findings must belong to the review trace")
+        uid = str(getattr(finding, "finding_uid", ""))
+        if not uid:
+            raise ValueError("finding_uid is required")
+        by_uid[uid] = finding
+    return tuple(by_uid.values())
+
+
+def _finding_event_key(finding: Any) -> tuple[str, str, str]:
+    return (
+        str(getattr(finding, "finding_uid", "")),
+        str(getattr(finding, "status", "")),
+        str(getattr(finding, "critic_decision", "")),
+    )
 
 
 def build_review_store() -> ReviewStore:

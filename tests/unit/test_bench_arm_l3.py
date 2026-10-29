@@ -194,6 +194,22 @@ def _plan_json(*instructions: str) -> str:
     return "```json\n" + json.dumps({"subtasks": subtasks}, ensure_ascii=False) + "\n```"
 
 
+def _plan_json_with_dependencies(
+    *subtasks: tuple[str, tuple[int, ...]],
+) -> str:
+    payload = {
+        "subtasks": [
+            {
+                "instruction": instruction,
+                "context": f"关于「{instruction}」的背景事实",
+                "depends_on": list(depends_on),
+            }
+            for instruction, depends_on in subtasks
+        ]
+    }
+    return "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
+
+
 def _revise_json(instructions: str, targets: tuple[int, ...]) -> str:
     return json.dumps(
         {
@@ -248,6 +264,187 @@ async def test_three_workers_run_in_one_concurrent_wave(tmp_path: Path) -> None:
         "worker-2",
     ]
     assert run.usage.cost_usd == pytest.approx(0.122)
+
+
+class _DependencyWorkerLLM:
+    """0 号完成后才允许 1 号启动；1 号还要能在自己的副本里读到 0 的写入。"""
+
+    def __init__(
+        self,
+        *,
+        index: int,
+        zero_finished: asyncio.Event,
+        started_early: list[int],
+    ) -> None:
+        self._index = index
+        self._zero_finished = zero_finished
+        self._started_early = started_early
+        self._pending = False
+        self.config = type("_Cfg", (), {"model": f"worker-{index}", "temperature": 0.0})()
+        self.last_metrics: dict[str, Any] = {}
+
+    async def chat_with_tools(self, messages, tools, **kwargs: Any) -> ChatResult:
+        self.last_metrics = {
+            "model_used": self.config.model,
+            "cost_usd": 0.01,
+            "llm_latency_ms": 0.0,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "finish_reason": "stop",
+        }
+        if not self._pending:
+            self._pending = True
+            if self._index == 1:
+                if not self._zero_finished.is_set():
+                    self._started_early.append(self._index)
+                await asyncio.wait_for(self._zero_finished.wait(), timeout=2.0)
+                call = {
+                    "id": "read-zero-output",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": json.dumps(
+                            {"path": "from-zero.txt"}, ensure_ascii=False
+                        ),
+                    },
+                }
+            else:
+                call = {
+                    "id": "write-zero-output",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": json.dumps(
+                            {"path": "from-zero.txt", "content": "zero"},
+                            ensure_ascii=False,
+                        ),
+                    },
+                }
+            return ChatResult(messages=[*messages], content="", tool_calls=[call])
+        if self._index == 0:
+            await asyncio.sleep(0.1)
+            self._zero_finished.set()
+        return ChatResult(messages=[*messages], content="完成", tool_calls=[])
+
+
+@pytest.mark.asyncio
+async def test_dependency_wave_runs_only_after_the_previous_wave_merges(
+    tmp_path: Path,
+) -> None:
+    tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
+    zero_finished = asyncio.Event()
+    started_early: list[int] = []
+
+    def router(messages: list[dict[str, Any]]) -> ScriptedTurn:
+        route = _route(messages)
+        if route == "planner":
+            return ScriptedTurn(
+                final=_plan_json_with_dependencies(
+                    ("写 from-zero", ()),
+                    ("读取 from-zero", (0,)),
+                )
+            )
+        if route == "critic":
+            return ScriptedTurn(final="APPROVED")
+        raise AssertionError("worker 不该走共享 router client")
+
+    agent = L3ConcurrentWorkers(
+        pool=ExpertPool(llm=_RouterLLM(router), tools=tools),
+        workspace=tmp_path,
+        worker_llm_factory=lambda index: _DependencyWorkerLLM(
+            index=index,
+            zero_finished=zero_finished,
+            started_early=started_early,
+        ),
+    )
+
+    run = await agent.run(workspace=tmp_path, goal="目标", budget=Budget(5.0, 30))
+
+    assert run.status == "completed"
+    assert zero_finished.is_set()
+    assert started_early == []
+    assert (tmp_path / "from-zero.txt").read_text(encoding="utf-8") == "zero\n"
+
+
+class _FixedWriteWorkerLLM:
+    def __init__(self, *, index: int, writes: dict[str, str]) -> None:
+        self._index = index
+        self._writes = writes
+        self._pending = False
+        self.config = type("_Cfg", (), {"model": f"worker-{index}", "temperature": 0.0})()
+        self.last_metrics: dict[str, Any] = {}
+
+    async def chat_with_tools(self, messages, tools, **kwargs: Any) -> ChatResult:
+        self.last_metrics = {
+            "model_used": self.config.model,
+            "cost_usd": 0.01,
+            "llm_latency_ms": 0.0,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "finish_reason": "stop",
+        }
+        if not self._pending:
+            self._pending = True
+            calls = [
+                {
+                    "id": f"write-{self._index}-{position}",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": json.dumps(
+                            {"path": path, "content": content},
+                            ensure_ascii=False,
+                        ),
+                    },
+                }
+                for position, (path, content) in enumerate(self._writes.items())
+            ]
+            return ChatResult(messages=[*messages], content="", tool_calls=calls)
+        return ChatResult(messages=[*messages], content="完成", tool_calls=[])
+
+
+@pytest.mark.asyncio
+async def test_same_path_parallel_writes_are_conflicts_and_distinct_paths_merge(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "shared.txt").write_text("base\n", encoding="utf-8")
+    tools = build_toolset(workspace=tmp_path, verify_command=PASSING_VERIFY)
+
+    def router(messages: list[dict[str, Any]]) -> ScriptedTurn:
+        route = _route(messages)
+        if route == "planner":
+            return ScriptedTurn(final=_plan_json("写左边", "写右边"))
+        if route == "critic":
+            return ScriptedTurn(final="APPROVED")
+        raise AssertionError("worker 不该走共享 router client")
+
+    factory = lambda index: _FixedWriteWorkerLLM(
+        index=index,
+        writes=(
+            {"shared.txt": "left", "left-only.txt": "left"}
+            if index == 0
+            else {"shared.txt": "right", "right-only.txt": "right"}
+        ),
+    )
+    agent = L3ConcurrentWorkers(
+        pool=ExpertPool(llm=_RouterLLM(router), tools=tools),
+        workspace=tmp_path,
+        worker_llm_factory=factory,
+    )
+
+    run = await agent.run(workspace=tmp_path, goal="目标", budget=Budget(5.0, 30))
+
+    assert run.status == "completed"
+    assert (tmp_path / "shared.txt").read_text(encoding="utf-8") == "base\n"
+    assert (tmp_path / "left-only.txt").read_text(encoding="utf-8") == "left\n"
+    assert (tmp_path / "right-only.txt").read_text(encoding="utf-8") == "right\n"
+    assert run.workspace_writes
+    assert [item["path"] for item in run.workspace_merges] == [
+        "left-only.txt",
+        "right-only.txt",
+    ]
+    assert len(run.workspace_conflicts) == 1
+    assert run.workspace_conflicts[0]["path"] == "shared.txt"
 
 
 @pytest.mark.asyncio

@@ -175,3 +175,56 @@ async def test_feishu_channel_still_attempts_to_send() -> None:
     )
     await sender.send_card(card)
     assert auth.token_calls == 1, "飞书渠道应该走到取 token"
+
+
+@pytest.mark.asyncio
+async def test_feishu_card_update_uses_message_patch_api(monkeypatch) -> None:
+    from app.channels.feishu_cards import FeishuCardSender
+
+    class _Auth:
+        config = type("C", (), {"base_url": "https://open.feishu.cn/open-apis"})()
+
+        async def get_token(self) -> str:
+            return "tenant-token"
+
+    calls: list[dict] = []
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"code": 0}
+
+    class _Client:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def patch(self, url: str, **kwargs) -> _Response:
+            calls.append({"url": url, **kwargs})
+            return _Response()
+
+    monkeypatch.setattr(
+        "app.channels.feishu_cards.httpx.AsyncClient",
+        _Client,
+    )
+    sender = FeishuCardSender(_Auth())  # type: ignore[arg-type]
+    card = ApprovalCard(
+        session_id="s",
+        trace_id="t",
+        agent_name="code-review-report",
+        intent="review_feedback",
+        agent_output="accepted",
+        channel="feishu",
+        target="",
+    )
+
+    assert await sender.update_card("om_123", card) is True
+    assert calls[0]["url"].endswith("/im/v1/messages/om_123")
+    assert calls[0]["headers"]["Authorization"] == "Bearer tenant-token"

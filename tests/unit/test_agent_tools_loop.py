@@ -129,3 +129,65 @@ async def test_tool_loop_handles_bad_arguments(envelope, monkeypatch) -> None:
     result = await GeneralAgent(llm=llm).execute(envelope)
     assert llm.calls == 2
     assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_coder_uses_workspace_toolset_when_workspace_is_provided(tmp_path) -> None:
+    """业务 coder 收到工作区时，必须能调用真实的文件工具。"""
+    from app.agents.stubs import CoderAgent
+
+    (tmp_path / "sample.py").write_text("print('workspace-ok')\n", encoding="utf-8")
+    workspace_envelope = AgentEnvelope(
+        trace_id="trace-workspace",
+        session_id="sess-workspace",
+        user_raw_input="读取 sample.py",
+        global_summary="",
+        agent_local_slot={
+            "workspace_path": str(tmp_path),
+            "verify_command": ["python", "-c", "print('1 passed')"],
+        },
+    )
+    llm = FakeToolLLM(
+        [
+            [_tool_call("read-1", "read_file", {"path": "sample.py"})],
+            lambda messages: messages[-1]["content"],
+        ]
+    )
+
+    result = await CoderAgent(llm=llm).execute(workspace_envelope)
+
+    assert "print('workspace-ok')" in result
+    assert "unknown tool" not in result
+    assert workspace_envelope.agent_local_slot["tool_calls_total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_workspace_tool_rejects_path_escape(tmp_path) -> None:
+    """工作区工具不能通过 ``..`` 读取宿主上的相邻目录。"""
+    from app.agents.stubs import CoderAgent
+
+    outside = tmp_path.parent / "outside-secret.txt"
+    outside.write_text("do-not-read", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    workspace_envelope = AgentEnvelope(
+        trace_id="trace-escape",
+        session_id="sess-escape",
+        user_raw_input="读取 ../outside-secret.txt",
+        global_summary="",
+        agent_local_slot={
+            "workspace_path": str(workspace),
+            "verify_command": ["python", "-c", "print('1 passed')"],
+        },
+    )
+    llm = FakeToolLLM(
+        [
+            [_tool_call("read-escape", "read_file", {"path": "../outside-secret.txt"})],
+            lambda messages: messages[-1]["content"],
+        ]
+    )
+
+    result = await CoderAgent(llm=llm).execute(workspace_envelope)
+
+    assert "路径越出工作区" in result
+    assert "do-not-read" not in result

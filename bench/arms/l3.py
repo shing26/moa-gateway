@@ -18,10 +18,17 @@ from __future__ import annotations
 import asyncio
 import copy
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from app.agents.tools import ToolRegistry
+from app.orchestration.workspace_isolation import (
+    collect_workspace_write_set,
+    create_isolated_workspace,
+    merge_workspace_write_sets,
+    summarize_write_sets,
+)
 
 from bench.agent.critic import Critique, ReviewPolicy
 from bench.agent.execution import (
@@ -80,6 +87,30 @@ class L3ConcurrentWorkers(L2PlannerWorkerCritic):
             review_policy=review_policy,
         )
         self._worker_llm_factory = worker_llm_factory or clone_llm_factory(pool.llm)
+        self._workspace_wave = 0
+        self._workspace_writes: list[dict[str, Any]] = []
+        self._workspace_conflicts: list[dict[str, Any]] = []
+        self._workspace_merges: list[dict[str, Any]] = []
+
+    async def run(
+        self,
+        *,
+        workspace: Path,
+        goal: str,
+        budget: Budget,
+    ):
+        """跑一轮 L3，并把并行写证据挂到同一个 ``AgentRun`` 出口。"""
+        self._workspace_wave = 0
+        self._workspace_writes = []
+        self._workspace_conflicts = []
+        self._workspace_merges = []
+        run = await super().run(workspace=workspace, goal=goal, budget=budget)
+        return replace(
+            run,
+            workspace_writes=tuple(self._workspace_writes),
+            workspace_conflicts=tuple(self._workspace_conflicts),
+            workspace_merges=tuple(self._workspace_merges),
+        )
 
     def _rerun_targets(
         self,
@@ -119,67 +150,143 @@ class L3ConcurrentWorkers(L2PlannerWorkerCritic):
         if not selected:
             return baseline
 
-        stopped = budget.stop_status(usage=used_usage, steps_used=used_turns)
-        if stopped is not None:
-            return SubtaskExecution(
-                outcomes=existing,
-                usage=Usage(),
-                turns=0,
-                steps=(),
-                model="",
-                status=stopped,
-                subtask_usage=existing_usage,
-            )
+        merged = baseline
+        pending = {subtask.index: subtask for subtask in selected}
+        completed = {item.index for item in existing}
+        while pending:
+            ready = [
+                subtask
+                for index, subtask in sorted(pending.items())
+                if all(dep in completed for dep in subtask.depends_on)
+            ]
+            if not ready:
+                blockers = {
+                    index: list(subtask.depends_on)
+                    for index, subtask in sorted(pending.items())
+                }
+                return replace(
+                    merged,
+                    status="error",
+                    error=f"L3 依赖无法满足，剩余子任务: {blockers}",
+                )
 
-        remaining = budget.remaining(usage=used_usage, steps_used=used_turns)
-        lane_cost = remaining.max_cost_usd / len(selected)
-        lane_steps = remaining.max_steps // len(selected)
-        if lane_steps <= 0:
-            return SubtaskExecution(
-                outcomes=existing,
-                usage=Usage(),
-                turns=0,
-                steps=(),
-                model="",
-                status="step_limit",
-                subtask_usage=existing_usage,
+            stopped = budget.stop_status(
+                usage=used_usage + merged.usage,
+                steps_used=used_turns + merged.turns,
             )
+            if stopped is not None:
+                return replace(merged, status=stopped)
 
-        prior_by_index = {item.index: item for item in existing}
-        tasks = [
-            self._run_worker(
-                workspace=workspace,
+            remaining = budget.remaining(
+                usage=used_usage + merged.usage,
+                steps_used=used_turns + merged.turns,
+            )
+            lane_cost = remaining.max_cost_usd / len(ready)
+            lane_steps = remaining.max_steps // len(ready)
+            if lane_steps <= 0:
+                return replace(merged, status="step_limit")
+
+            self._workspace_wave += 1
+            prior_by_index = {
+                item.index: item for item in (*existing, *merged.outcomes)
+            }
+            tasks = [
+                self._run_worker_isolated(
+                    workspace=workspace,
+                    goal=goal,
+                    subtask=subtask,
+                    prior=tuple(
+                        item
+                        for item in ordered_outcomes(prior_by_index)
+                        if item.index < subtask.index
+                    ),
+                    critique=critique,
+                    budget=Budget(
+                        max_cost_usd=lane_cost,
+                        max_steps=lane_steps,
+                        # token 兜底不按 lane 均分——它是防止单条 lane 无节制刷 token
+                        # 的全局闸门（§5.3），与主线按美元均分是两件事。
+                        max_tokens=remaining.max_tokens,
+                    ),
+                    round_index=self._workspace_wave,
+                )
+                for subtask in ready
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            write_sets: list[dict[str, Any]] = []
+            for subtask, result in zip(ready, results, strict=True):
+                pending.pop(subtask.index, None)
+                if isinstance(result, Exception):
+                    execution = _failed_worker(subtask=subtask, error=str(result))
+                    write_set = None
+                elif isinstance(result, BaseException):
+                    # 取消/`KeyboardInterrupt`/`SystemExit` 不是"某个 worker 出错"，
+                    # 而是这次 run 整体被叫停——ADR-010 决策 4 要求原样上抛。
+                    raise result
+                else:
+                    execution, write_set = result
+                merged = merge_execution(merged, execution)
+                if write_set is not None:
+                    write_sets.append(write_set)
+                if execution.status == "completed":
+                    completed.add(subtask.index)
+
+            if write_sets:
+                merge_result = await asyncio.to_thread(
+                    merge_workspace_write_sets,
+                    workspace,
+                    write_sets,
+                )
+                self._workspace_writes.extend(summarize_write_sets(write_sets))
+                self._workspace_merges.extend(merge_result.applied)
+                self._workspace_conflicts.extend(merge_result.conflicts)
+
+            if merged.status != "completed":
+                return merged
+        return merged
+
+    async def _run_worker_isolated(
+        self,
+        *,
+        workspace: Path,
+        goal: str,
+        subtask: Subtask,
+        prior: tuple[SubtaskOutcome, ...],
+        critique: Critique | None,
+        budget: Budget,
+        round_index: int,
+    ) -> tuple[SubtaskExecution, dict[str, Any] | None]:
+        isolated = None
+        try:
+            isolated = await asyncio.to_thread(create_isolated_workspace, workspace)
+            worker_tools = self._pool.tools.for_workspace(isolated.root)
+            execution = await self._run_worker(
+                workspace=isolated.root,
                 goal=goal,
                 subtask=subtask,
-                prior=tuple(
-                    item
-                    for item in ordered_outcomes(prior_by_index)
-                    if item.index < subtask.index
-                ),
+                prior=prior,
                 critique=critique,
-                budget=Budget(
-                    max_cost_usd=lane_cost,
-                    max_steps=lane_steps,
-                    # token 兜底不按 lane 均分——它是防止单条 lane 无节制刷 token 的
-                    # 全局闸门（§5.3），与主线按美元均分是两件事。
-                    max_tokens=remaining.max_tokens,
-                ),
+                budget=budget,
+                tools=worker_tools,
             )
-            for subtask in selected
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        merged = baseline
-        for subtask, result in zip(selected, results, strict=True):
-            if isinstance(result, Exception):
-                result = _failed_worker(subtask=subtask, error=str(result))
-            elif isinstance(result, BaseException):
-                # 取消/`KeyboardInterrupt`/`SystemExit` 不是"某个 worker 出错"，而是
-                # 这次 run 整体被叫停——ADR-010 决策 4 要求原样上抛，绝不当成
-                # ``status="error"`` 收成一条可审计的失败。
-                raise result
-            merged = merge_execution(merged, result)
-        return merged
+            write_set = await asyncio.to_thread(
+                collect_workspace_write_set,
+                source=workspace,
+                isolated_root=isolated.root,
+                writer_id=f"round-{round_index}/subtask-{subtask.index}",
+                task=subtask.instruction,
+                round_index=round_index,
+                accepted=execution.status == "completed",
+            )
+            return execution, write_set
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return _failed_worker(subtask=subtask, error=str(exc)), None
+        finally:
+            if isolated is not None:
+                await asyncio.to_thread(isolated.cleanup)
 
     async def _run_worker(
         self,
@@ -190,10 +297,11 @@ class L3ConcurrentWorkers(L2PlannerWorkerCritic):
         prior: tuple[SubtaskOutcome, ...],
         critique: Critique | None,
         budget: Budget,
+        tools: ToolRegistry | None = None,
     ) -> SubtaskExecution:
         session = LLMBackedAgent(
             self._worker_llm_factory(subtask.index),
-            self._pool.tools,
+            tools or self._pool.tools,
         ).session(workspace=workspace, goal=goal, budget=budget)
         session.add_user_message(
             handoff_prompt(

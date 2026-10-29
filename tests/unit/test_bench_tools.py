@@ -74,6 +74,28 @@ async def test_write_outside_workspace_is_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_workspace_toolset_can_be_rebound_for_an_isolated_copy(
+    tmp_path: Path,
+) -> None:
+    original = tmp_path / "original"
+    isolated = tmp_path / "isolated"
+    original.mkdir()
+    isolated.mkdir()
+    tools = make_tools(original)
+
+    rebound = tools.for_workspace(isolated)
+    outcome = await call_bench_tool(
+        rebound.get("write_file"),
+        {"path": "isolated.txt", "content": "only here"},
+        workspace=isolated,
+    )
+
+    assert outcome.kind == "ok"
+    assert (isolated / "isolated.txt").read_text(encoding="utf-8") == "only here\n"
+    assert not (original / "isolated.txt").exists()
+
+
+@pytest.mark.asyncio
 async def test_read_file_numbers_lines_and_truncates(tmp_path: Path) -> None:
     (tmp_path / "big.txt").write_text("abcdefghij\n", encoding="utf-8")
     tools = make_tools(tmp_path, read_bytes=5)

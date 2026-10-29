@@ -1,0 +1,11 @@
+{
+  "task_id": "e3-c7-feishu-post-fallback",
+  "base_commit": "910c865b0a75af1b745e3054555de5509c46a236",
+  "difficulty": "中",
+  "source": "E3",
+  "fix_surface": "medium",
+  "note": "content_v2 存在但为空时，富文本解析必须回退到 content，不能返回空消息。",
+  "known_defect": "empty content_v2 suppresses the valid content fallback",
+  "verify_command": ["{python}", "-m", "pytest", "tests/unit/test_e3_feishu_post_fallback.py", "-q"],
+  "test_paths": ["tests/unit/test_e3_feishu_post_fallback.py"]
+}

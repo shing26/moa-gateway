@@ -1,0 +1,30 @@
+diff --git a/app/budget/guard.py b/app/budget/guard.py
+--- a/app/budget/guard.py
++++ b/app/budget/guard.py
+@@ -48,8 +48,10 @@ class BudgetGuard:
+     def record(self, session_id: str, cost_usd: float) -> float:
+         """累计一次真实成本，返回该会话的新累计值。"""
+-        if cost_usd <= 0:
++        if cost_usd == 0:
+             return self.spent(session_id)
+         entry = self._spend.setdefault(session_id, _SessionSpend())
+         entry.total_usd += float(cost_usd)
+         entry.last_seen = time.monotonic()
++        if cost_usd < 0:
++            return self.spent(session_id)
+         return entry.total_usd
+diff --git a/tests/unit/test_e3_budget_input_guard.py b/tests/unit/test_e3_budget_input_guard.py
+new file mode 100644
+--- /dev/null
++++ b/tests/unit/test_e3_budget_input_guard.py
+@@ -0,0 +1,10 @@
++from __future__ import annotations
++
++from app.budget.guard import BudgetGuard
++
++
++def test_negative_cost_cannot_change_session_usage() -> None:
++    guard = BudgetGuard(limit_usd=1.0)
++
++    assert guard.record("session-a", -2.5) == 0.0
++    assert guard.spent("session-a") == 0.0

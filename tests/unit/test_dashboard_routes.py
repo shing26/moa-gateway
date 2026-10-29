@@ -13,7 +13,8 @@ from tests.conftest import _needs_vector_db
 def test_dashboard_pages_render():
     with app_client(app) as client:
         for path in ("/dashboard", "/dashboard/overview", "/dashboard/knowledge",
-                     "/dashboard/sessions", "/dashboard/test", "/dashboard/logs", "/dashboard/ops"):
+                     "/dashboard/sessions", "/dashboard/test", "/dashboard/logs",
+                     "/dashboard/ops", "/dashboard/experiments"):
             res = client.get(path)
             assert res.status_code == 200
             assert "Agent Gateway" in res.text

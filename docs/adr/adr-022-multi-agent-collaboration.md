@@ -2,11 +2,11 @@
 
 日期：2026-10-09
 状态：已实施
-关联：ADR-008（LangGraph 第二引擎，保持冻结）、ADR-016（剩余台账：精排与分块触发线）、ADR-020（混合检索与 gold set 验收）、`delivery/定位与减法清单.md`
+关联：ADR-008（LangGraph 第二引擎，保持冻结）、ADR-016（剩余台账：精排与分块触发线）、ADR-020（混合检索与 gold set 验收）、ADR-025（实验 Run Record）、`delivery/定位与减法清单.md`
 
 ## 背景
 
-R6（多级 supervisor）在 `delivery/高层架构设计.md` 与 `delivery/UserStory.md` 里
+R6（多级 supervisor）在 `docs/archive/高层架构设计.md` 与 `docs/archive/UserStory.md` 里
 被列为**延后到完整版的增强项**，理由当时是"MVP 先跑通分发与闭环，多级协作为增强项"。
 随后《定位与减法清单（2026-09-22）》把这条线连同任务 Agent、长期记忆一起
 归入"冻结：保留代码、停止扩展"，并把"双引擎"列为"不再给它添场景"。
@@ -19,7 +19,8 @@ R6（多级 supervisor）在 `delivery/高层架构设计.md` 与 `delivery/User
 ## 决策
 
 1. **只解除 R6 这一条**，其余冻结项不动。任务 Agent、长期记忆、Web Chat 仍是
-   "同一编排层的示例应用"；PR 审查垂直应用仍是"只读审查"。解除的是
+   "同一编排层的示例应用"；PR 审查垂直应用当时按"只读审查"记（见 ADR-021 与
+   ADR-012 的 2026-10-19 订正：写回与经审批合并通道后来落地了）。解除的是
    "**多 Agent 协作作为一条能力线**"，不是"把冻结全部推翻"。
 2. **协作链路是新增路径，不进入请求主路径**。理由：
    - 意图路由的 `INTENT_AGENT_MAP` 与 `_AGENT_KEYS` 自检是既有契约，
@@ -31,7 +32,7 @@ R6（多级 supervisor）在 `delivery/高层架构设计.md` 与 `delivery/User
      一个用代码回答"主流框架能否实现同样的约束"，一个**提供能力**。
 3. **形态**：Supervisor 规划 → 按子任务 handoff 到专家（复用
    `AGENT_REGISTRY` 里的 coder/general/review）→ Critic 评审 → 有界 revise 回边
-   → 汇总 → 既有 guard/HITL/审计。这是 `delivery/research_report.md` 已经调研过
+   → 汇总 → 既有 guard/HITL/审计。这是 `docs/archive/research_report.md` 已经调研过
    的 LangGraph supervisor 模式，不是新范式。
 4. **运行时**：LangGraph `StateGraph`（可选 extra，CI 的 `--all-extras` 已覆盖）。
    FSM 继续承担单 Agent 请求路径；协作是**第三种**编排路径。
@@ -96,3 +97,18 @@ R6（多级 supervisor）在 `delivery/高层架构设计.md` 与 `delivery/User
 5. **CI 只门禁"检索维度真的跑过"，不设质量阈值**。23 条 gold set 上一行标注
    就是 4.3 个百分点，拿单次实测当阈值会让 CI 在合法增删标注时误红。
    加入条件写在 `docs/retrieval-evaluation.md`。
+
+## 后续实装（2026-10-21）
+
+原边界第 4 条已被实现取代：
+
+- `dispatch` 改为依赖波次调度：只派前置 `completed_round` 已满足
+  `required_round` 的 ready 子任务；无 ready 项时显式以循环依赖失败收口。
+- 下游专家的 `agent_local_slot["collab_dependency_outputs"]` 携带直接前置产物；
+  Critic 打回时目标及传递下游进入新轮次，无关分支保留。
+- 业务 `coder` / `general` 在显式提供 `workspace_path` 时切换到工作区工具集；
+  宿主访问边界由 `COLLAB_WORKSPACE_ROOT` 控制。
+- 流式 `__interrupt__` 帧规范化为 JSON-safe 的
+  `{"interrupts": [...]}`，不再把 LangGraph 的 `Interrupt` 元组强转 dict。
+- 新增 opt-in 本地 `qwen2.5:3b` 活体 smoke，验证 plan、专家工具调用、
+  Critic 与治理交付在同一条真实链路上完成；默认 CI 不访问网络。

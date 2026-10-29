@@ -1,0 +1,8 @@
+{
+  "task_id": "t1-crash-on-startup",
+  "issue_text": "程序启动即崩溃。环境：Windows 11，Python 3.13。复现步骤：pip install 后运行 moa-gateway，立刻报 ModuleNotFoundError: No module named 'packaging'。依赖列表里没有 packaging，但 app/main.py 第 3 行 import 了它。这是安装即坏，所有人都撞得上。",
+  "expected_category": "bug",
+  "expected_priority": "P0",
+  "expected_route": "auto",
+  "note": "明确复现步骤 + 明确根因指向 + 影响所有安装 → bug/P0/auto。不涉及安全隐私资金，可自动处理。"
+}

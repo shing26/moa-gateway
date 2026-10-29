@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import time
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -308,6 +309,40 @@ class SessionState:
             self.state_stack = []
 
 
+class _ReentrantSessionLock:
+    """按 asyncio task 记所有者的可重入锁。
+
+    为什么不用裸 ``asyncio.Lock``：请求级互斥在 ``MoAPipeline.run``，而请求内部还会
+    单次调用 ``Engine.handle_event``——同一个 task 要嵌套进入同一把锁。``asyncio.Lock``
+    不可重入，直接嵌套会自锁。这里记 owner 与深度：同一个 task 再进只加深一层，
+    别的 task 老老实实排队。
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task | None = None
+        self._depth = 0
+
+    @asynccontextmanager
+    async def hold(self):
+        task = asyncio.current_task()
+        if self._owner is not None and self._owner is task:
+            self._depth += 1
+            try:
+                yield
+            finally:
+                self._depth -= 1
+            return
+        async with self._lock:
+            self._owner = task
+            self._depth = 1
+            try:
+                yield
+            finally:
+                self._owner = None
+                self._depth = 0
+
+
 class Engine:
     def __init__(
         self,
@@ -319,26 +354,42 @@ class Engine:
         self.adapter = adapter or ResponseAdapter()
         self.session_store = session_store or SessionStore()
         self._session_states: dict[str, StateContext] = {}
-        # 每会话一把锁，见 handle_event 的说明（探索性验收 D4，2026-09-29）。
-        self._session_locks: dict[str, asyncio.Lock] = {}
+        # 每会话一把可重入锁，见 session_lock 的说明（探索性验收 D4）。
+        self._session_locks: dict[str, _ReentrantSessionLock] = {}
+
+    @asynccontextmanager
+    async def session_lock(self, session_id: str):
+        """独占一个会话，直到 ``async with`` 块结束（探索性验收 D4）。
+
+        **必须在请求入口（``MoAPipeline.run``）整段持有，不能只包单次
+        ``handle_event``。** 一次请求要推进多个 FSM 事件、中间夹着 LLM 与检索的
+        await；只锁单次调用的话，同会话两条并发消息会各自读到对方的中间状态——
+        后一条在第一条的 EXECUTING 上再发 TASK_STARTED，直接 500
+        ``invalid_state_transition``。2026-10-19 实测（3 并发 × 5 轮）：
+        每轮挂 2 条，10/15 失败；把锁挪到请求入口后全部通过。
+
+        语义是"先到先处理"，不是排队丢弃；跨会话完全并行。
+
+        已知边界一：锁字典**不随会话回收**（reset_session 也不摘锁——摘掉正在用的锁
+        会让后来的协程新建一把，等于两个协程同时进临界区）。一次会话一个 Lock 对象，
+        量级可接受；真到长跑多会话再引入 LRU，此处如实记下而不是假装没有。
+
+        已知边界二：这条锁只覆盖走 ``MoAPipeline`` 的请求。ADR-008 的 LangGraph
+        适配器直接调 ``handle_event``，它拿到的仍是**单次调用**级的互斥，并发投喂
+        同一会话仍可能撞非法迁移；那条路是可选对照引擎，不在生产路由上。
+        """
+        lock = self._session_locks.setdefault(session_id, _ReentrantSessionLock())
+        async with lock.hold():
+            yield
 
     async def handle_event(self, event: MoAEvent) -> SessionState:
-        """每会话串行化（探索性验收 D4，2026-09-29）。
+        """推进一次 FSM 事件（"读 `_session_states` → 算下一状态 → 写回"）。
 
-        这里原本是"读 `_session_states` → 算下一状态 → 写回"的读改写，没有互斥：
-        同一会话两条消息并发时，两边读到同一个旧状态，一边算出非法迁移
-        （500 `invalid_state_transition`），另一边把对方的写入覆盖掉（丢更新）。
-        实测 3 并发挂 1。
-
-        锁**只护住会话状态这一段**，跨会话完全并行；同一会话内后到的消息等前一条
-        处理完再走——这是"先到先处理"的语义，不是排队丢弃。
-
-        已知边界：锁字典**不随会话回收**（reset_session 也不摘锁——摘掉正在用的锁会让
-        后来的协程新建一把，等于两个协程同时进临界区）。一次会话一个 Lock 对象，
-        量级可接受；真到长跑多会话再引入 LRU，此处如实记下而不是假装没有。
+        临界区里目前没有 await，所以在单事件循环里本来就跑完才让出；这里仍然取锁，
+        是为了"以后谁在临界区里加了 await 也不会被插队"。真正的**请求级**互斥在
+        ``MoAPipeline.run``，见 ``session_lock`` 的说明。
         """
-        lock = self._session_locks.setdefault(event.session_id, asyncio.Lock())
-        async with lock:
+        async with self.session_lock(event.session_id):
             return await self._handle_event_locked(event)
 
     async def _handle_event_locked(self, event: MoAEvent) -> SessionState:

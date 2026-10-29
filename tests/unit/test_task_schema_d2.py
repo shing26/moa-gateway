@@ -69,7 +69,7 @@ def test_every_statement_is_structurally_balanced() -> None:
 
 
 def test_dedupe_ctes_are_complete_wellformed_statements() -> None:
-    """去重用的两条 WITH 语句必须以分号独立成句。
+    """去重用的 WITH 语句必须以分号独立成句。
 
     ``_ensure_schema`` 把整个 schema.sql 一次性 ``cur.execute`` 过去。去重语句末尾
     若漏了分号，WITH 的 UPDATE 会和后面的 CREATE INDEX 粘成一句，语法直接报错。
@@ -77,11 +77,14 @@ def test_dedupe_ctes_are_complete_wellformed_statements() -> None:
     with_statements = [
         s for s in map(_strip_comments, _statements()) if s.upper().startswith("WITH ")
     ]
-    assert len(with_statements) == 2, (
-        f"期望 2 条 WITH 语句（改挂 findings + 删除重复行），实际 {len(with_statements)}"
+    assert len(with_statements) == 4, (
+        "期望 4 条 WITH 语句（改挂 findings / feedback / finding events + 删除重复行），"
+        f"实际 {len(with_statements)}"
     )
     joined = " ".join(s.upper() for s in with_statements)
     assert "UPDATE CODE_REVIEW_FINDINGS" in joined
+    assert "UPDATE CODE_REVIEW_FINDING_FEEDBACK" in joined
+    assert "UPDATE CODE_REVIEW_FINDING_EVENTS" in joined
     assert "DELETE FROM CODE_REVIEW_PRS" in joined
     for stmt in with_statements:
         assert "PARTITION BY REPO, PR_NUMBER, HEAD_SHA" in stmt.upper(), (
@@ -187,6 +190,20 @@ def test_schema_remaps_findings_before_deleting_duplicate_rows() -> None:
     dedupe_at = upper.find("DELETE FROM CODE_REVIEW_PRS")
     assert remap_at != -1, "缺少 findings 的 trace_id 改挂"
     assert remap_at < dedupe_at, "必须先改挂 findings 再删重复行，否则触发外键失败"
+
+
+def test_schema_backfills_legacy_findings_out_of_feedback_denominator() -> None:
+    sql = SQL.upper()
+    backfill_at = sql.find("SET FINDING_UID = 'LEGACY:' || ID::TEXT")
+    legacy_status_at = sql.find("SET STATUS = 'LEGACY'")
+    unique_index_at = sql.find(
+        "CREATE UNIQUE INDEX IF NOT EXISTS UQ_CODE_REVIEW_FINDINGS_UID"
+    )
+    assert backfill_at != -1
+    assert legacy_status_at != -1
+    assert unique_index_at != -1
+    assert backfill_at < unique_index_at
+    assert legacy_status_at < unique_index_at
 
 
 def test_schema_keeps_legacy_trace_id_primary_key() -> None:

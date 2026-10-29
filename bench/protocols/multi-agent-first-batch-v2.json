@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "protocol_id": "multi-agent-first-batch",
+  "version": "2",
+  "frozen_at": "2026-10-23",
+  "tasks": [
+    {
+      "task_id": "0896629",
+      "origin": "E1",
+      "task_file": "bench/tasks/0896629.task.json"
+    },
+    {
+      "task_id": "60c64ed",
+      "origin": "E1",
+      "task_file": "bench/tasks/60c64ed.task.json"
+    },
+    {
+      "task_id": "988fccb",
+      "origin": "E1",
+      "task_file": "bench/tasks/988fccb.task.json"
+    },
+    {
+      "task_id": "a746b81",
+      "origin": "E1",
+      "task_file": "bench/tasks/a746b81.task.json"
+    },
+    {
+      "task_id": "bd4f186",
+      "origin": "E1",
+      "task_file": "bench/tasks/bd4f186.task.json"
+    },
+    {
+      "task_id": "e3-c1-budget-ttl-refresh",
+      "origin": "E3",
+      "task_file": "bench/tasks/e3-c1-budget-ttl-refresh.task.json"
+    },
+    {
+      "task_id": "e3-c2-keyword-normalization",
+      "origin": "E3",
+      "task_file": "bench/tasks/e3-c2-keyword-normalization.task.json"
+    },
+    {
+      "task_id": "e3-c3-binary-write-review",
+      "origin": "E3",
+      "task_file": "bench/tasks/e3-c3-binary-write-review.task.json"
+    }
+  ],
+  "arms": [
+    {
+      "name": "L0",
+      "version": "v1",
+      "description": "单体 ReAct 循环"
+    },
+    {
+      "name": "L1",
+      "version": "v1",
+      "description": "串行角色分工与 Critic 回边"
+    },
+    {
+      "name": "L2",
+      "version": "v1",
+      "description": "依赖感知并行分工"
+    },
+    {
+      "name": "L3",
+      "version": "v1",
+      "description": "并行分工加共享审查闭环"
+    }
+  ],
+  "model": {
+    "provider": "nvidia",
+    "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "temperature": 1.0,
+    "timeout": 120.0,
+    "max_tokens": 1024,
+    "cost_signal": false
+  },
+  "budget": {
+    "axis": "tokens",
+    "b1": {
+      "max_cost_usd": null,
+      "max_steps": 40,
+      "max_tokens": 400000
+    },
+    "b3": {
+      "max_cost_usd": null,
+      "max_steps": 120,
+      "max_tokens": 1200000
+    }
+  },
+  "repeats": {
+    "pilot": 1,
+    "baseline": 1,
+    "formal": 3
+  },
+  "retry": {
+    "max_error_retries": 1,
+    "retry_on": [
+      "error"
+    ],
+    "do_not_retry_on": [
+      "fail",
+      "budget_exhausted"
+    ]
+  },
+  "exclusions": {
+    "excluded_outcomes": [
+      "error"
+    ],
+    "exclude_from_pass_rate": [
+      "error"
+    ],
+    "invalid_task_fails_first": true
+  },
+  "reporting": {
+    "statistical_claims": false,
+    "directional_until_samples": 3,
+    "primary_metric": "pass_rate",
+    "cost_unavailable_reason": "当前端点没有可用的美元成本信号，报告使用 token 轴",
+    "group_by": [
+      "task_origin",
+      "arm"
+    ]
+  }
+}

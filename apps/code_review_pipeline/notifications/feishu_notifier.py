@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -9,6 +10,15 @@ from app.channels.feishu_cards import ApprovalCard, FeishuCardSender, parse_card
 from app.deps import _card_sender as _global_card_sender
 
 logger = logging.getLogger("moa.code_review.notifications")
+
+_FINDING_PAGE_SIZE = 5
+_DISPOSITION_BUTTONS = (
+    ("可行动", "accepted_actionable", "", "primary"),
+    ("非行动", "accepted_non_actionable", "not_worth_fixing", "default"),
+    ("误报", "false_positive", "incorrect_finding", "danger"),
+    ("重复", "duplicate", "", "default"),
+    ("已知", "already_known", "", "default"),
+)
 
 
 @dataclass(frozen=True)
@@ -23,11 +33,181 @@ class ReviewNotification:
     report: Any = None
 
 
+@dataclass(frozen=True)
+class FindingReviewCard:
+    """Interactive review card with per-finding feedback actions."""
+
+    trace_id: str
+    repo: str
+    pr_number: int
+    head_sha: str
+    review_run_id: str = ""
+    findings: tuple[Any, ...] = ()
+    page: int = 1
+    total_pages: int = 1
+    control: bool = False
+    session_id: str = ""
+    channel: str = "feishu"
+    target: str = ""
+    feedback_by_uid: dict[str, str] | None = None
+
+    def to_card_payload(self) -> dict[str, Any]:
+        if self.control:
+            elements: list[dict[str, Any]] = [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**仓库**: {self.repo}\n"
+                        f"**PR**: #{self.pr_number}\n"
+                        f"**Head**: `{self.head_sha[:12]}`\n"
+                        "所有 finding 已完成人工标注。"
+                    ),
+                },
+                {"tag": "hr"},
+                {
+                    "tag": "action",
+                    "actions": [
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "批准写回 GitHub"},
+                            "value": {
+                                "action": "review_publish",
+                                "trace_id": self.trace_id,
+                                "head_sha": self.head_sha,
+                                "review_run_id": self.review_run_id,
+                            },
+                            "type": "primary",
+                        },
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": "拒绝写回"},
+                            "value": {
+                                "action": "review_reject",
+                                "trace_id": self.trace_id,
+                                "head_sha": self.head_sha,
+                                "review_run_id": self.review_run_id,
+                            },
+                            "type": "danger",
+                        },
+                    ],
+                },
+            ]
+            return {
+                "config": {"wide_screen_mode": True},
+                "header": {
+                    "title": {
+                        "tag": "plain_text",
+                        "content": "Agent Gateway - PR Review 写回审批",
+                    },
+                    "template": "orange",
+                },
+                "elements": elements,
+            }
+
+        elements = [
+            {
+                "tag": "markdown",
+                "content": (
+                    f"**仓库**: {self.repo}\n"
+                    f"**PR**: #{self.pr_number}\n"
+                    f"**Head**: `{self.head_sha[:12]}`\n"
+                    f"**页**: {self.page}/{self.total_pages}"
+                ),
+            },
+            {"tag": "hr"},
+        ]
+        for index, finding in enumerate(self.findings, start=1):
+            evidence = "\n".join(f"- {str(item)[:300]}" for item in finding.evidence[:2])
+            current_label = (self.feedback_by_uid or {}).get(finding.finding_uid, "")
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**{index}. [{finding.severity.upper()}] {finding.title}**\n"
+                        f"`{finding.file}:{finding.line}`\n"
+                        f"{finding.description[:500]}\n"
+                        f"建议：{finding.suggestion[:400]}\n"
+                        + (
+                            f"当前标签：`{current_label}`\n"
+                            if current_label
+                            else "当前标签：未标注\n"
+                        )
+                        + (f"证据：\n{evidence}" if evidence else "证据：无")
+                    ),
+                }
+            )
+            rows = []
+            for start, size in ((0, 3), (3, 2)):
+                actions = []
+                for label, disposition, reason_code, style in _DISPOSITION_BUTTONS[
+                    start : start + size
+                ]:
+                    actions.append(
+                        {
+                            "tag": "button",
+                            "text": {"tag": "plain_text", "content": label},
+                            "value": {
+                                "action": "review_finding_feedback",
+                                "trace_id": self.trace_id,
+                                "finding_uid": finding.finding_uid,
+                                "disposition": disposition,
+                                "reason_code": reason_code,
+                                "head_sha": self.head_sha,
+                                "review_run_id": self.review_run_id,
+                                "page": self.page,
+                                "total_pages": self.total_pages,
+                            },
+                            "type": style,
+                        }
+                    )
+                rows.append({"tag": "action", "actions": actions})
+            elements.extend(rows)
+            elements.append({"tag": "hr"})
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {
+                    "tag": "plain_text",
+                    "content": "Agent Gateway - PR Review 逐条反馈",
+                },
+                "template": "blue",
+            },
+            "elements": elements,
+        }
+
+    def to_message_payload(self) -> dict[str, Any]:
+        return {
+            "receive_id": self.target,
+            "msg_type": "interactive",
+            "content": json.dumps(self.to_card_payload(), ensure_ascii=False),
+            "uuid": self.delivery_key,
+        }
+
+    @property
+    def delivery_key(self) -> str:
+        kind = "control" if self.control else f"findings:{self.page}:{self.total_pages}"
+        material = f"{self.trace_id}\0{self.head_sha}\0{self.review_run_id}\0{kind}"
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, material))
+
+
 class FeishuReviewNotifier:
     def __init__(self, webhook_url: str | None = None, card_sender: FeishuCardSender | None = None, default_target: str | None = None) -> None:
         self._webhook_url = webhook_url
         self._card_sender = card_sender
         self._default_target = default_target
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self._default_target)
+
+    @staticmethod
+    def expected_finding_card_count(findings: tuple[Any, ...]) -> int:
+        published = sum(
+            str(getattr(item, "status", "")) == "published" for item in findings
+        )
+        if published == 0:
+            return 1
+        return (published + _FINDING_PAGE_SIZE - 1) // _FINDING_PAGE_SIZE
 
     async def send_summary(self, notification: ReviewNotification) -> None:
         logger.info(
@@ -79,6 +259,137 @@ class FeishuReviewNotifier:
         ok = await card_sender.send_card(card)
         if not ok:
             logger.warning("feishu notification delivery failed trace=%s", notification.trace_id)
+
+    async def send_finding_cards(
+        self,
+        *,
+        trace_id: str,
+        repo: str,
+        pr_number: int,
+        head_sha: str,
+        review_run_id: str,
+        findings: tuple[Any, ...],
+    ) -> int:
+        """Send final findings in bounded pages; return number of cards sent."""
+        published = tuple(
+            item
+            for item in findings
+            if str(getattr(item, "status", "")) == "published"
+        )
+        if not self._default_target:
+            logger.info(
+                "no finding-card destination configured; skipping trace=%s",
+                trace_id,
+            )
+            return 0
+        card_sender = self._card_sender or _global_card_sender
+        if card_sender is None:
+            logger.warning("feishu card sender not initialized; skip finding cards")
+            return 0
+        if not published:
+            cards = (
+                FindingReviewCard(
+                    trace_id=trace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    head_sha=head_sha,
+                    review_run_id=review_run_id,
+                    control=True,
+                    session_id=trace_id,
+                    target=self._default_target,
+                ),
+            )
+        else:
+            pages = [
+                published[index : index + _FINDING_PAGE_SIZE]
+                for index in range(0, len(published), _FINDING_PAGE_SIZE)
+            ]
+            cards = tuple(
+                FindingReviewCard(
+                    trace_id=trace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    head_sha=head_sha,
+                    review_run_id=review_run_id,
+                    findings=tuple(page),
+                    page=index + 1,
+                    total_pages=len(pages),
+                    session_id=trace_id,
+                    target=self._default_target,
+                )
+                for index, page in enumerate(pages)
+            )
+        sent = 0
+        for card in cards:
+            if await card_sender.send_card(card):  # type: ignore[arg-type]
+                sent += 1
+        return sent
+
+    async def send_publish_control(
+        self,
+        *,
+        trace_id: str,
+        repo: str,
+        pr_number: int,
+        head_sha: str,
+        review_run_id: str,
+    ) -> bool:
+        if not self._default_target:
+            return False
+        card_sender = self._card_sender or _global_card_sender
+        if card_sender is None:
+            return False
+        card = FindingReviewCard(
+            trace_id=trace_id,
+            repo=repo,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            review_run_id=review_run_id,
+            control=True,
+            session_id=trace_id,
+            target=self._default_target,
+        )
+        return await card_sender.send_card(card)  # type: ignore[arg-type]
+
+    async def update_feedback_card(
+        self,
+        *,
+        message_id: str,
+        trace_id: str,
+        repo: str,
+        pr_number: int,
+        head_sha: str,
+        review_run_id: str,
+        findings: tuple[Any, ...],
+        feedback_by_uid: dict[str, str],
+        page: int,
+        total_pages: int,
+    ) -> bool:
+        card_sender = self._card_sender or _global_card_sender
+        if card_sender is None:
+            return False
+        published = tuple(
+            item
+            for item in findings
+            if str(getattr(item, "status", "")) == "published"
+        )
+        start = max(0, (page - 1) * _FINDING_PAGE_SIZE)
+        page_findings = published[start : start + _FINDING_PAGE_SIZE]
+        if not page_findings:
+            return False
+        card = FindingReviewCard(
+            trace_id=trace_id,
+            repo=repo,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            review_run_id=review_run_id,
+            findings=page_findings,
+            page=page,
+            total_pages=total_pages,
+            session_id=trace_id,
+            feedback_by_uid=feedback_by_uid,
+        )
+        return await card_sender.update_card(message_id, card)
 
     @staticmethod
     def _build_summary_card(notification: ReviewNotification) -> ApprovalCard:

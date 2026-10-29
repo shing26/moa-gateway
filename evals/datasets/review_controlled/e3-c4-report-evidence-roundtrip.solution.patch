@@ -1,0 +1,11 @@
+diff --git a/apps/code_review_pipeline/agents/report_agent.py b/apps/code_review_pipeline/agents/report_agent.py
+--- a/apps/code_review_pipeline/agents/report_agent.py
++++ b/apps/code_review_pipeline/agents/report_agent.py
+@@ -75,6 +75,7 @@ def _parse_report(raw: str, *, trace_id: str) -> AgentFindingResult:
+                 suggestion=str(item.get("suggestion", "")),
+                 confidence=float(item.get("confidence", 0.0) or 0.0),
+                 team_specific=bool(item.get("team_specific", False)),
++                evidence=tuple(item.get("evidence", []) or []),
+             )
+         )
+     return AgentFindingResult(

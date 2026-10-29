@@ -4,6 +4,7 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS code_review_prs (
+    attempt_id BIGSERIAL,
     trace_id TEXT PRIMARY KEY,
     repo TEXT NOT NULL,
     pr_number INTEGER NOT NULL,
@@ -17,6 +18,7 @@ CREATE TABLE IF NOT EXISTS code_review_prs (
     labels TEXT[] NOT NULL DEFAULT '{}',
     reviewers TEXT[] NOT NULL DEFAULT '{}',
     overall_need_human_review BOOLEAN NOT NULL DEFAULT FALSE,
+    review_metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
     status TEXT NOT NULL DEFAULT 'pending',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -37,8 +39,110 @@ CREATE TABLE IF NOT EXISTS code_review_findings (
     confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
     team_specific BOOLEAN NOT NULL DEFAULT FALSE,
     evidence TEXT[] NOT NULL DEFAULT '{}',
+    evidence_verified BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Finding identity and review lineage (ADR-024).
+-- Existing databases may have rows from earlier experiments; nullable columns plus
+-- partial unique indexes let the migration run before those rows are backfilled.
+ALTER TABLE code_review_findings ADD COLUMN IF NOT EXISTS finding_uid TEXT;
+ALTER TABLE code_review_findings ADD COLUMN IF NOT EXISTS fingerprint TEXT;
+ALTER TABLE code_review_findings ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'published';
+ALTER TABLE code_review_findings ADD COLUMN IF NOT EXISTS revision_of TEXT;
+ALTER TABLE code_review_findings ADD COLUMN IF NOT EXISTS source_agents TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE code_review_findings ADD COLUMN IF NOT EXISTS critic_decision TEXT NOT NULL DEFAULT '';
+ALTER TABLE code_review_findings ADD COLUMN IF NOT EXISTS critic_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE code_review_findings ADD COLUMN IF NOT EXISTS evidence_verified BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Legacy rows predate stable finding identity. Backfill a deterministic address
+-- but mark them as legacy so they never enter the human-feedback denominator or
+-- a publish review.
+UPDATE code_review_findings
+SET finding_uid = 'legacy:' || id::text
+WHERE finding_uid IS NULL;
+
+UPDATE code_review_findings
+SET fingerprint = 'legacy:' || id::text
+WHERE fingerprint IS NULL;
+
+UPDATE code_review_findings
+SET status = 'legacy'
+WHERE fingerprint LIKE 'legacy:%';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_code_review_findings_uid
+    ON code_review_findings (finding_uid)
+    WHERE finding_uid IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_code_review_findings_status
+    ON code_review_findings (trace_id, status);
+
+-- Append-only finding feedback. event_id is the Feishu event identity and the
+-- idempotency key; a later human event supersedes an earlier one only by time.
+CREATE TABLE IF NOT EXISTS code_review_finding_feedback (
+    event_id TEXT PRIMARY KEY,
+    trace_id TEXT NOT NULL REFERENCES code_review_prs(trace_id) ON DELETE CASCADE,
+    finding_uid TEXT NOT NULL,
+    disposition TEXT NOT NULL CHECK (
+        disposition IN (
+            'accepted_actionable',
+            'accepted_non_actionable',
+            'false_positive',
+            'duplicate',
+            'already_known'
+        )
+    ),
+    reason_code TEXT NOT NULL DEFAULT '',
+    reason_note TEXT NOT NULL DEFAULT '',
+    actor TEXT NOT NULL,
+    label_source TEXT NOT NULL CHECK (label_source IN ('human', 'model_prelabel')),
+    review_run_id TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE code_review_finding_feedback
+    ADD COLUMN IF NOT EXISTS review_run_id TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS idx_review_finding_feedback_trace
+    ON code_review_finding_feedback (trace_id, finding_uid, created_at DESC);
+
+-- Append-only finding lineage. The findings table above is the current snapshot
+-- used by review cards and approvals; this table keeps candidate, revised,
+-- superseded, dropped, and published states for evaluation and audit.
+CREATE TABLE IF NOT EXISTS code_review_finding_events (
+    event_id BIGSERIAL PRIMARY KEY,
+    trace_id TEXT NOT NULL REFERENCES code_review_prs(trace_id) ON DELETE CASCADE,
+    finding_uid TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    agent TEXT NOT NULL,
+    finding_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('candidate', 'published', 'dropped', 'superseded')
+    ),
+    revision_of TEXT,
+    severity TEXT NOT NULL,
+    category TEXT NOT NULL,
+    file TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    suggestion TEXT NOT NULL,
+    confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    team_specific BOOLEAN NOT NULL DEFAULT FALSE,
+    evidence TEXT[] NOT NULL DEFAULT '{}',
+    evidence_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    source_agents TEXT[] NOT NULL DEFAULT '{}',
+    critic_decision TEXT NOT NULL DEFAULT '',
+    critic_reason TEXT NOT NULL DEFAULT '',
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (trace_id, finding_uid, status, critic_decision)
+);
+
+ALTER TABLE code_review_finding_events
+    ADD COLUMN IF NOT EXISTS evidence_verified BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE INDEX IF NOT EXISTS idx_review_finding_events_trace
+    ON code_review_finding_events (trace_id, event_id);
 
 CREATE TABLE IF NOT EXISTS code_review_vectors (
     id SERIAL PRIMARY KEY,
@@ -80,7 +184,12 @@ CREATE INDEX IF NOT EXISTS idx_code_review_vectors_source ON code_review_vectors
 -- posted_review_id 刻意可空且无默认值：NULL = 还没写回。给 DEFAULT '' 会把
 -- "未写回"和"写回了空串"合并成同一个值，D4 的幂等判断会在两者之间横跳。
 ALTER TABLE code_review_prs ADD COLUMN IF NOT EXISTS posted_review_id TEXT;
+ALTER TABLE code_review_prs ADD COLUMN IF NOT EXISTS posting_owner TEXT;
+ALTER TABLE code_review_prs ADD COLUMN IF NOT EXISTS posting_lease_until TIMESTAMPTZ;
 ALTER TABLE code_review_prs ADD COLUMN IF NOT EXISTS state_transitions JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE code_review_prs ADD COLUMN IF NOT EXISTS attempt_id BIGSERIAL;
+ALTER TABLE code_review_prs ADD COLUMN IF NOT EXISTS review_metrics JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE code_review_prs ADD COLUMN IF NOT EXISTS review_run_id TEXT NOT NULL DEFAULT '';
 
 -- 任务状态复用既有的 status 列，**不新增 task_state**。
 --
@@ -122,6 +231,40 @@ UPDATE code_review_findings f
 SET trace_id = d.survivor
 FROM dupes d
 WHERE f.trace_id = d.trace_id AND d.rn > 1;
+
+WITH dupes AS (
+    SELECT trace_id,
+           FIRST_VALUE(trace_id) OVER (
+               PARTITION BY repo, pr_number, head_sha
+               ORDER BY updated_at DESC, trace_id
+           ) AS survivor,
+           ROW_NUMBER() OVER (
+               PARTITION BY repo, pr_number, head_sha
+               ORDER BY updated_at DESC, trace_id
+           ) AS rn
+    FROM code_review_prs
+)
+UPDATE code_review_finding_feedback f
+SET trace_id = d.survivor
+FROM dupes d
+WHERE f.trace_id = d.trace_id AND d.rn > 1;
+
+WITH dupes AS (
+    SELECT trace_id,
+           FIRST_VALUE(trace_id) OVER (
+               PARTITION BY repo, pr_number, head_sha
+               ORDER BY updated_at DESC, trace_id
+           ) AS survivor,
+           ROW_NUMBER() OVER (
+               PARTITION BY repo, pr_number, head_sha
+               ORDER BY updated_at DESC, trace_id
+           ) AS rn
+    FROM code_review_prs
+)
+UPDATE code_review_finding_events e
+SET trace_id = d.survivor
+FROM dupes d
+WHERE e.trace_id = d.trace_id AND d.rn > 1;
 
 -- UPDATE 必须排在 DELETE 之前：code_review_findings.trace_id 有外键指向本表，
 -- 先删会让迁移整条回滚——即"迁移脚本在自己要修的数据上失败"。
