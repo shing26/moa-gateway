@@ -3,7 +3,7 @@
 # MoA Gateway
 ### 受治理的仓库交付 Agent
 
-仓库名保留历史写法（`Gateway` / `MoA` 两个词在正文口径里停用，理由见下）。**产品是受治理的仓库交付 Agent**：入口为 `DeliveryRequest -> DeliveryRun`，默认单 Implementer，负责在隔离工作区中修改、验证并产出可审批的 PR；推送和合并仍必须经过 bundle、人工审批与审计。`app/` 是支撑交付链的 LLM 治理运行时，`bench/` 是验证多智能体编排是否值得的等预算实验台。S0 已实现，真实仓库端到端验收尚待完成；只读 Verifier 是预注册实验 S1，默认关闭。
+仓库名保留历史写法（`Gateway` / `MoA` 两个词在正文口径里停用，理由见下）。**产品是受治理的仓库交付 Agent**：入口为 `DeliveryRequest -> DeliveryRun`，默认单 Implementer，负责在隔离工作区中修改、验证并产出可审批的 PR；推送和合并仍必须经过 bundle、人工审批与审计。`app/` 是支撑交付链的 LLM 治理运行时，`bench/` 是验证多智能体编排是否值得的等预算实验台。S0 已实现，真实仓库端到端验收已于 2026-10-30 完成（证据见 `docs/acceptance/2026-10-30-s0-acceptance.md`）；只读 Verifier 是预注册实验 S1，默认关闭。
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688.svg)](https://fastapi.tiangolo.com/)
