@@ -223,6 +223,11 @@ _Avoid_: prompt、任务消息
 从实现到 PR/CI/合并证据的一次不可变运行记录。`run_id` 标识执行，`trace_id` 标识业务来源。
 _Avoid_: 日志、Trello 卡片
 
+**变更包 (ChangeBundle)**:
+一次交付的纯数据变更集合：base SHA、分支名、文件级 diff、patch 哈希与验证结果。
+它是推送审批审的对象、合并状态机锁定的对象；本身不含任何远端副作用。
+_Avoid_: patch（只是它的文本形态）、提交（commit 是它的远端投影）
+
 **实现体 (Implementer)**:
 唯一默认可写工作区的 LLM 执行体。它不能推送、审批或合并。
 _Avoid_: 全权 Agent、自动合并器
@@ -230,3 +235,8 @@ _Avoid_: 全权 Agent、自动合并器
 **复核体 (Verifier)**:
 只在 S1 实验中出现的只读执行体。它的 `approved` 只表示可进入人工推送审批。
 _Avoid_: 判决者、第二 Implementer
+
+**假通过 (False Pass)**:
+可见验证通过、但目标实际未达成的放行。S1 复核体的价值主张就是减少它；在真实使用中
+观察到它的样本之前，这个主张不可测量（ADR-033 的门槛依据）。
+_Avoid_: 误报（那是审查 finding 的属性）
