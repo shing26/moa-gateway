@@ -17,7 +17,7 @@
 [![Security: Bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
 
 <p align="center">
-自动化测试门禁 · <b>31</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
+自动化测试门禁 · <b>32</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
 </p>
 
 <p align="center">
@@ -262,6 +262,8 @@ qwen2.5:3b + 512 这一配置。多档重进须新协议重过门禁；主线编
 ## ⚡ 秒级实测（零网络依赖）
 
 以下四条命令全部在本机实测可跑：mock / 确定性模式，不依赖外部 API Key 与外部网络，单条约 3–8 秒（含启动开销）。
+
+**前置（一次性）**：安装 [uv](https://docs.astral.sh/uv/) 后执行 `uv sync --all-extras --dev`——协作演示（1–3）硬依赖 `langgraph` optional extra，漏装会报 `ModuleNotFoundError`；第 4 条 RAG 案例不需要 extra。首次运行 uv 会自动安装依赖与 Python（约 1–3 分钟，之后才是秒级）。
 
 ```bash
 # 1. 默认流式协作演示（Supervisor 规划 → Send 扇出并发执行 → Critic 放行 → 治理链 → 交付）
