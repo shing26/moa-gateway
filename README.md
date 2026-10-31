@@ -21,6 +21,7 @@
 </p>
 
 <p align="center">
+  <a href="#-关键词与证据索引">关键词与证据索引</a> •
   <a href="#-核心工程防线">核心工程防线</a> •
   <a href="#-真实节点拓扑">节点拓扑</a> •
   <a href="#-多智能体剂量实验台bench">剂量实验台</a> •
@@ -42,6 +43,22 @@
 > - **交付 Agent**——默认是单 Implementer，负责改代码、验证、产出可审批的 PR；只读 Verifier 是预注册实验 S1，不是默认拓扑。CI 失败诊断是只读辅助入口，不是 CI 自动修复。
 >
 > 对外一句话：**"我让 Agent 把仓库变更做完，但推送、CI 与合并都必须留下可复核证据并经过人批准。"**
+
+---
+
+## 🔍 关键词与证据索引
+
+面试与评审中最常被追问的关键词，每个都对应一个可点开的 artifact（主路径代码、ADR 或带四
+方对账的验收记录），不指向架构图或宣称：
+
+| 关键词 | 可点开的证据 |
+|---|---|
+| **审批 · 人机协同** | 运行时 HITL 挂起-恢复与审批白名单：[ADR-021](docs/adr/adr-021-approval-gated-merge.md)、`app/pipeline.py` 的 `prepare_hitl` / `await_human`；合并门禁（head-SHA 乐观锁）：[`merge_executor.py`](apps/code_review_pipeline/merge_executor.py)；推送的 TTY 人工审批：[`cli.py`](app/cli.py) `TerminalPushApprovalPort` |
+| **审计 · 留痕** | 哈希链审计 WAL（tamper-evident，能指出第一个被改的行号）：[ADR-019](docs/adr/adr-019-audit-chain-and-retention.md)、[`app/audit/wal.py`](app/audit/wal.py)；GitHub / DeliveryRun / MergeRecord / 审计 WAL 四方对账实例：[S0 真实验收记录](docs/acceptance/2026-10-30-s0-acceptance.md) |
+| **评测 · 效果度量** | RAG 六维离线评测与同源特征止损（实测 nDCG 负向倒退即关闭）：[docs/retrieval-evaluation.md](docs/retrieval-evaluation.md)；预注册配对分析协议：[ADR-029](docs/adr/adr-029-preregistered-paired-analysis.md) |
+| **实验设计** | 实验协议与运行记录：[ADR-026](docs/adr/adr-026-experiment-protocol.md)、[ADR-025](docs/adr/adr-025-multi-agent-experiment-run-record.md)；等预算剂量设计：[ADR-023](docs/adr/adr-023-bench-agent-primitive.md)；实验台：`bench/` |
+| **交付门禁 · 写侧安全** | bundle 审批边界与确定性验证：[ADR-030](docs/adr/adr-030-governed-change-agent.md)、[`bundle.py`](apps/code_review_pipeline/change/bundle.py)；交付 Agent 全链路：[ADR-031](docs/adr/adr-031-governed-repository-delivery-agent.md)；工作区写隔离：[ADR-027](docs/adr/adr-027-workspace-write-isolation.md)；S1 数据门槛（dogfood 先行）：[ADR-033](docs/adr/adr-033-s1-data-gate-dogfood-first.md) |
+| **上下文 · 记忆** | 会话记忆与预算：[`app/memory.py`](app/memory.py)、[`app/context_budget.py`](app/context_budget.py)；长期记忆：[`app/long_term_memory.py`](app/long_term_memory.py)；知识库访问控制：[`app/knowledge_access.py`](app/knowledge_access.py) |
 
 ---
 
