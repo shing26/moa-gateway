@@ -22,6 +22,7 @@
 
 <p align="center">
   <a href="#-关键词与证据索引">关键词与证据索引</a> •
+  <a href="#-一次真实交付的完整-trace-2026-11-01">真实交付 trace</a> •
   <a href="#-核心工程防线">核心工程防线</a> •
   <a href="#-真实节点拓扑">节点拓扑</a> •
   <a href="#-多智能体剂量实验台bench">剂量实验台</a> •
@@ -59,6 +60,30 @@
 | **实验设计** | 实验协议与运行记录：[ADR-026](docs/adr/adr-026-experiment-protocol.md)、[ADR-025](docs/adr/adr-025-multi-agent-experiment-run-record.md)；等预算剂量设计：[ADR-023](docs/adr/adr-023-bench-agent-primitive.md)；实验台：`bench/` |
 | **交付门禁 · 写侧安全** | bundle 审批边界与确定性验证：[ADR-030](docs/adr/adr-030-governed-change-agent.md)、[`bundle.py`](apps/code_review_pipeline/change/bundle.py)；交付 Agent 全链路：[ADR-031](docs/adr/adr-031-governed-repository-delivery-agent.md)；工作区写隔离：[ADR-027](docs/adr/adr-027-workspace-write-isolation.md)；S1 数据门槛（dogfood 先行）：[ADR-033](docs/adr/adr-033-s1-data-gate-dogfood-first.md) |
 | **上下文 · 记忆** | 会话记忆与预算：[`app/memory.py`](app/memory.py)、[`app/context_budget.py`](app/context_budget.py)；长期记忆：[`app/long_term_memory.py`](app/long_term_memory.py)；知识库访问控制：[`app/knowledge_access.py`](app/knowledge_access.py) |
+
+---
+
+## 🧬 一次真实交付的完整 trace（2026-11-01）
+
+治理系统治理它自己的开发。下面不是示意图，是 dogfood 第 1 个交付的原始时间线，
+每一环都可点开质证（[issue #24](https://github.com/shing26/moa-gateway/issues/24) /
+[PR #25](https://github.com/shing26/moa-gateway/pull/25) / [台账](docs/acceptance/dogfood-ledger.md)）：
+
+1. **发现**：agent 现场查证 `gh api` 得到 `Branch not protected`——README 宣称的
+   "每次合并过审批门"在平台层不存在。goal 先于开工记录为 issue #24（时间戳可证）。
+2. **执行**：给 main 装分支保护（required check + enforce_admins + 禁 force push）。
+3. **门禁第一次咬人**：CI 全绿但合并 BLOCKED，required check 永远 "Expected"。
+4. **两层根因**：`ci.yml` 头部 UTF-8 BOM 使 workflow 名解析失效；修掉后仍 BLOCKED——
+   第二层是 required check 条目 `app_id: null` 时 GitHub 纯字符串比对 context 名，
+   UI 显示的 `工作流/job` 形式与实际裸 job 名永不匹配。最终生效配置：
+   裸 job 名 + 绑定 GitHub Actions 应用（app_id 15368）。
+5. **收口**：修复与 ADR-034 经同一条 PR（#25）走新门禁 → CLEAN → 人工合并；
+   台账第 1 行入账，预注册修正案（累计计数、goal 先行）在首个数据点前落盘。
+
+这条 trace 里最有价值的两点：**门禁上线 24 小时内挡住了第一次合并**——挡的是
+自己的交付，但"平台层门禁真的会咬人"从此是实证不是宣称；**验证流程把自己的
+首次误判也如实更正了**（issue #24 里先归因 BOM、后补正根因链的两条评论）——
+可质证的对象包括质证者自己。
 
 ---
 
