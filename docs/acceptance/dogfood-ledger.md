@@ -22,7 +22,7 @@
 
 | # | 日期 | run_id | 仓库 / goal | 验证命令（真门禁?） | 结果 | 计入 |
 |---|---|---|---|---|---|---|
-| 0 | 2026-10-31 | （待填） | moa-gateway / 建立本台账（ADR-033 要求的引导交付） | 结构断言（非真门禁） | 待定 | 否（引导） |
+| 0 | 2026-10-31 | delivery-1793475111869122300（PR #23） | moa-gateway / 建立本台账（ADR-033 要求的引导交付） | 结构断言（非真门禁） | 已合并（PR #23） | 否（引导） |
 | 1 | 2026-11-01 | delivery-1793572800000000000（PR #25，trace trailer 落盘） | moa-gateway / main 平台级分支保护上线（goal：issue #24，agent 提报）| CI / test（真门禁；期间两次 BLOCKED 根因诊断：ci.yml UTF-8 BOM、required check 缺 app_id） | 已合并（PR #25），门禁 CLEAN；缺陷修复过程留痕 issue #24 | 是 |
 
 > 每行交付完成后补齐 run_id 与结果；失败与 NEEDS_HUMAN 也如实记录。
