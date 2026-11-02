@@ -13,6 +13,7 @@ from bench.triage import (
     verify_triage_output,
 )
 from bench.experiment import load_protocol
+from tests.repo_history import requires_repository_history
 
 TASKS_DIR = (
     Path(__file__).resolve().parents[2] / "bench" / "triage" / "tasks"
@@ -101,6 +102,7 @@ def test_triage_verdict_semantics_are_identical_across_v1_and_v3() -> None:
 
 
 @pytest.mark.asyncio
+@requires_repository_history
 async def test_run_triage_task_uses_finish_observation(tmp_path) -> None:
     task = _task()
 
@@ -136,6 +138,7 @@ async def test_run_triage_task_uses_finish_observation(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@requires_repository_history
 async def test_run_triage_task_maps_agent_error(tmp_path) -> None:
     task = _task()
 

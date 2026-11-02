@@ -25,6 +25,9 @@ from bench.agent.types import Budget
 from bench.arms import arm_names, resolve_arm
 from bench.arms.l2 import L2PlannerWorkerCritic, PlanPolicy, build_l2
 from bench.harness.runner import TaskSpec, load_task, run_task
+from tests.repo_history import requires_repository_history
+
+pytestmark = requires_repository_history
 
 ROOT = Path(__file__).resolve().parents[2]
 TASK_FILE = ROOT / "bench" / "tasks" / "988fccb.task.json"
