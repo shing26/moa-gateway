@@ -9,6 +9,7 @@ from bench.harness.runner import load_task
 from bench.harness.verify import run_command
 from bench.harness.workspace import changed_paths, materialize
 from evals.review_value import ROOT, load_controlled_cases
+from tests.repo_history import requires_repository_history
 
 NEW_E3_CASE_IDS = (
     "e3-c4-report-evidence-roundtrip",
@@ -45,6 +46,7 @@ def _commit_available(sha: str) -> bool:
     return completed.returncode == 0
 
 
+@requires_repository_history
 @pytest.mark.parametrize("case_id", NEW_E3_CASE_IDS)
 def test_new_controlled_case_fails_first_and_solution_converges(
     tmp_path: Path,

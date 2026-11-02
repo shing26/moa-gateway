@@ -34,6 +34,11 @@ from bench.harness.workspace import (
     restore_test_files,
     touched_test_paths,
 )
+from tests.repo_history import requires_repository_history
+
+# 整个模块都在回放本仓库的历史提交（`git archive <base_commit>`），
+# 没有自己带 .git 的检出目录就跑不了。
+pytestmark = requires_repository_history
 
 ROOT = Path(__file__).resolve().parents[2]
 TASK_FILE = ROOT / "bench" / "tasks" / "988fccb.task.json"
