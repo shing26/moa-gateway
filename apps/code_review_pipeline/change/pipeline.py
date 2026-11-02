@@ -137,6 +137,7 @@ class ChangePipeline:
         base_branch: str = "main",
         push_enabled: bool = False,
         approval_recorder: ApprovalRecorder | None = None,
+        verify_timeout_s: float = 900.0,
     ) -> None:
         self._github = github
         self._repo = repo
@@ -146,6 +147,9 @@ class ChangePipeline:
         self._base_branch = base_branch.strip() or "main"
         self._push_enabled = bool(push_enabled)
         self._approval_recorder = approval_recorder
+        # run_command 的默认 300s 是观察工具的边界，不是门禁的边界：真门禁
+        # （tests/unit）本机实测 578s，用默认值会把正确改动判成 124 超时。
+        self._verify_timeout_s = float(verify_timeout_s)
 
     @property
     def workspace(self) -> Path:
@@ -158,6 +162,10 @@ class ChangePipeline:
     @property
     def verify_command(self) -> tuple[str, ...]:
         return self._verify_command
+
+    @property
+    def verify_timeout_s(self) -> float:
+        return self._verify_timeout_s
 
     async def run(
         self,
@@ -357,6 +365,7 @@ class ChangePipeline:
                 run_command,
                 self._verify_command,
                 cwd=verification_root,
+                timeout_s=self._verify_timeout_s,
             )
         finally:
             await asyncio.to_thread(shutil.rmtree, temporary_parent, True)

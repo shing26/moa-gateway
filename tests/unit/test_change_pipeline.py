@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from app.agents.command_runner import CommandResult
 from apps.code_review_pipeline.change import (
     ChangeApproval,
     ChangePipeline,
@@ -17,6 +18,7 @@ from apps.code_review_pipeline.change import (
     ChangeStatus,
     build_change_bundle,
 )
+from apps.code_review_pipeline.change import pipeline as change_pipeline_module
 from apps.code_review_pipeline.change.pipeline import ChangeBundleChanged
 from apps.code_review_pipeline.change.refs import PullRequestRef
 
@@ -132,6 +134,36 @@ async def test_verification_does_not_inherit_gateway_credentials(
 
     assert result.bundle is not None
     assert result.bundle.verify_output.splitlines() == ["missing"]
+
+
+@pytest.mark.asyncio
+async def test_verification_uses_the_configured_timeout(
+    repo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """实测 tests/unit 要 578s；门禁超时必须能配到 300s 以上，否则正确改动被误挡。"""
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    def fake_run(argv, *, cwd, timeout_s=300.0, output_limit=20000):
+        seen["argv"] = list(argv)
+        seen["timeout_s"] = timeout_s
+        return CommandResult(exit_code=0, output="ok")
+
+    monkeypatch.setattr(change_pipeline_module, "run_command", fake_run)
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=("pytest", "-q"),
+        model_name="test-model",
+        verify_timeout_s=1200.0,
+    )
+
+    result = await pipeline.prepare_bundle(_request())
+
+    assert seen["timeout_s"] == 1200.0
+    assert result.status is ChangeStatus.VERIFIED
 
 
 @pytest.mark.asyncio

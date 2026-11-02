@@ -422,6 +422,7 @@ def test_cmd_delivery_run_wires_delivery_runtime(
     monkeypatch.setattr(settings, "delivery_max_tokens", 3456)
     monkeypatch.setattr(settings, "delivery_run_record_dir", str(tmp_path / "runs"))
     monkeypatch.setattr(settings, "change_agent_base_branch", "main")
+    monkeypatch.setattr(settings, "change_agent_verify_timeout_s", 1500.0)
 
     args = build_parser().parse_args(
         [
@@ -443,6 +444,9 @@ def test_cmd_delivery_run_wires_delivery_runtime(
     assert flow["policy"].max_tokens == 3456
     assert flow["implementer"] is not None
     assert flow["preparer"] is flow["publisher"]
+    # 门禁与 agent 自己的 run_tests 共用 CHANGE_AGENT_VERIFY_TIMEOUT。
+    assert captured["implementer"]["command_timeout_s"] == 1500.0
+    assert captured["adapter"]["pipeline"].verify_timeout_s == 1500.0
     assert captured["llm"].config.model == "test-model"
     assert captured["llm_closed"] is True
     assert captured["github_closed"] is True
