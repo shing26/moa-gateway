@@ -352,6 +352,12 @@ class Settings:
         # 替我们往任意仓库发评论。未配置时端点 fail-closed（见
         # apps/code_review_pipeline/routing/github_review_route.py）。
         self.github_webhook_secret: str = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+        # 交付事件 webhook（issue #26）：PR opened/synchronize/closed → 合并通道。
+        # 默认关闭，与 COLLAB_ENABLED / CHANGE_AGENT_PUSH_ENABLED 同一姿态——
+        # 打开后 PR 一进通道就会被轮询、弹审批卡，没有这个开关等于默认改行为。
+        self.delivery_webhook_enabled: bool = _parse_bool(
+            os.getenv("DELIVERY_WEBHOOK_ENABLED"), False
+        )
         # 审计日志目录与保留期。此前 .env.template 文档写了 LOG_DIR / LOG_RETENTION_DAYS，
         # 但**没有任何代码读它们**（wal 硬编码 "logs"/90，audit_stats 也硬编码 "logs"）——
         # 两个死旋钮，这里复活它们。
