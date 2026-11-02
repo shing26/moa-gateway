@@ -37,6 +37,7 @@ def _clean_env(monkeypatch):
         "DELIVERY_MAX_STEPS",
         "DELIVERY_MAX_TOKENS",
         "DELIVERY_RUN_RECORD_DIR",
+        "CHANGE_AGENT_VERIFY_TIMEOUT",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -277,6 +278,32 @@ def test_delivery_defaults_are_single_and_bounded() -> None:
     assert s.delivery_max_steps == 40
     assert s.delivery_max_tokens == 400_000
     assert s.delivery_run_record_dir == "data/delivery-runs"
+
+
+def test_verify_timeout_defaults_above_the_measured_gate_runtime() -> None:
+    # 实测 tests/unit 需要 578s；默认值必须明显高于它，否则正确改动被误挡。
+    assert Settings().change_agent_verify_timeout_s == 900.0
+
+
+def test_verify_timeout_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHANGE_AGENT_VERIFY_TIMEOUT", "1200")
+    assert Settings().change_agent_verify_timeout_s == 1200.0
+
+
+def test_verify_timeout_garbage_falls_back_with_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("CHANGE_AGENT_VERIFY_TIMEOUT", "ten minutes")
+    with caplog.at_level("WARNING", logger="moa.config"):
+        assert Settings().change_agent_verify_timeout_s == 900.0
+    assert "CHANGE_AGENT_VERIFY_TIMEOUT" in caplog.text
+
+
+def test_verify_timeout_nonpositive_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CHANGE_AGENT_VERIFY_TIMEOUT", "0")
+    assert Settings().change_agent_verify_timeout_s == 900.0
 
 
 def test_delivery_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:

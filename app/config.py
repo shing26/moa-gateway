@@ -270,6 +270,22 @@ class Settings:
         self.change_agent_base_branch: str = os.getenv(
             "CHANGE_AGENT_BASE_BRANCH", "main"
         )
+        # 验证门禁的超时上限。run_command 自带的 300s 是给"跑一条观察命令"设计的；
+        # 真门禁（tests/unit）在本机实测 578s，用默认值会把一次正确的改动判成
+        # exit=124 超时，进而误挡成 verify_failed。默认 900s 留了约 1.5 倍余量。
+        # 用 _parse_float：非法值退回默认并告警，不会让整条管线起不来。
+        change_verify_timeout_s: float = _parse_float(
+            os.getenv("CHANGE_AGENT_VERIFY_TIMEOUT"),
+            900.0,
+            name="CHANGE_AGENT_VERIFY_TIMEOUT",
+        )
+        if change_verify_timeout_s <= 0:
+            logger.warning(
+                "配置项 CHANGE_AGENT_VERIFY_TIMEOUT=%r 不是正数，回退默认值 900.0",
+                change_verify_timeout_s,
+            )
+            change_verify_timeout_s = 900.0
+        self.change_agent_verify_timeout_s: float = change_verify_timeout_s
 
         # ── 受治理仓库交付（ADR-031）────────────────────────────────────
         self.delivery_topology: str = (

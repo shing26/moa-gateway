@@ -442,6 +442,7 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
                     model_name=settings.change_agent_model,
                     base_branch=args.base_branch,
                     push_enabled=True,
+                    verify_timeout_s=settings.change_agent_verify_timeout_s,
                 )
                 adapter = GitHubChangeAdapter(
                     pipeline=pipeline,
@@ -453,6 +454,7 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
                     implementer=ProductionImplementer(
                         llm=llm,
                         verify_command=verify_command,
+                        command_timeout_s=settings.change_agent_verify_timeout_s,
                     ),
                     preparer=adapter,
                     approval=TerminalPushApprovalPort(),

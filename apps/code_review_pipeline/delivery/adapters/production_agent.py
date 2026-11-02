@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from app.agents.stubs import execute_tool_loop
-from app.agents.workspace_tools import build_toolset
+from app.agents.workspace_tools import ToolLimits, build_toolset
 from apps.code_review_pipeline.delivery.models import (
     AgentAttempt,
     AgentStep,
@@ -26,10 +26,14 @@ class ProductionImplementer:
         llm: Any,
         verify_command: tuple[str, ...],
         system_prompt: str = _IMPLEMENTER_SYSTEM,
+        command_timeout_s: float = 900.0,
     ) -> None:
         self._llm = llm
         self._verify_command = tuple(verify_command)
         self._system_prompt = system_prompt
+        # 与验证门禁共用同一个上限：agent 自己跑 run_tests 时被 300s 截断，
+        # 会让它以为测试坏了，而门禁那边其实还会继续跑。
+        self._command_timeout_s = float(command_timeout_s)
 
     async def run(
         self,
@@ -47,6 +51,7 @@ class ProductionImplementer:
         tools = build_toolset(
             workspace=root,
             verify_command=self._verify_command,
+            limits=ToolLimits(command_timeout_s=self._command_timeout_s),
             names=tuple(names),
         )
         user_parts = [f"Goal:\n{goal}"]
