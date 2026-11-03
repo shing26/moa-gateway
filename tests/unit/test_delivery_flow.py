@@ -311,7 +311,11 @@ async def test_verify_failure_uses_one_revision_and_passes_feedback(tmp_path: Pa
 
     assert run.state is DeliveryRunState.WAITING_CI
     assert len(run.attempts) == 2
-    assert implementer.feedback == ["", "tests failed"]
+    assert implementer.feedback[0] == ""
+    # 修订轮不能只收到"失败了"：命令、退出码与输出尾部必须一起回流。
+    assert implementer.feedback[1].startswith("tests failed")
+    assert "Exit code: 1" in implementer.feedback[1]
+    assert "1 passed" in implementer.feedback[1]
     assert preparer.calls == 2
 
 
@@ -567,7 +571,9 @@ async def test_revision_step_limit_is_budget_exhaustion(tmp_path: Path) -> None:
     assert run.state is DeliveryRunState.BUDGET_EXHAUSTED
     assert run.failure is None
     assert len(run.attempts) == 2
-    assert implementer.feedback == ["", "tests failed"]
+    assert implementer.feedback[0] == ""
+    assert implementer.feedback[1].startswith("tests failed")
+    assert "Exit code: 1" in implementer.feedback[1]
     assert publisher.calls == 0
 
 

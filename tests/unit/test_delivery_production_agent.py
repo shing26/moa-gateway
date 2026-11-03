@@ -26,6 +26,7 @@ def _call(call_id: str, name: str, arguments: dict) -> dict:
 class FakeImplementerLLM:
     def __init__(self) -> None:
         self.messages: list[list[dict]] = []
+        self.tool_names: list[str] = []
         self.last_metrics = {
             "prompt_tokens": 100,
             "completion_tokens": 25,
@@ -45,6 +46,9 @@ class FakeImplementerLLM:
 
     async def chat_with_tools(self, messages, tools, **kwargs) -> ChatResult:
         self.messages.append([dict(item) for item in messages])
+        self.tool_names = [
+            str((item.get("function") or {}).get("name", "")) for item in tools
+        ]
         response = self._responses.pop(0)
         if isinstance(response, str):
             return ChatResult(
@@ -52,8 +56,13 @@ class FakeImplementerLLM:
                 content=response,
                 tool_calls=[],
             )
+        assistant = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": response,
+        }
         return ChatResult(
-            messages=[*messages, {"role": "assistant", "content": None}],
+            messages=[*messages, assistant],
             content="",
             tool_calls=response,  # type: ignore[arg-type]
         )
@@ -85,11 +94,16 @@ async def test_implementer_returns_structured_attempt_and_writes_file(
     assert attempt.usage.completion_tokens == 50
     assert attempt.steps[0].tool == "write_file"
     assert "return a + b" in (tmp_path / "app.py").read_text(encoding="utf-8")
-    assert "the previous version returned a - b" in "\n".join(
+    user_text = "\n".join(
         str(item["content"])
         for item in llm.messages[0]
         if item.get("role") == "user"
     )
+    assert "the previous version returned a - b" in user_text
+    # 预算与目录工具：模型看不到累计用量，要显式告诉它额度；list_files 让
+    # 它先定位再读，而不是用 read_file "." 撞一次失败。
+    assert "Budget: at most 5 tool calls" in user_text
+    assert "list_files" in llm.tool_names
 
 
 @pytest.mark.asyncio
