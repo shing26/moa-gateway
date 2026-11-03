@@ -22,6 +22,9 @@ from bench.agent.scripted import ScriptedLLM, ScriptedTurn
 from bench.agent.tools import build_toolset
 from bench.agent.types import Budget
 from bench.harness.runner import load_task, run_task
+from tests.repo_history import requires_repository_history
+
+pytestmark = requires_repository_history
 
 ROOT = Path(__file__).resolve().parents[2]
 TASK_FILE = ROOT / "bench" / "tasks" / "988fccb.task.json"

@@ -97,6 +97,54 @@ class MergeNotifier:
             logger.info("CI failure card sent for %s", record.task_key)
         return ok
 
+    async def send_pr_opened_card(
+        self, record: MergeRecord, *, title: str, url: str
+    ) -> bool:
+        """PR 进入合并通道时的通知卡（issue #26）。
+
+        ``notification`` 类型**没有按钮**：此刻 CI 还没结论，没有可批准的东西——
+        渲染批准/拒绝等于承诺一个点了必然无效的动作（见 feishu_cards.py 的
+        ``_NO_ACTION_KINDS`` 注释）。CI 绿后的审批卡由 poller 触发
+        ``send_approval_card``，那条路才带按钮和 HITL 登记。
+        """
+        if not self._default_target:
+            logger.info(
+                "no merge channel configured (CODE_REVIEW_MERGE_CHANNEL); "
+                "skipping PR opened card for %s",
+                record.task_key,
+            )
+            return False
+        card_sender = self._card_sender or _global_card_sender
+        if card_sender is None:
+            logger.warning("feishu card sender not initialized; skip PR opened card")
+            return False
+        lines = [
+            f"PR: {record.repo}#{record.pr_number}",
+            f"SHA: {record.head_sha}",
+        ]
+        if title:
+            lines.append(f"标题: {title}")
+        if url:
+            lines.append(f"链接: {url}")
+        lines.append("CI 观察中，出结论后本会话会收到审批或失败卡片")
+        card = ApprovalCard(
+            session_id=record.task_key,
+            trace_id=record.task_key,
+            agent_name="merge_gate",
+            intent="merge_approval",
+            agent_output="\n".join(lines),
+            channel="feishu",
+            target=self._default_target or "",
+            hitl_kind="notification",
+            applicant="",
+            reason="PR 进入合并通道",
+        )
+        card.target = self._default_target or ""
+        ok = await card_sender.send_card(card)
+        if ok:
+            logger.info("PR opened card sent for %s", record.task_key)
+        return ok
+
     def _build_approval_card(self, record: MergeRecord) -> ApprovalCard:
         """CI 绿时的审批卡片。"""
         return ApprovalCard(

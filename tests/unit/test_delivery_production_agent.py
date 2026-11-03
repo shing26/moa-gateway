@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.agents.provider import ChatResult
+from apps.code_review_pipeline.delivery.adapters import production_agent as agent_module
 from apps.code_review_pipeline.delivery.adapters.production_agent import (
     ProductionImplementer,
 )
@@ -89,6 +90,50 @@ async def test_implementer_returns_structured_attempt_and_writes_file(
         for item in llm.messages[0]
         if item.get("role") == "user"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [({}, 900.0), ({"command_timeout_s": 1200.0}, 1200.0)],
+)
+async def test_implementer_passes_its_command_timeout_to_the_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict,
+    expected: float,
+) -> None:
+    """agent 自己跑 run_tests 的上限要和门禁一致，否则它会看到假超时。"""
+    captured: dict[str, object] = {}
+    real_build = agent_module.build_toolset
+
+    def spy(*, workspace, verify_command, limits=None, names=None):
+        captured["limits"] = limits
+        return real_build(
+            workspace=workspace,
+            verify_command=verify_command,
+            limits=limits,
+            names=names,
+        )
+
+    monkeypatch.setattr(agent_module, "build_toolset", spy)
+    adapter = ProductionImplementer(
+        llm=FakeImplementerLLM(),
+        verify_command=("python", "-m", "pytest", "-q"),
+        **kwargs,
+    )
+
+    await adapter.run(
+        workspace=tmp_path,
+        goal="fix",
+        feedback="",
+        max_steps=5,
+        max_tokens=1000,
+    )
+
+    limits = captured["limits"]
+    assert limits is not None
+    assert limits.command_timeout_s == expected
 
 
 @pytest.mark.asyncio

@@ -24,6 +24,7 @@ from app.routes.experiments import router as experiments_router
 from app.routes.feishu import router as feishu_router
 from app.routes.health import router as health_router
 from app.routes.webhook import webhook_router
+from app.routes.github_delivery import router as github_delivery_router
 from app.routes.knowledge import router as knowledge_router
 from apps.code_review_pipeline.merge_preflight import merge_channel_readiness
 from apps.code_review_pipeline.routing.github_review_route import github_review_router
@@ -89,6 +90,7 @@ app.include_router(health_router)
 app.include_router(webhook_router)
 app.include_router(knowledge_router)
 app.include_router(github_review_router)
+app.include_router(github_delivery_router)
 app.add_middleware(FeatureFlagMiddleware, client=_flag_client)
 _WEBHOOK_TOKEN = settings.webhook_auth_token
 _DASHBOARD_PASSWORD = settings.dashboard_password

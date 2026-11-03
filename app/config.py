@@ -270,6 +270,22 @@ class Settings:
         self.change_agent_base_branch: str = os.getenv(
             "CHANGE_AGENT_BASE_BRANCH", "main"
         )
+        # 验证门禁的超时上限。run_command 自带的 300s 是给"跑一条观察命令"设计的；
+        # 真门禁（tests/unit）在本机实测 578s，用默认值会把一次正确的改动判成
+        # exit=124 超时，进而误挡成 verify_failed。默认 900s 留了约 1.5 倍余量。
+        # 用 _parse_float：非法值退回默认并告警，不会让整条管线起不来。
+        change_verify_timeout_s: float = _parse_float(
+            os.getenv("CHANGE_AGENT_VERIFY_TIMEOUT"),
+            900.0,
+            name="CHANGE_AGENT_VERIFY_TIMEOUT",
+        )
+        if change_verify_timeout_s <= 0:
+            logger.warning(
+                "配置项 CHANGE_AGENT_VERIFY_TIMEOUT=%r 不是正数，回退默认值 900.0",
+                change_verify_timeout_s,
+            )
+            change_verify_timeout_s = 900.0
+        self.change_agent_verify_timeout_s: float = change_verify_timeout_s
 
         # ── 受治理仓库交付（ADR-031）────────────────────────────────────
         self.delivery_topology: str = (
@@ -352,6 +368,12 @@ class Settings:
         # 替我们往任意仓库发评论。未配置时端点 fail-closed（见
         # apps/code_review_pipeline/routing/github_review_route.py）。
         self.github_webhook_secret: str = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+        # 交付事件 webhook（issue #26）：PR opened/synchronize/closed → 合并通道。
+        # 默认关闭，与 COLLAB_ENABLED / CHANGE_AGENT_PUSH_ENABLED 同一姿态——
+        # 打开后 PR 一进通道就会被轮询、弹审批卡，没有这个开关等于默认改行为。
+        self.delivery_webhook_enabled: bool = _parse_bool(
+            os.getenv("DELIVERY_WEBHOOK_ENABLED"), False
+        )
         # 审计日志目录与保留期。此前 .env.template 文档写了 LOG_DIR / LOG_RETENTION_DAYS，
         # 但**没有任何代码读它们**（wal 硬编码 "logs"/90，audit_stats 也硬编码 "logs"）——
         # 两个死旋钮，这里复活它们。

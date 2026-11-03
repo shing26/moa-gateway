@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 # Fixed verification commands require a process boundary; task argv is never shell-expanded.
 import subprocess  # nosec B404
 import sys
@@ -68,6 +69,30 @@ def build_verify_env(
     return env
 
 
+def resolve_program(
+    argv: Sequence[str],
+    env: Mapping[str, str],
+) -> list[str]:
+    """把裸可执行名解析成 ``env['PATH']`` 上的绝对路径。
+
+    Windows 的 ``CreateProcess`` 解析裸名时用的是**父进程**的环境，我们传给子
+    进程的 ``env['PATH']`` 对它无效：实测子进程 PATH 头部就是 ``.venv\\Scripts``、
+    ``shutil.which`` 也找得到，但裸写 ``python`` 仍落到另一个解释器。POSIX 的
+    ``execvp`` 同理看的是当前进程的 PATH。所以在这里定一次路径，任何仓库的
+    验证命令都不必绑定本机的绝对路径。
+
+    显式带目录的路径原样返回；解析不到时也原样返回，让调用方拿到
+    ``FileNotFoundError``（按既有约定抛 ``OSError``）。
+    """
+    args = list(argv)
+    if not args or os.path.dirname(args[0]):
+        return args
+    resolved = shutil.which(args[0], path=env.get("PATH", ""))
+    if resolved:
+        args[0] = resolved
+    return args
+
+
 def run_command(
     argv: Sequence[str],
     *,
@@ -80,12 +105,14 @@ def run_command(
     唯一的例外是命令本身起不来（可执行文件不存在、权限不够）：那抛
     ``OSError``，由调用方决定怎么记账。
     """
+    env = build_verify_env(cwd)
+    argv = resolve_program(argv, env)
     try:
         # argv 由任务定义给出，shell=False，字符串不会交给 shell 解释。
         proc = subprocess.run(  # noqa: S603  # nosec B603
             list(argv),
             cwd=str(cwd),
-            env=build_verify_env(cwd),
+            env=env,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -124,4 +151,10 @@ def _clip(text: str, limit: int) -> str:
     return f"{text[:head]}\n…（中略 {len(text) - limit} 字符）…\n{text[-tail:]}"
 
 
-__all__ = ["CommandResult", "build_env", "build_verify_env", "run_command"]
+__all__ = [
+    "CommandResult",
+    "build_env",
+    "build_verify_env",
+    "resolve_program",
+    "run_command",
+]
