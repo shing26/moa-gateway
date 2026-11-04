@@ -690,3 +690,91 @@ async def test_git_diff_rejects_option_like_paths(tmp_path: Path) -> None:
 
     assert outcome.kind == "rejected"
     assert "不能以 - 或 : 开头" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_write_refuses_to_overwrite_a_large_existing_file(tmp_path: Path) -> None:
+    """回归（2026-11-05，issue #43 的真实交付）：整文件重写 = 让模型转述原文。
+
+    那次轨迹里模型要给 489 行的 README 加一句话，用 ``write_file`` 重写整份文件，
+    结果链接被截断、表格链接变成纯文本、还改掉了一句事实。验证脚本只断言新增的
+    关键词，于是这些"顺手改坏"的地方一个都没被拦下。
+    """
+    original = "".join(f"line {i}\n" for i in range(130))
+    (tmp_path / "README.md").write_text(original, encoding="utf-8", newline="\n")
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("write_file"),
+        {"path": "README.md", "content": "rewritten\n"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "rejected"
+    assert "replace_in_file" in outcome.detail
+    assert (tmp_path / "README.md").read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_write_allows_overwriting_a_small_document(tmp_path: Path) -> None:
+    (tmp_path / "NOTES.md").write_text("one\ntwo\n", encoding="utf-8", newline="\n")
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("write_file"),
+        {"path": "NOTES.md", "content": "one\ntwo\nthree\n"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "ok"
+    assert (tmp_path / "NOTES.md").read_text(encoding="utf-8") == "one\ntwo\nthree\n"
+
+
+@pytest.mark.asyncio
+async def test_write_still_allows_rewriting_a_large_code_file(tmp_path: Path) -> None:
+    """代码保持在测试门禁之下，可以整份重写；只有文档受覆盖上限约束。"""
+    (tmp_path / "app.py").write_text(
+        "".join(f"VALUE_{i} = {i}\n" for i in range(300)), encoding="utf-8", newline="\n"
+    )
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("write_file"),
+        {"path": "app.py", "content": "VALUE = 1\n"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "ok"
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+@pytest.mark.asyncio
+async def test_write_can_create_a_large_new_file(tmp_path: Path) -> None:
+    """上限只管**覆盖**：新建文件没有"原文"可被转述坏。"""
+    content = "".join(f"line {i}\n" for i in range(200))
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("write_file"),
+        {"path": "generated.txt", "content": content},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "ok"
+    assert (tmp_path / "generated.txt").read_text(encoding="utf-8") == content
+
+
+@pytest.mark.asyncio
+async def test_edit_file_alias_resolves_to_replace_in_file(tmp_path: Path) -> None:
+    """模型把 ``replace_in_file`` 叫成 ``edit_file`` 时不该掉进 unknown tool。"""
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8", newline="\n")
+    tools = make_tools(tmp_path)
+    tool = tools.get("edit_file")
+
+    assert tool is not None
+    assert tool.name == "replace_in_file"
+    # 别名不对外宣告：schema 里不能出现 edit_file，否则等于承认两个正式名字。
+    assert "edit_file" not in {s["function"]["name"] for s in tools.list_schemas()}
+
+    outcome = await call_bench_tool(
+        tool, {"path": "app.py", "old": "VALUE = 1", "new": "VALUE = 9"}, workspace=tmp_path
+    )
+
+    assert outcome.kind == "ok"
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "VALUE = 9\n"
