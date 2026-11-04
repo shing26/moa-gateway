@@ -32,3 +32,7 @@ data/
 evals/reports/
 # 分诊 workspace 物化时生成的空 patch 临时文件
 bench/triage/_empty.patch
+
+# Local scratch and session worktrees - never commit
+.scratch/
+.worktrees/
