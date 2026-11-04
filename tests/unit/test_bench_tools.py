@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -427,3 +428,265 @@ def test_parse_selector_rejects_parent_directory_components(selector: str) -> No
     assert tokens == []
     assert reason is not None
     assert "上级目录" in reason
+
+
+def _git(workspace: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", *args],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+
+def _init_baseline(workspace: Path) -> None:
+    _git(workspace, "init", "-q")
+    _git(workspace, "config", "user.email", "bench@localhost")
+    _git(workspace, "config", "user.name", "bench")
+    _git(workspace, "add", "--all")
+    _git(workspace, "commit", "-q", "--allow-empty", "-m", "baseline")
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_replaces_a_unique_match(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        "VALUE = 1\nOTHER = 2\n", encoding="utf-8", newline="\n"
+    )
+    tools = make_tools(tmp_path)
+
+    outcome = await call_bench_tool(
+        tools.get("replace_in_file"),
+        {"path": "app.py", "old": "VALUE = 1", "new": "VALUE = 3"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "ok"
+    assert "已替换 app.py" in outcome.detail
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "VALUE = 3\nOTHER = 2\n"
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_rejects_an_ambiguous_match(tmp_path: Path) -> None:
+    original = "x = 1\nx = 1\n"
+    (tmp_path / "app.py").write_text(original, encoding="utf-8", newline="\n")
+    tools = make_tools(tmp_path)
+
+    outcome = await call_bench_tool(
+        tools.get("replace_in_file"),
+        {"path": "app.py", "old": "x = 1", "new": "x = 2"},
+        workspace=tmp_path,
+    )
+
+    # 歧义是模型给的片段不够唯一，属于可自行修正的入参问题，不是环境失败。
+    assert outcome.kind == "rejected"
+    assert "2 处" in outcome.detail
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_replace_all(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        "x = 1\nx = 1\n", encoding="utf-8", newline="\n"
+    )
+    tools = make_tools(tmp_path)
+
+    outcome = await call_bench_tool(
+        tools.get("replace_in_file"),
+        {"path": "app.py", "old": "x = 1", "new": "x = 2", "replace_all": True},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "ok"
+    assert "2 处" in outcome.detail
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "x = 2\nx = 2\n"
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_rejects_a_missing_match(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8", newline="\n")
+    tools = make_tools(tmp_path)
+
+    outcome = await call_bench_tool(
+        tools.get("replace_in_file"),
+        {"path": "app.py", "old": "VALUE = 9", "new": "VALUE = 3"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "rejected"
+    assert "未找到" in outcome.detail
+    assert "read_file" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_preserves_crlf_line_endings(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_bytes(b"alpha\r\nbeta\r\n")
+    tools = make_tools(tmp_path)
+
+    outcome = await call_bench_tool(
+        tools.get("replace_in_file"),
+        # 模型从 read_file 看到的是 LF 风格文本。
+        {"path": "app.py", "old": "alpha\nbeta", "new": "gamma\nbeta"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "ok"
+    assert (tmp_path / "app.py").read_bytes() == b"gamma\r\nbeta\r\n"
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_rejects_an_empty_old_string(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8", newline="\n")
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("replace_in_file"),
+        {"path": "app.py", "old": "", "new": "x"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "rejected"
+    assert "不能为空" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_rejects_path_escape(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "bench-outside-edit.txt"
+    outside.write_text("keep\n", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    outcome = await call_bench_tool(
+        make_tools(workspace).get("replace_in_file"),
+        {"path": "../bench-outside-edit.txt", "old": "keep", "new": "changed"},
+        workspace=workspace,
+    )
+
+    assert outcome.kind == "rejected"
+    assert outside.read_text(encoding="utf-8") == "keep\n"
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_does_not_follow_a_symlink_final_component(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep\n", encoding="utf-8")
+    link = workspace / "linked.txt"
+    try:
+        os.symlink(outside, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不允许创建符号链接")
+
+    outcome = await call_bench_tool(
+        make_tools(workspace).get("replace_in_file"),
+        {"path": "linked.txt", "old": "keep", "new": "changed"},
+        workspace=workspace,
+    )
+
+    assert outcome.kind == "rejected"
+    assert outside.read_text(encoding="utf-8") == "keep\n"
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_rejects_git_metadata(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("secret\n", encoding="utf-8")
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("replace_in_file"),
+        {"path": ".git/config", "old": "secret", "new": "changed"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "rejected"
+    assert "Git 元数据" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_git_diff_shows_working_tree_changes(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8", newline="\n")
+    _init_baseline(tmp_path)
+    (tmp_path / "app.py").write_text("VALUE = 2\n", encoding="utf-8", newline="\n")
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("git_diff"), {}, workspace=tmp_path
+    )
+
+    assert outcome.kind == "ok"
+    assert "M app.py" in outcome.detail
+    assert "-VALUE = 1" in outcome.detail
+    assert "+VALUE = 2" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_git_diff_stat_only_omits_the_patch(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8", newline="\n")
+    _init_baseline(tmp_path)
+    (tmp_path / "app.py").write_text("VALUE = 2\n", encoding="utf-8", newline="\n")
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("git_diff"), {"stat_only": True}, workspace=tmp_path
+    )
+
+    assert outcome.kind == "ok"
+    assert "app.py |" in outcome.detail
+    assert "+VALUE = 2" not in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_git_diff_lists_untracked_files(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8", newline="\n")
+    _init_baseline(tmp_path)
+    (tmp_path / "new.py").write_text("NEW = 1\n", encoding="utf-8", newline="\n")
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("git_diff"), {}, workspace=tmp_path
+    )
+
+    assert outcome.kind == "ok"
+    assert "?? new.py" in outcome.detail
+    assert "未跟踪文件" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_git_diff_filters_by_path(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("A = 1\n", encoding="utf-8", newline="\n")
+    (tmp_path / "b.py").write_text("B = 1\n", encoding="utf-8", newline="\n")
+    _init_baseline(tmp_path)
+    (tmp_path / "a.py").write_text("A = 2\n", encoding="utf-8", newline="\n")
+    (tmp_path / "b.py").write_text("B = 2\n", encoding="utf-8", newline="\n")
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("git_diff"), {"path": "a.py"}, workspace=tmp_path
+    )
+
+    assert outcome.kind == "ok"
+    assert "a.py" in outcome.detail
+    assert "b.py" not in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_git_diff_without_a_baseline_repository_fails(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8", newline="\n")
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("git_diff"), {}, workspace=tmp_path
+    )
+
+    assert outcome.kind == "failed"
+    assert "baseline" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_git_diff_rejects_option_like_paths(tmp_path: Path) -> None:
+    _init_baseline(tmp_path)
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("git_diff"), {"path": "--stat"}, workspace=tmp_path
+    )
+
+    assert outcome.kind == "rejected"
+    assert "不能以 - 或 : 开头" in outcome.detail

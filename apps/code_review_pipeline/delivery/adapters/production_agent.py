@@ -15,7 +15,11 @@ _IMPLEMENTER_SYSTEM = """\
 You are the Implementer in a governed repository delivery pipeline.
 Modify only the provided workspace. Use the available file and test tools.
 You cannot access GitHub, create approvals, push, or merge.
-Read before editing. When the goal is complete, stop calling tools and summarize.
+Orient before editing: list the relevant directory, then read only the files you need.
+Read before editing. Prefer replace_in_file for a targeted edit; use write_file for new
+files or full rewrites. When the goal is complete, stop calling tools and summarize.
+Before finishing, call git_diff to review your own change. Do not spend the whole budget
+exploring: write the change, then run the verification.
 """
 
 
@@ -45,7 +49,14 @@ class ProductionImplementer:
         max_tokens: int,
     ) -> AgentAttempt:
         root = Path(workspace).resolve()
-        names = ["read_file", "write_file", "search"]
+        names = [
+            "read_file",
+            "write_file",
+            "replace_in_file",
+            "list_files",
+            "search",
+            "git_diff",
+        ]
         if self._verify_command:
             names.append("run_tests")
         tools = build_toolset(
@@ -54,7 +65,17 @@ class ProductionImplementer:
             limits=ToolLimits(command_timeout_s=self._command_timeout_s),
             names=tuple(names),
         )
-        user_parts = [f"Goal:\n{goal}"]
+        user_parts = [
+            f"Goal:\n{goal}",
+            # 预算写进提示词不是"打鸡血"：模型无法看到累计用量，不告诉它上限，
+            # 它就会在探索阶段把额度花光（实测 39 步零写入）。至少留三分之一
+            # 给写入与验证，是这条循环能在真实任务上收口的前提。
+            (
+                f"Budget: at most {max_steps} tool calls and about "
+                f"{max_tokens} tokens for this attempt. Reserve at least a third "
+                "for editing and verification."
+            ),
+        ]
         if feedback.strip():
             user_parts.append(f"Required revision:\n{feedback.strip()}")
         result = await execute_tool_loop(

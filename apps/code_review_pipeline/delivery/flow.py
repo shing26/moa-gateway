@@ -18,6 +18,7 @@ from apps.code_review_pipeline.delivery.models import (
 )
 from apps.code_review_pipeline.delivery.ports import (
     BundleChanged,
+    ChangePreparation,
     ChangePreparerPort,
     ChangePublisher,
     DeliveryAuditPort,
@@ -36,6 +37,24 @@ def _utcnow() -> datetime:
 
 def _new_run_id() -> str:
     return f"dlv-{uuid.uuid4().hex}"
+
+
+def _revision_feedback(preparation: ChangePreparation) -> str:
+    """把验证失败变成下一轮可执行的输入，而不只是"失败了"。
+
+    验收记录里的失败形状很具体：只传 ``preparation.message`` 时，修订轮看到的
+    是"验证失败（exit=1）"——模型必须重新猜哪里坏了。验证命令、退出码与输出
+    尾部本来就是确定性证据，应当随反馈一起回流（Run Record 里也留着同一份）。
+    """
+    parts = [preparation.message or preparation.status.value]
+    verification = preparation.verification
+    if verification is not None:
+        parts.append(f"Verify command: {' '.join(verification.command)}")
+        parts.append(f"Exit code: {verification.exit_code}")
+        excerpt = verification.output_excerpt.strip()
+        if excerpt:
+            parts.append(f"Verification output (tail):\n{excerpt}")
+    return "\n".join(parts)
 
 
 class DeliveryFlow:
@@ -224,7 +243,7 @@ class DeliveryFlow:
             }
             if retryable and revisions < self._policy.max_revisions:
                 revisions += 1
-                feedback = preparation.message or preparation.status.value
+                feedback = _revision_feedback(preparation)
                 run = await self._move(
                     run,
                     DeliveryRunState.REVISING,
