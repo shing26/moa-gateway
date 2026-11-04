@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from app.agents.contract import AgentEnvelope, SubAgent, register_agent
+from app.agents.memory import MemoryPolicy, compact_messages, truncate_observation
 from app.agents.provider import LLMClient, LLMConfig
 from app.agents.tool_contract import call_tool
 from app.agents.tools import tool_registry
@@ -14,6 +15,13 @@ from app.agents.workspace_tools import build_toolset, call_workspace_tool
 from app.config import settings
 
 logger = logging.getLogger("moa.agents")
+
+#: 单次 completion 的输出上限。它和"整条 run 的 token 预算"是**两个量**：
+#: 预算记的是所有调用的累计消耗，completion 上限约束的是这一次生成多长。
+#: 把预算原样传给 provider 会撞上服务端输出上限（实测 1.2M 预算直接报
+#: ``Max tokens must not exceed 1048576``，0 token 都没跑），也会诱发无意义的
+#: 超长生成。真正的预算控制在下面按累计用量判定。
+MAX_COMPLETION_TOKENS = 8_192
 
 
 @dataclass(frozen=True)
@@ -153,7 +161,14 @@ def _tool_runtime(envelope: AgentEnvelope):
         if isinstance(raw_verify, (list, tuple))
         else ()
     )
-    names = ["read_file", "write_file", "list_files", "search"]
+    names = [
+        "read_file",
+        "write_file",
+        "replace_in_file",
+        "list_files",
+        "search",
+        "git_diff",
+    ]
     if verify_command:
         names.append("run_tests")
     return (
@@ -176,10 +191,12 @@ async def execute_tool_loop(
     max_steps: int,
     max_tokens: int = 0,
     slot: dict[str, object] | None = None,
+    memory_policy: MemoryPolicy | None = None,
 ) -> ToolLoopResult:
     import time
 
     slot = slot if slot is not None else {}
+    policy = memory_policy or MemoryPolicy()
     logger.info("%s structured tool loop", agent_name)
     chat_with_tools = getattr(llm, "chat_with_tools", None)
     if chat_with_tools is None:
@@ -208,12 +225,21 @@ async def execute_tool_loop(
     current_messages = list(messages)
     executed_tool_calls = 0
     def request_tokens() -> int | None:
+        """本次调用的 completion 上限，**不是**剩余总预算。
+
+        预算是累计量，只能事后结算（调用前无从得知 prompt 会占多少）；把它原样
+        当 completion 上限传给 provider，既语义错误（预算 40 万 ≠ 这一次要生成
+        40 万），也会撞服务端上限。这里只保证单次不超 ``MAX_COMPLETION_TOKENS``，
+        总预算仍由循环在每次调用后按 ``usage.total_tokens`` 判定。
+        """
         if max_tokens <= 0:
+            # 未设总预算时沿用 provider 配置的单次上限（旧行为），不要用一个
+            # 硬编码值覆盖模型自身的 max_tokens。
             return None
-        remaining = max_tokens - usage.total_tokens
-        if usage.llm_calls == 0:
-            return max(1, remaining)
-        return max(0, remaining)
+        remaining = max(0, max_tokens - usage.total_tokens)
+        if remaining <= 0:
+            return 0
+        return min(remaining, MAX_COMPLETION_TOKENS)
 
     def record_usage() -> None:
         nonlocal usage
@@ -347,15 +373,25 @@ async def execute_tool_loop(
                         elapsed_ms=(time.monotonic() - started) * 1000,
                     )
                 )
+                # 完整观察留在 steps（Run Record 的审计证据）；回给模型的那份
+                # 走上下文预算。命令输出保留尾部，文件读取保留头部。
+                model_observation = truncate_observation(
+                    observation,
+                    policy,
+                    keep_tail=name == "run_tests",
+                )
                 result.messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": call["id"],
-                        "content": observation,
+                        "content": model_observation,
                     }
                 )
                 executed_tool_calls += 1
-            current_messages = result.messages
+            # 同一条会话推进多轮后，早期轮次只留一行摘要。没有这一步，40 步
+            # 的探索会把整段历史重复送进每一次调用——实测 17 次调用烧掉 101 万
+            # prompt token，却还没开始写文件。
+            current_messages = compact_messages(result.messages, policy)
             allowance = request_tokens()
             if max_tokens > 0 and allowance is not None and allowance <= 0:
                 return ToolLoopResult(
