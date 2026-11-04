@@ -168,6 +168,21 @@ class MergeOutcome:
     sha: str = ""
 
 
+def _raise_github_error(resp: httpx.Response, action: str) -> None:
+    """把裸 ``raise_for_status`` 换成带 GitHub 原话的失败。
+
+    2026-11-05 的交付在 ``POST /git/trees`` 上收到 403，异常里只有 URL——没有
+    GitHub 的原话，分不清是权限、速率限制还是别的。推送失败必须能直接读出原因，
+    否则"门禁拦住了"和"对面拒绝了"在人眼里长得一样。
+    """
+    if not resp.is_error:
+        return
+    message = _gh_message(resp)
+    raise RuntimeError(
+        f"GitHub 拒绝{action}（HTTP {resp.status_code}）: {message or '响应无正文'}"
+    )
+
+
 def _gh_message(resp: httpx.Response) -> str:
     """从错误响应里取 GitHub 的原话（截断），用于如实转告用户。"""
     try:
@@ -470,7 +485,7 @@ class GitHubClient:
             f"/repos/{repo.owner}/{repo.name}/git/refs",
             json={"ref": f"refs/heads/{branch}", "sha": base_sha},
         )
-        resp.raise_for_status()
+        _raise_github_error(resp, f"创建分支 {branch}")
         return dict(resp.json())
 
     async def create_commit(
@@ -491,7 +506,7 @@ class GitHubClient:
         base_commit = await self._client.get(
             f"/repos/{repo.owner}/{repo.name}/git/commits/{base_sha}"
         )
-        base_commit.raise_for_status()
+        _raise_github_error(base_commit, f"读取 base commit {base_sha}")
         base_tree = str(dict(base_commit.json()).get("tree", {}).get("sha") or "")
         if not base_tree:
             raise RuntimeError(f"无法读取 base commit 的 tree: {base_sha}")
@@ -518,7 +533,7 @@ class GitHubClient:
                 f"/repos/{repo.owner}/{repo.name}/git/blobs",
                 json={"content": content, "encoding": "base64"},
             )
-            blob.raise_for_status()
+            _raise_github_error(blob, f"创建 blob {path}")
             entries.append(
                 {
                     "path": path,
@@ -532,14 +547,14 @@ class GitHubClient:
             f"/repos/{repo.owner}/{repo.name}/git/trees",
             json={"base_tree": base_tree, "tree": entries},
         )
-        tree_resp.raise_for_status()
+        _raise_github_error(tree_resp, "创建 tree")
         tree_sha = str(dict(tree_resp.json()).get("sha") or "")
 
         commit_resp = await self._client.post(
             f"/repos/{repo.owner}/{repo.name}/git/commits",
             json={"message": message, "tree": tree_sha, "parents": [base_sha]},
         )
-        commit_resp.raise_for_status()
+        _raise_github_error(commit_resp, "创建 commit")
         commit_sha = str(dict(commit_resp.json()).get("sha") or "")
 
         # 分支 ref 推进到新 commit（非 force：GitHub 要求 fast-forward）
@@ -547,7 +562,7 @@ class GitHubClient:
             f"/repos/{repo.owner}/{repo.name}/git/refs/heads/{branch}",
             json={"sha": commit_sha, "force": False},
         )
-        ref_resp.raise_for_status()
+        _raise_github_error(ref_resp, f"推进分支 {branch}")
         return commit_sha
 
     async def create_pull_request(
