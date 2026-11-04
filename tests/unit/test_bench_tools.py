@@ -316,8 +316,8 @@ async def test_read_file_accepts_numeric_strings_from_the_model(tmp_path: Path) 
     )
 
     assert outcome.kind == "ok"
-    assert "   2  b" in outcome.detail
-    assert "   1  a" not in outcome.detail
+    assert "   2|b" in outcome.detail
+    assert "   1|a" not in outcome.detail
 
 
 @pytest.mark.asyncio
@@ -778,3 +778,54 @@ async def test_edit_file_alias_resolves_to_replace_in_file(tmp_path: Path) -> No
 
     assert outcome.kind == "ok"
     assert (tmp_path / "app.py").read_text(encoding="utf-8") == "VALUE = 9\n"
+
+
+@pytest.mark.asyncio
+async def test_read_file_separates_line_numbers_with_a_pipe(tmp_path: Path) -> None:
+    """回归（2026-11-05，issue #43 第 2 次尝试）：行号 + 两个空格被当成缩进。
+
+    旧格式 ``   76  - name:`` 让模型给 6 空格缩进的行写了 8 个空格，
+    之后 12 次 replace_in_file 全部"未找到精确匹配"，步数预算耗尽。
+    """
+    (tmp_path / "ci.yml").write_text("      - name: Log in\n", encoding="utf-8")
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("read_file"), {"path": "ci.yml"}, workspace=tmp_path
+    )
+
+    assert outcome.kind == "ok"
+    assert "   1|      - name: Log in" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_search_narrows_to_a_single_file(tmp_path: Path) -> None:
+    """``search`` 收到文件路径时不能回答"扫描 0 个文件"。"""
+    (tmp_path / "ci.yml").write_text("on:\n  push: true\n", encoding="utf-8")
+    (tmp_path / "other.txt").write_text("push: true\n", encoding="utf-8")
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("search"),
+        {"path": "ci.yml", "pattern": "push:"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "ok"
+    assert "ci.yml:2: push: true" in outcome.detail
+    assert "other.txt" not in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_hint_quotes_the_real_indentation(tmp_path: Path) -> None:
+    """匹配失败时要把文件里的真实写法交回去，而不是只说"必须一致"。"""
+    (tmp_path / "ci.yml").write_text(
+        "    steps:\n      - name: Log in\n", encoding="utf-8"
+    )
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("replace_in_file"),
+        {"path": "ci.yml", "old": "        - name: Log in", "new": "x"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "rejected"
+    assert "'      - name: Log in'" in outcome.detail

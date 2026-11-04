@@ -259,6 +259,29 @@ def parse_selector(selector: str) -> tuple[list[str], str | None]:
     return tokens, None
 
 
+def _indentation_hint(text: str, needle: str) -> str:
+    """把"没匹配到"变成一句能照着改的话。
+
+    只说"空格、缩进必须一致"没有用：模型看不见自己抄错了几格。这里用 old 的
+    第一行做锚点，把文件里的**真实**写法连引号一起交回去（``repr`` 保留前导
+    空格），它下一次就能直接对上。
+    """
+    anchor = next((line for line in needle.splitlines() if line.strip()), "")
+    if not anchor:
+        return "old 不能为空字符串"
+    wanted = anchor.strip()
+    for line in text.splitlines():
+        if line.strip() == wanted:
+            return (
+                f"old 的第一行在文件中的实际写法是 {line!r}"
+                "（引号内保留了真实前导空格）；行号前缀不属于文件内容"
+            )
+    return (
+        f"old 的第一行 {wanted!r} 在文件中不存在；"
+        "请先用 read_file 确认原文，行号前缀不属于文件内容"
+    )
+
+
 def _check_replacement(target: Path, display: str, arguments: dict) -> str | None:
     """Reject inexact/ambiguous replacements before they become a failed call.
 
@@ -279,12 +302,10 @@ def _check_replacement(target: Path, display: str, arguments: dict) -> str | Non
         return f"文件超过 {_MAX_EDIT_BYTES} 字节，replace_in_file 不适用: {display}"
 
     text, _ = _read_for_edit(target)
-    count = text.count(old.replace("\r\n", "\n"))
+    needle = old.replace("\r\n", "\n")
+    count = text.count(needle)
     if count == 0:
-        return (
-            "未找到 old 的精确匹配；请先用 read_file 确认原文，"
-            "空格、缩进和换行必须完全一致"
-        )
+        return "未找到 old 的精确匹配；" + _indentation_hint(text, needle)
     if count > 1 and arguments.get("replace_all") is not True:
         return (
             f"old 匹配到 {count} 处；请提供更长的唯一片段，"
@@ -424,7 +445,11 @@ def build_toolset(
                 picked.append((lineno, line.rstrip("\r\n")))
                 last = lineno
                 used += encoded
-        numbered = "\n".join(f"{i:>4}  {text}" for i, text in picked)
+        # 行号与正文之间用 ``|`` 分隔，而不是两个空格：旧格式 ``   76  - name:``
+        # 让模型把"行号 + 两个空格"当成缩进读走——真实轨迹里它因此给 6 空格缩进
+        # 的行写了 8 个空格，随后 12 次 replace_in_file 全部"未找到精确匹配"，
+        # 步数预算耗尽（2026-11-05，issue #43 第 2 次尝试）。分隔符要能一眼看见。
+        numbered = "\n".join(f"{i:>4}|{text}" for i, text in picked)
         if not numbered:
             return f"(第 {start} 行起没有内容)" if start > 1 else "(空文件)"
         if has_more:
@@ -555,7 +580,11 @@ def build_toolset(
         target = resolve_in_workspace(root, path)
         hits: list[str] = []
         scanned = 0
-        for item in sorted(target.rglob("*")):
+        # ``rglob`` on a *file* yields nothing, so passing a file path used to
+        # answer "扫描 0 个文件" — a lie that costs the model a step every time
+        # it narrows the search to one file it just read. Search the file.
+        candidates = [target] if target.is_file() else sorted(target.rglob("*"))
+        for item in candidates:
             if len(hits) >= limits.search_matches or scanned >= limits.search_files:
                 break
             if not item.is_file():
@@ -610,7 +639,8 @@ def build_toolset(
         AgentTool(
             name="read_file",
             description=(
-                "按行读取工作区内的一个文本文件，返回带行号的原文。"
+                "按行读取工作区内的一个文本文件，返回 `行号|原文`。"
+                "行号前缀（含竖线）不属于文件内容，不要抄进 replace_in_file 的 old。"
                 "大文件用 offset/limit 分页，别反复重读整文件。"
             ),
             parameters={
