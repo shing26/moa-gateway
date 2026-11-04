@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from app.agents.memory import MemoryPolicy
 from app.agents.provider import ChatResult
-from app.agents.stubs import execute_tool_loop
+from app.agents.stubs import MAX_COMPLETION_TOKENS, execute_tool_loop
 from app.agents.workspace_tools import build_toolset
 
 
@@ -49,8 +50,15 @@ class FakeLLM:
                 content=response,
                 tool_calls=[],
             )
+        # 与真实 LLMClient 一致：assistant 消息必须带回 tool_calls，否则压缩
+        # 逻辑会把它当成"结束轮"，tool 消息也会失去配对。
+        assistant = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": response,
+        }
         return ChatResult(
-            messages=[*messages, {"role": "assistant", "content": None}],
+            messages=[*messages, assistant],
             content="",
             tool_calls=response,  # type: ignore[arg-type]
         )
@@ -153,6 +161,94 @@ async def test_tool_loop_passes_only_the_remaining_token_budget(tmp_path: Path) 
     # The second request gets the full remaining allowance; provider overrun is
     # detected after the call rather than assumed away by a stale prompt estimate.
     assert [request["max_tokens"] for request in llm.requests] == [40, 25]
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_caps_a_single_completion_request(tmp_path: Path) -> None:
+    """总预算不是单次 completion 上限。
+
+    实测记录里 1.2M 的 ``DELIVERY_MAX_TOKENS`` 被原样传给了 provider，第一次
+    调用就报 "Max tokens must not exceed 1048576"，0 token 都没跑。
+    """
+    llm = FakeLLM(
+        [
+            [_call("1", "read_file", {"path": "x.txt"})],
+            "finished",
+        ]
+    )
+    (tmp_path / "x.txt").write_text("x\n", encoding="utf-8")
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+
+    await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=5,
+        max_tokens=1_200_000,
+    )
+
+    assert [request["max_tokens"] for request in llm.requests] == [
+        MAX_COMPLETION_TOKENS,
+        MAX_COMPLETION_TOKENS,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_compacts_old_turns_but_keeps_full_audit_steps(
+    tmp_path: Path,
+) -> None:
+    """压缩只作用于发给模型的消息；Run Record 里的步骤观察保持完整。"""
+    content = "x" * 1000 + "\n"
+    (tmp_path / "x.txt").write_text(content, encoding="utf-8")
+    llm = FakeLLM(
+        [
+            *[
+                [_call(str(index), "read_file", {"path": "x.txt"})]
+                for index in range(8)
+            ],
+            "finished",
+        ]
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read eight times"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=20,
+        max_tokens=100_000,
+        memory_policy=MemoryPolicy(max_full_turns=2, max_observation_tokens=50),
+    )
+
+    assert result.status == "completed"
+    # 审计证据：每一步仍是工具返回的完整观察。
+    assert len(result.steps[0].observation) > 1000
+    # 模型侧：早期轮次已折叠成摘要，所有 tool 消息都被压到预算内。
+    last_messages = llm.requests[-1]["messages"]
+    assert any(
+        message.get("role") == "system"
+        and "早期 6 轮行动已省略" in str(message.get("content", ""))
+        for message in last_messages
+    )
+    tool_contents = [
+        str(message.get("content", ""))
+        for message in last_messages
+        if message.get("role") == "tool"
+    ]
+    assert tool_contents
+    assert all(len(item) < 1000 for item in tool_contents)
 
 
 @pytest.mark.asyncio

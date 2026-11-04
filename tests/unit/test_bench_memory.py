@@ -77,3 +77,16 @@ def test_truncate_observation_honours_the_token_budget() -> None:
     assert out != long_text
     assert "超出预算已截断" in out
     assert len(out) < len(long_text)
+
+
+def test_truncate_observation_keep_tail_preserves_the_failure_summary() -> None:
+    """命令输出的结论在尾部；只留头部会把 pytest 的失败摘要裁掉。"""
+    long_text = "pytest output\n" + ("x" * 4000) + "\nFAILED tests/x.py::test_y"
+    out = truncate_observation(
+        long_text,
+        MemoryPolicy(max_observation_tokens=100),
+        keep_tail=True,
+    )
+    assert "FAILED tests/x.py::test_y" in out
+    assert "中间省略" in out
+    assert len(out) < len(long_text)
