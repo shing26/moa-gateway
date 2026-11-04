@@ -16,7 +16,8 @@ import logging
 import os
 
 from app.config import settings
-from app.deps import merge_store
+from app.deps import delivery_run_store, merge_store
+from apps.code_review_pipeline.delivery.audit import WalDeliveryAudit
 from apps.code_review_pipeline.merge_poller import MergePoller
 from apps.code_review_pipeline.notifications.merge_notifier import MergeNotifier
 from apps.code_review_pipeline.routing.github_provider import build_github_client
@@ -33,13 +34,20 @@ class MergeWorker:
         github,
         notifier: MergeNotifier,
         *,
+        run_store=None,
+        audit=None,
         interval_s: float = 60.0,
     ) -> None:
         self._store = store
         self._github = github
         self._notifier = notifier
         self._interval_s = interval_s
-        self._poller = MergePoller(store, github)
+        self._poller = MergePoller(
+            store,
+            github,
+            run_store=run_store,
+            audit=audit,
+        )
 
     async def run_forever(self) -> None:
         """定期轮询，直到进程被终止。"""
@@ -103,6 +111,8 @@ def build_worker() -> MergeWorker:
         store=merge_store,
         github=build_github_client(),
         notifier=notifier,
+        run_store=delivery_run_store,
+        audit=WalDeliveryAudit(),
         interval_s=float(settings.code_review_merge_poll_interval_s),
     )
 
