@@ -67,6 +67,26 @@ _BINARY_SNIFF = b"\x00"
 #: 巨型文件交给它的情况；超过时模型应改用分页读取 + 更小的编辑。
 _MAX_EDIT_BYTES = 1_000_000
 
+#: ``write_file`` 对**既有文档**的整体覆盖上限（行）。超过就必须用
+#: ``replace_in_file`` 定点改。
+#:
+#: 这条线来自一次真实交付（2026-11-05，issue #43）：模型要给 489 行的 README
+#: 加一句话，却用 ``write_file`` 重写了整份文件——验证脚本只断言了新增的
+#: ``run_docker``，于是链接被截断（``logoColor`` 丢失）、表格里的相对链接变成
+#: 纯文本、还凭空改掉一句事实（``Branch not protected`` → ``Branch not
+#: supported``）。整文件重写等于让模型**转述**原文；转述不是编辑。
+#:
+#: 为什么只限文档：代码有测试门禁，转述坏了会被执行打回来；文档没有可执行的
+#: 判据，"读起来还是那个意思"就是唯一的判据——于是写入方式本身必须成为门禁。
+#: 代码文件保持可整份重写（bench 的 scripted expert 正是这么工作的）。
+_MAX_DOC_OVERWRITE_LINES = 120
+_DOC_SUFFIXES = frozenset({".md", ".rst", ".txt", ".adoc"})
+
+#: 模型把 ``replace_in_file`` 叫成别的名字时的兼容映射。真实轨迹里出现过
+#: ``edit_file``（然后转去 ``write_file`` 整文件重写）。别名只在解析时生效，
+#: 不进 schema：多宣告一个名字就多一份提示预算。
+_TOOL_ALIASES = {"edit_file": "replace_in_file"}
+
 
 def _read_for_edit(path: Path) -> tuple[str, bool]:
     """读取待编辑文本，返回 ``(LF 规范化文本, 原文件是否使用 CRLF)``。
@@ -273,6 +293,30 @@ def _check_replacement(target: Path, display: str, arguments: dict) -> str | Non
     return None
 
 
+def _check_overwrite(target: Path, display: str) -> str | None:
+    """拒绝用 ``write_file`` 整体覆盖大文档。
+
+    判成 ``rejected``（模型能自己改）而不是 ``failed``：换一个更窄的编辑动作
+    就能继续，这正是"工具用错了"，不是环境坏了。
+    """
+    if target.suffix.lower() not in _DOC_SUFFIXES:
+        return None
+    if not target.exists() or not target.is_file():
+        return None
+    try:
+        with target.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+            lines = sum(1 for _ in handle)
+    except OSError:
+        return None
+    if lines <= _MAX_DOC_OVERWRITE_LINES:
+        return None
+    return (
+        f"{display} 已有 {lines} 行，超过 write_file 整体覆盖文档的上限 "
+        f"{_MAX_DOC_OVERWRITE_LINES} 行。请改用 replace_in_file 做定点修改："
+        "整文件重写会让模型转述原文，把没打算改的链接、措辞与事实一起改掉。"
+    )
+
+
 def check_tool_policy(name: str, arguments: dict, *, workspace: Path) -> str | None:
     """策略前置检查。返回拒绝原因，或 ``None`` 表示放行给既有契约。"""
     raw = str(arguments.get("path", ".") or ".")
@@ -295,7 +339,7 @@ def check_tool_policy(name: str, arguments: dict, *, workspace: Path) -> str | N
             return str(exc)
         if name == "replace_in_file":
             return _check_replacement(target, raw, arguments)
-        return None
+        return _check_overwrite(target, raw)
     if name == "run_tests":
         _, reason = parse_selector(str(arguments.get("selector", "") or ""))
         return reason
@@ -339,7 +383,7 @@ def build_toolset(
             names=names,
         )
 
-    registry = ToolRegistry(bind_workspace)
+    registry = ToolRegistry(bind_workspace, aliases=_TOOL_ALIASES)
     allowed = set(names) if names is not None else None
 
     def register(tool: AgentTool) -> None:
@@ -590,7 +634,11 @@ def build_toolset(
     register(
         AgentTool(
             name="write_file",
-            description="把内容整体写入工作区内的一个文件，父目录会自动创建。",
+            description=(
+                "把内容整体写入工作区内的一个文件，父目录会自动创建。"
+                f"既有的超过 {_MAX_DOC_OVERWRITE_LINES} 行的文档（.md/.rst/.txt）"
+                "不允许整体覆盖——改文档请用 replace_in_file。"
+            ),
             parameters={
                 "type": "object",
                 "properties": {

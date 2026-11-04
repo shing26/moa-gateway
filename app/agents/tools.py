@@ -21,15 +21,24 @@ class ToolRegistry:
     def __init__(
         self,
         workspace_factory: Callable[[Path], "ToolRegistry"] | None = None,
+        *,
+        aliases: dict[str, str] | None = None,
     ) -> None:
         self._tools: dict[str, AgentTool] = {}
+        #: 模型叫错名字时的兼容别名（别名 → 规范名）。只用于**解析**，不对外宣告：
+        #: 多宣告一个名字就多一份 schema 预算，也等于承认两个名字都正式存在。
+        self._aliases = dict(aliases or {})
         self._workspace_factory = workspace_factory
 
     def register(self, tool: AgentTool) -> None:
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> AgentTool | None:
-        return self._tools.get(name)
+        tool = self._tools.get(name)
+        if tool is not None:
+            return tool
+        canonical = self._aliases.get(name)
+        return self._tools.get(canonical) if canonical else None
 
     def list_schemas(self) -> list[dict]:
         return [
