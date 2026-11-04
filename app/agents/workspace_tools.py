@@ -14,12 +14,15 @@ from __future__ import annotations
 import asyncio
 import shutil
 import re
+# Fixed git argv; never shell-expanded.
+import subprocess  # nosec B404
 import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.agents.command_runner import run_command
+from app.agents.command_runner import resolve_program, run_command
+from app.agents.subprocess_env import harden_git_argv, isolated_env
 from app.agents.tool_contract import ToolCallOutcome, call_tool
 from app.agents.tools import AgentTool, ToolRegistry
 
@@ -59,6 +62,49 @@ _SKIP_DIRS = frozenset(
     }
 )
 _BINARY_SNIFF = b"\x00"
+
+#: ``replace_in_file`` 要把整个文件读进内存再写回。上限只为挡住误把
+#: 巨型文件交给它的情况；超过时模型应改用分页读取 + 更小的编辑。
+_MAX_EDIT_BYTES = 1_000_000
+
+
+def _read_for_edit(path: Path) -> tuple[str, bool]:
+    """读取待编辑文本，返回 ``(LF 规范化文本, 原文件是否使用 CRLF)``。
+
+    模型看到的 ``read_file`` 输出已经去掉了 ``\\r``，它给出的 ``old`` 自然是
+    LF 风格；如果文件本身是 CRLF，直接 ``str.count`` 会永远匹配不到。这里
+    统一成 LF 做匹配，写回时再按原文件的换行恢复。
+    """
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+        raw = handle.read()
+    return raw.replace("\r\n", "\n"), "\r\n" in raw
+
+
+def _clip_observation(text: str, limit: int) -> str:
+    """保留头尾两段。diff 的关键信息可能在前几个 hunk，也可能在末尾。"""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    head = limit // 3
+    tail = limit - head
+    return f"{text[:head]}\n…（中略 {len(text) - limit} 字符）…\n{text[-tail:]}"
+
+
+def _run_git(args: list[str], *, cwd: Path, timeout_s: float) -> subprocess.CompletedProcess[str]:
+    """Run a read-only git command with the hardened argv and allowlisted env."""
+    env = isolated_env(cwd, git=True)
+    argv = resolve_program(harden_git_argv(args), env)
+    return subprocess.run(  # noqa: S603  # nosec B603 - argv is built locally, shell=False
+        argv,
+        cwd=str(cwd),
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_s,
+        shell=False,
+        check=False,
+    )
 
 
 def _as_int(value: object, default: int) -> int:
@@ -193,13 +239,62 @@ def parse_selector(selector: str) -> tuple[list[str], str | None]:
     return tokens, None
 
 
+def _check_replacement(target: Path, display: str, arguments: dict) -> str | None:
+    """Reject inexact/ambiguous replacements before they become a failed call.
+
+    A wrong ``old`` snippet is a model-input mistake, not an environment
+    failure: marking it ``rejected`` lets the loop feed the reason back and
+    retry without spending a "tool failed" budget.
+    """
+    old = arguments.get("old")
+    if not isinstance(old, str) or old == "":
+        return "old 不能为空字符串"
+    if not isinstance(arguments.get("new"), str):
+        return "new 必须是字符串"
+    if not target.exists():
+        return f"文件不存在: {display}；replace_in_file 只修改已存在的文件"
+    if not target.is_file():
+        return f"不是文件: {display}"
+    if target.stat().st_size > _MAX_EDIT_BYTES:
+        return f"文件超过 {_MAX_EDIT_BYTES} 字节，replace_in_file 不适用: {display}"
+
+    text, _ = _read_for_edit(target)
+    count = text.count(old.replace("\r\n", "\n"))
+    if count == 0:
+        return (
+            "未找到 old 的精确匹配；请先用 read_file 确认原文，"
+            "空格、缩进和换行必须完全一致"
+        )
+    if count > 1 and arguments.get("replace_all") is not True:
+        return (
+            f"old 匹配到 {count} 处；请提供更长的唯一片段，"
+            "或设置 replace_all=true"
+        )
+    return None
+
+
 def check_tool_policy(name: str, arguments: dict, *, workspace: Path) -> str | None:
     """策略前置检查。返回拒绝原因，或 ``None`` 表示放行给既有契约。"""
-    if name in ("read_file", "write_file", "list_files", "search"):
+    raw = str(arguments.get("path", ".") or ".")
+    if name in ("read_file", "list_files", "search", "git_diff"):
         try:
-            resolve_in_workspace(workspace, str(arguments.get("path", ".") or "."))
+            target = resolve_in_workspace(workspace, raw)
         except PathEscape as exc:
             return str(exc)
+        if name == "git_diff":
+            relative = target.relative_to(workspace.resolve()).as_posix()
+            if relative.startswith(("-", ":")):
+                return f"path 不能以 - 或 : 开头: {raw!r}"
+        return None
+    if name in ("write_file", "replace_in_file"):
+        if not raw.strip():
+            return "path 不能为空"
+        try:
+            target = _resolved_for_write(workspace, raw)
+        except PathEscape as exc:
+            return str(exc)
+        if name == "replace_in_file":
+            return _check_replacement(target, raw, arguments)
         return None
     if name == "run_tests":
         _, reason = parse_selector(str(arguments.get("selector", "") or ""))
@@ -304,6 +399,94 @@ def build_toolset(
         with target.open("w", encoding="utf-8", newline="\n") as handle:
             handle.write(body)
         return f"已写入 {path}（{len(content)} 字符）"
+
+    async def replace_in_file(
+        path: str, old: str, new: str, replace_all: bool = False
+    ) -> str:
+        """Exact-match replacement; the policy check already vetted ambiguity."""
+        target = _resolved_for_write(root, path)
+        if not target.is_file():
+            raise FileNotFoundError(f"不是文件: {path}")
+        if target.stat().st_size > _MAX_EDIT_BYTES:
+            raise ValueError(f"文件超过 {_MAX_EDIT_BYTES} 字节: {path}")
+        text, uses_crlf = _read_for_edit(target)
+        needle = old.replace("\r\n", "\n")
+        replacement = new.replace("\r\n", "\n")
+        count = text.count(needle)
+        if count == 0:
+            raise ValueError("未找到 old 的精确匹配")
+        if count > 1 and not replace_all:
+            raise ValueError(f"old 匹配到 {count} 处，需要 replace_all=true")
+        updated = text.replace(needle, replacement) if replace_all else text.replace(
+            needle, replacement, 1
+        )
+        # 源文件以换行结尾时保持这个约定；不替模型决定是否去掉文件末尾换行。
+        if text.endswith("\n") and not updated.endswith("\n"):
+            updated += "\n"
+        body = updated.replace("\n", "\r\n") if uses_crlf else updated
+        with target.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(body)
+        replaced = count if replace_all else 1
+        return f"已替换 {path} 中的 {replaced} 处"
+
+    async def git_diff(path: str = ".", stat_only: bool = False) -> str:
+        """Read-only self-review against the workspace's baseline commit."""
+        target = resolve_in_workspace(root, path)
+        relative = target.relative_to(root).as_posix()
+        if relative.startswith(("-", ":")):
+            raise ValueError("path 不能以 - 或 : 开头")
+        if not (root / ".git").exists():
+            raise RuntimeError("工作区缺少 .git，无法与 baseline 比较")
+
+        try:
+            status = await asyncio.to_thread(
+                _run_git,
+                ["status", "--porcelain", "--", relative],
+                cwd=root,
+                timeout_s=limits.command_timeout_s,
+            )
+            diff_args = [
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--stat",
+            ]
+            if not stat_only:
+                diff_args.extend(["--patch", "--unified=3"])
+            diff_args.extend(["--", relative])
+            diff = await asyncio.to_thread(
+                _run_git,
+                diff_args,
+                cwd=root,
+                timeout_s=limits.command_timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"git 命令超过 {limits.command_timeout_s:.0f}s 未完成"
+            ) from exc
+
+        for result, label in ((status, "status"), (diff, "diff")):
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout or "").strip()[:2000]
+                raise RuntimeError(f"git {label} 失败（exit={result.returncode}）: {detail}")
+
+        sections: list[str] = []
+        status_text = (status.stdout or "").strip()
+        if status_text:
+            sections.append(f"$ git status --porcelain -- {relative}\n{status_text}")
+        diff_text = (diff.stdout or "").rstrip()
+        if diff_text:
+            sections.append(f"$ git diff -- {relative}\n{diff_text}")
+        elif status_text:
+            sections.append(
+                "（status 中的未跟踪文件不会出现在 git diff 里；用 read_file 查看内容）"
+            )
+        if not sections:
+            if not target.exists():
+                return f"路径不存在，且相对 baseline 没有改动: {path}"
+            return "工作区相对 baseline 没有改动。"
+        return _clip_observation("\n\n".join(sections), limits.output_chars)
 
     async def list_files(path: str = ".") -> str:
         target = resolve_in_workspace(root, path)
@@ -421,6 +604,32 @@ def build_toolset(
     )
     register(
         AgentTool(
+            name="replace_in_file",
+            description=(
+                "精确替换已存在文件中的一段文本。old 必须与原文逐字符一致（含空格、"
+                "缩进、换行）；默认要求只匹配到一处。小改动优先用它，避免整文件重写。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "相对工作区根的文件路径"},
+                    "old": {
+                        "type": "string",
+                        "description": "要替换的原文片段；必须唯一匹配（除非 replace_all=true）",
+                    },
+                    "new": {"type": "string", "description": "替换后的新文本"},
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "为 true 时替换所有匹配；默认 false（要求唯一匹配）",
+                    },
+                },
+                "required": ["path", "old", "new"],
+            },
+            handler=replace_in_file,
+        )
+    )
+    register(
+        AgentTool(
             name="list_files",
             description="列出工作区内某个目录下的全部文件与子目录（相对路径）。",
             parameters={
@@ -445,6 +654,29 @@ def build_toolset(
                 "required": ["pattern"],
             },
             handler=search,
+        )
+    )
+    register(
+        AgentTool(
+            name="git_diff",
+            description=(
+                "只读查看工作区相对 baseline 提交的改动：先列 git status，再给 diff。"
+                "完成修改后用它自检；未跟踪文件只在 status 中出现。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "限定文件或目录，默认 .（整个工作区）",
+                    },
+                    "stat_only": {
+                        "type": "boolean",
+                        "description": "为 true 时只返回改动统计，不返回 patch",
+                    },
+                },
+            },
+            handler=git_diff,
         )
     )
     register(

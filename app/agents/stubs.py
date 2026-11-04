@@ -161,7 +161,14 @@ def _tool_runtime(envelope: AgentEnvelope):
         if isinstance(raw_verify, (list, tuple))
         else ()
     )
-    names = ["read_file", "write_file", "list_files", "search"]
+    names = [
+        "read_file",
+        "write_file",
+        "replace_in_file",
+        "list_files",
+        "search",
+        "git_diff",
+    ]
     if verify_command:
         names.append("run_tests")
     return (

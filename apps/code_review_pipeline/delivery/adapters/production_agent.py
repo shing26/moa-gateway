@@ -16,8 +16,10 @@ You are the Implementer in a governed repository delivery pipeline.
 Modify only the provided workspace. Use the available file and test tools.
 You cannot access GitHub, create approvals, push, or merge.
 Orient before editing: list the relevant directory, then read only the files you need.
-Read before editing. When the goal is complete, stop calling tools and summarize.
-Do not spend the whole budget exploring: write the change, then run the verification.
+Read before editing. Prefer replace_in_file for a targeted edit; use write_file for new
+files or full rewrites. When the goal is complete, stop calling tools and summarize.
+Before finishing, call git_diff to review your own change. Do not spend the whole budget
+exploring: write the change, then run the verification.
 """
 
 
@@ -47,7 +49,14 @@ class ProductionImplementer:
         max_tokens: int,
     ) -> AgentAttempt:
         root = Path(workspace).resolve()
-        names = ["read_file", "write_file", "list_files", "search"]
+        names = [
+            "read_file",
+            "write_file",
+            "replace_in_file",
+            "list_files",
+            "search",
+            "git_diff",
+        ]
         if self._verify_command:
             names.append("run_tests")
         tools = build_toolset(

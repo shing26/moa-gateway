@@ -104,6 +104,8 @@ async def test_implementer_returns_structured_attempt_and_writes_file(
     # 它先定位再读，而不是用 read_file "." 撞一次失败。
     assert "Budget: at most 5 tool calls" in user_text
     assert "list_files" in llm.tool_names
+    assert "replace_in_file" in llm.tool_names
+    assert "git_diff" in llm.tool_names
 
 
 @pytest.mark.asyncio
