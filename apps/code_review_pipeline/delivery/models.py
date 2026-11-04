@@ -256,6 +256,7 @@ class FailureCode(str, Enum):
     CI_FAILED = "ci_failed"
     MERGE_SHA_MISMATCH = "merge_sha_mismatch"
     MERGE_NOT_MERGEABLE = "merge_not_mergeable"
+    MERGE_FAILED = "merge_failed"
     INFRA_ERROR = "infra_error"
 
 

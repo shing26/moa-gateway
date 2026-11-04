@@ -62,6 +62,35 @@ def _run(state: DeliveryRunState = DeliveryRunState.READY_FOR_PUSH_APPROVAL) -> 
     )
 
 
+def _pushed_run(
+    state: DeliveryRunState = DeliveryRunState.WAITING_CI,
+) -> DeliveryRun:
+    return replace(
+        _run(state),
+        push=PushOutcome(
+            branch="moa/fix-trace-1",
+            commit_sha="b" * 40,
+            pull_request=PullRequestRef(
+                number=9,
+                url="https://example.com/pr/9",
+                head_sha="b" * 40,
+            ),
+        ),
+    )
+
+
+def _merge_record(**overrides: object) -> MergeRecord:
+    values: dict[str, object] = {
+        "repo": "owner/name",
+        "pr_number": 9,
+        "head_sha": "b" * 40,
+        "run_id": "run-1",
+        "trace_id": "trace-1",
+    }
+    values.update(overrides)
+    return MergeRecord(**values)
+
+
 def _full_run() -> DeliveryRun:
     base = _run(DeliveryRunState.NEEDS_HUMAN)
     attempt = AgentAttempt(
@@ -286,6 +315,107 @@ async def test_current_view_merges_the_latest_merge_record(tmp_path: Path) -> No
     assert view.merge == latest
     assert view.merge != initial
     assert view.state is DeliveryRunState.WAITING_CI
+
+
+@pytest.mark.asyncio
+async def test_sync_from_merge_writes_merged_state_to_snapshot(tmp_path: Path) -> None:
+    store = DeliveryRunStore(tmp_path)
+    await store.save(_pushed_run())
+    record = _merge_record(state=MergeState.MERGED.value, merged_sha="c" * 40)
+
+    synced = await store.sync_from_merge(record)
+
+    assert synced is not None
+    assert synced.state is DeliveryRunState.MERGED
+    assert synced.merge == record
+    loaded = store.load("run-1")
+    assert loaded.state is DeliveryRunState.MERGED
+    assert loaded.merge == record
+    assert loaded.updated_at > loaded.started_at
+
+
+@pytest.mark.asyncio
+async def test_sync_from_merge_maps_awaiting_approval(tmp_path: Path) -> None:
+    store = DeliveryRunStore(tmp_path)
+    await store.save(_pushed_run())
+    record = _merge_record(state=MergeState.AWAITING_APPROVAL.value)
+
+    synced = await store.sync_from_merge(record)
+
+    assert synced is not None
+    assert synced.state is DeliveryRunState.AWAITING_MERGE_APPROVAL
+
+
+@pytest.mark.asyncio
+async def test_sync_from_merge_failure_marks_needs_human(tmp_path: Path) -> None:
+    store = DeliveryRunStore(tmp_path)
+    await store.save(_pushed_run())
+    record = _merge_record(
+        state=MergeState.FAILED.value,
+        failure_reason="PR is not mergeable (dirty)",
+    )
+
+    synced = await store.sync_from_merge(record)
+
+    assert synced is not None
+    assert synced.state is DeliveryRunState.NEEDS_HUMAN
+    assert synced.failure == FailureInfo(
+        FailureCode.MERGE_FAILED,
+        "PR is not mergeable (dirty)",
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_from_merge_falls_back_to_pull_request_identity(tmp_path: Path) -> None:
+    store = DeliveryRunStore(tmp_path)
+    await store.save(_pushed_run())
+    record = _merge_record(run_id="", state=MergeState.MERGED.value)
+
+    synced = await store.sync_from_merge(record)
+
+    assert synced is not None
+    assert synced.state is DeliveryRunState.MERGED
+
+
+@pytest.mark.asyncio
+async def test_sync_from_merge_ignores_another_pull_request(tmp_path: Path) -> None:
+    store = DeliveryRunStore(tmp_path)
+    await store.save(_pushed_run())
+    record = _merge_record(run_id="", head_sha="d" * 40)
+
+    assert await store.sync_from_merge(record) is None
+
+
+@pytest.mark.asyncio
+async def test_sync_from_merge_never_reopens_terminal_run(tmp_path: Path) -> None:
+    store = DeliveryRunStore(tmp_path)
+    merged = _merge_record(state=MergeState.MERGED.value, merged_sha="c" * 40)
+    run = replace(_pushed_run(), state=DeliveryRunState.MERGED, merge=merged)
+    await store.save(run)
+    late = _merge_record(state=MergeState.WATCHING.value)
+
+    synced = await store.sync_from_merge(late)
+
+    assert synced is not None
+    assert synced.state is DeliveryRunState.MERGED
+    assert synced.merge == merged
+    loaded = store.load("run-1")
+    assert loaded.merge == merged
+
+
+@pytest.mark.asyncio
+async def test_reconcile_persists_latest_merge_record(tmp_path: Path) -> None:
+    store = DeliveryRunStore(tmp_path)
+    run = _pushed_run()
+    await store.save(run)
+    merges = MergeStore()
+    record = _merge_record(state=MergeState.MERGED.value, merged_sha="c" * 40)
+    merges.save(record)
+
+    reconciled = await store.reconcile(run, merges)
+
+    assert reconciled.state is DeliveryRunState.MERGED
+    assert store.load("run-1").merge == record
 
 
 @pytest.mark.asyncio

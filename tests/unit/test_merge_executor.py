@@ -31,6 +31,19 @@ def _make_record(
     )
 
 
+class _FakeRunStore:
+    def __init__(self) -> None:
+        self.records: list[MergeRecord] = []
+
+    async def sync_from_merge(self, record: MergeRecord, *, audit=None) -> None:
+        self.records.append(record)
+
+
+class _BrokenRunStore:
+    async def sync_from_merge(self, record: MergeRecord, *, audit=None) -> None:
+        raise RuntimeError("snapshot disk is full")
+
+
 class _FakeGitHub:
     def __init__(
         self,
@@ -61,7 +74,8 @@ async def test_approve_success() -> None:
     store.save(record)
 
     fake_gh = _FakeGitHub()
-    executor = MergeExecutor(store, fake_gh)
+    run_store = _FakeRunStore()
+    executor = MergeExecutor(store, fake_gh, run_store=run_store)
 
     outcome = await executor.execute(record.task_key, "approve", "user_123")
 
@@ -76,6 +90,23 @@ async def test_approve_success() -> None:
     # 确实调了 merge_pr
     assert len(fake_gh.merge_calls) == 1
     assert fake_gh.merge_calls[0][2] == "abc123"  # sha 参数正确
+    # 合并结果回写到了 delivery run 快照
+    assert run_store.records[-1].state == MergeState.MERGED.value
+    assert run_store.records[-1].merged_sha == "def456"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_write_failure_does_not_fail_merge() -> None:
+    """The PR is already merged; a run-snapshot write failure must not mask it."""
+    store = MergeStore()
+    record = _make_record()
+    store.save(record)
+    executor = MergeExecutor(store, _FakeGitHub(), run_store=_BrokenRunStore())
+
+    outcome = await executor.execute(record.task_key, "approve", "user_123")
+
+    assert outcome.merged
+    assert store.get(record.identity).state == MergeState.MERGED.value
 
 
 @pytest.mark.asyncio
@@ -136,7 +167,8 @@ async def test_reject() -> None:
     store.save(record)
 
     fake_gh = _FakeGitHub()
-    executor = MergeExecutor(store, fake_gh)
+    run_store = _FakeRunStore()
+    executor = MergeExecutor(store, fake_gh, run_store=run_store)
 
     outcome = await executor.execute(record.task_key, "reject", "user_123")
 
@@ -149,3 +181,4 @@ async def test_reject() -> None:
     assert updated.approver == "user_123"
     # 没有调 merge_pr
     assert len(fake_gh.merge_calls) == 0
+    assert run_store.records[-1].state == MergeState.REJECTED.value

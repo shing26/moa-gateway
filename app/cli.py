@@ -491,7 +491,7 @@ def cmd_delivery_view(args: argparse.Namespace) -> int:
 
     async def read() -> object:
         try:
-            return await asyncio.to_thread(store.view, run, merge_store)
+            return await store.reconcile(run, merge_store)
         finally:
             close = getattr(merge_store, "close", None)
             if close is not None:

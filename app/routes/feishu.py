@@ -16,13 +16,20 @@ from app.channels.feishu_auth import FeishuAuthConfig, FeishuTokenProvider
 from app.channels.feishu_event import parse_feishu_event
 from app.channels.feishu_signature import verify_verification_token
 from app.config import settings
-from app.deps import adapter, engine, merge_store, pipeline
+from app.deps import (
+    adapter,
+    delivery_run_store,
+    engine,
+    merge_store,
+    pipeline,
+)
 from app.middleware.auth import approver_gate_error, insecure_mode_enabled
 from app.middleware.request_logger import bind_trace, log_request
 from app.models.errors import ErrorCode
 from app.fsm.state_machine import Event as FsmEvent
 from app.models.events import MoAEvent, new_trace_id
 from app.pipeline import PipelineResult
+from apps.code_review_pipeline.delivery.audit import WalDeliveryAudit
 from apps.code_review_pipeline.merge_executor import MergeExecutor
 from apps.code_review_pipeline.routing.github_provider import build_github_client
 
@@ -638,7 +645,12 @@ async def _handle_merge_approval(
     """
     from apps.code_review_pipeline.task_audit import record_human_decision
 
-    executor = MergeExecutor(merge_store, build_github_client())
+    executor = MergeExecutor(
+        merge_store,
+        build_github_client(),
+        run_store=delivery_run_store,
+        audit=WalDeliveryAudit(),
+    )
     try:
         outcome = await executor.execute(hitl_id, action, operator_id)
     except Exception as exc:

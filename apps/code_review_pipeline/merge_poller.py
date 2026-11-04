@@ -63,9 +63,33 @@ class PollResult:
 class MergePoller:
     """轮询合并通道里所有非终态记录的 CI 状态。"""
 
-    def __init__(self, store: MergeStore, github: Any) -> None:
+    def __init__(
+        self,
+        store: MergeStore,
+        github: Any,
+        *,
+        run_store: Any = None,
+        audit: Any = None,
+    ) -> None:
         self._store = store
         self._github = github
+        self._run_store = run_store
+        self._audit = audit
+
+    async def _sync(self, record: MergeRecord) -> None:
+        """Mirror CI/merge progress into the delivery run snapshot.
+
+        A missing or unwritable run snapshot must not stop the poller from
+        advancing other merge records.
+        """
+        if self._run_store is None:
+            return
+        try:
+            await self._run_store.sync_from_merge(record, audit=self._audit)
+        except Exception:
+            logger.exception(
+                "failed to write merge state back for %s", record.task_key
+            )
 
     async def poll_once(self) -> PollResult:
         """轮询一次，返回需要发卡片的两类记录。
@@ -85,12 +109,13 @@ class MergePoller:
                 logger.warning(
                     "CI read failed for %s: %s", record.task_key, exc
                 )
-                self._store.transition(
+                updated = self._store.transition(
                     record.identity,
                     MergeAction.FAIL,
                     at=_now_iso(),
                     failure_reason=f"CI read failed: {exc}",
                 )
+                await self._sync(updated)
                 continue
 
             # 只有确定的结论才推进状态。pending / none 不是结论：
@@ -136,6 +161,7 @@ class MergePoller:
                     {"name": c.name, "url": c.url} for c in ci.failing
                 ),
             )
+            await self._sync(updated)
             if notify_approval:
                 approvals.append(updated)
                 logger.info("CI green for %s, approval card needed", record.task_key)

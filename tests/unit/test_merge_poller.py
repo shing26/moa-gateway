@@ -25,6 +25,14 @@ from apps.code_review_pipeline.routing.github_client import (
 )
 
 
+class _FakeRunStore:
+    def __init__(self) -> None:
+        self.records: list[MergeRecord] = []
+
+    async def sync_from_merge(self, record: MergeRecord, *, audit=None) -> None:
+        self.records.append(record)
+
+
 class _FakeGitHub:
     """可控 CI 结论的假 GitHub 客户端。"""
 
@@ -71,6 +79,24 @@ async def test_watching_to_awaiting_approval_when_ci_green() -> None:
     updated = store.get(record.identity)
     assert updated is not None
     assert updated.state == MergeState.AWAITING_APPROVAL.value
+
+
+@pytest.mark.asyncio
+async def test_ci_green_syncs_delivery_run_snapshot() -> None:
+    """CI green advances the merge record *and* the delivery run snapshot."""
+    store = MergeStore()
+    record = _make_record()
+    store.save(record)
+    run_store = _FakeRunStore()
+    poller = MergePoller(
+        store,
+        _FakeGitHub(CiStatus(state=CI_SUCCESS)),
+        run_store=run_store,
+    )
+
+    await poller.poll_once()
+
+    assert run_store.records[-1].state == MergeState.AWAITING_APPROVAL.value
 
 
 @pytest.mark.asyncio

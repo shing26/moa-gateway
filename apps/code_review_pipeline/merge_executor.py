@@ -43,9 +43,34 @@ def _parse_task_key(task_key: str) -> tuple[str, int, str]:
 
 
 class MergeExecutor:
-    def __init__(self, store: MergeStore, github: Any) -> None:
+    def __init__(
+        self,
+        store: MergeStore,
+        github: Any,
+        *,
+        run_store: Any = None,
+        audit: Any = None,
+    ) -> None:
         self._store = store
         self._github = github
+        self._run_store = run_store
+        self._audit = audit
+
+    async def _sync(self, record: MergeRecord) -> None:
+        """Mirror the merge state into the delivery run snapshot.
+
+        The merge is already committed at this point; a failed snapshot write
+        must not turn a successful approval into an error, so it is logged and
+        swallowed.  ``delivery view`` can always reconcile later.
+        """
+        if self._run_store is None:
+            return
+        try:
+            await self._run_store.sync_from_merge(record, audit=self._audit)
+        except Exception:
+            logger.exception(
+                "failed to write merge state back for %s", record.task_key
+            )
 
     async def execute(
         self, task_key: str, action: str, approver: str
@@ -61,22 +86,24 @@ class MergeExecutor:
             raise MergeNotFound(f"no merge record for {task_key!r}")
 
         if action == "reject":
-            self._store.transition(
+            updated = self._store.transition(
                 identity,
                 MergeAction.REJECT,
                 at=_now_iso(),
                 approver=approver,
             )
+            await self._sync(updated)
             logger.info("merge rejected by %s: %s", approver, task_key)
             return MergeOutcome(merged=False, status="rejected", message="已拒绝")
 
         # approve 路径
-        self._store.transition(
+        updated = self._store.transition(
             identity,
             MergeAction.APPROVE,
             at=_now_iso(),
             approver=approver,
         )
+        await self._sync(updated)
 
         repo = GitHubRepo.from_name(record.repo) if hasattr(GitHubRepo, 'from_name') else _repo_from_name(record.repo)
         pr_number = record.pr_number
@@ -86,12 +113,13 @@ class MergeExecutor:
             pr_info = await self._github.get_pr(repo, pr_number)
         except Exception as exc:
             logger.warning("get_pr failed for %s: %s", task_key, exc)
-            self._store.transition(
+            updated = self._store.transition(
                 identity,
                 MergeAction.FAIL,
                 at=_now_iso(),
                 failure_reason=f"get_pr failed: {exc}",
             )
+            await self._sync(updated)
             return MergeOutcome(merged=False, status="error", message=str(exc))
 
         mergeable = pr_info.get("mergeable")
@@ -99,31 +127,34 @@ class MergeExecutor:
         if mergeable is False or mergeable_state == "dirty":
             reason = f"PR is not mergeable (mergeable={mergeable}, state={mergeable_state})"
             logger.warning("merge blocked for %s: %s", task_key, reason)
-            self._store.transition(
+            updated = self._store.transition(
                 identity,
                 MergeAction.FAIL,
                 at=_now_iso(),
                 failure_reason=reason,
             )
+            await self._sync(updated)
             return MergeOutcome(merged=False, status="not_mergeable", message=reason)
 
         # 执行合并（sha 即乐观锁）
         outcome = await self._github.merge_pr(repo, pr_number, sha=record.head_sha)
         if outcome.merged:
-            self._store.transition(
+            updated = self._store.transition(
                 identity,
                 MergeAction.COMPLETE,
                 at=_now_iso(),
                 merged_sha=outcome.sha,
             )
+            await self._sync(updated)
             logger.info("merge completed for %s: %s", task_key, outcome.sha)
         else:
-            self._store.transition(
+            updated = self._store.transition(
                 identity,
                 MergeAction.FAIL,
                 at=_now_iso(),
                 failure_reason=outcome.message,
             )
+            await self._sync(updated)
             logger.warning("merge failed for %s: %s", task_key, outcome.message)
 
         return outcome
