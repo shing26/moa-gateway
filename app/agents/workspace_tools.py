@@ -536,8 +536,11 @@ def build_toolset(
         if not numbered:
             return f"(第 {start} 行起没有内容)" if start > 1 else "(空文件)"
         if has_more:
+            with target.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+                total_lines = sum(1 for _ in handle)
             numbered += (
-                f"\n…（已截断：返回 {len(picked)} 行；继续读请用 offset={last + 1}）"
+                f"\n…（已截断：返回 {len(picked)} 行，共 {total_lines} 行，还剩 {total_lines - last} 行；"
+                f"继续读请用 offset={last + 1}）"
             )
         return numbered
 
