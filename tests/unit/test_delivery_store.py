@@ -404,6 +404,76 @@ async def test_sync_from_merge_never_reopens_terminal_run(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_sync_from_merge_folds_needs_human_into_merged(
+    monkeypatch, tmp_path: Path
+) -> None:
+    store = DeliveryRunStore(tmp_path)
+    merged = _merge_record(state=MergeState.MERGED.value, merged_sha="c" * 40)
+    boom = "boom"
+    failure = FailureInfo(FailureCode.INFRA_ERROR, boom)
+    run = replace(
+        _pushed_run(state=DeliveryRunState.NEEDS_HUMAN),
+        merge=merged,
+        failure=failure,
+    )
+    await store.save(run)
+
+    entries = []
+
+    async def capture(entry):
+        entries.append(entry)
+
+    monkeypatch.setattr("apps.code_review_pipeline.delivery.audit.record_audit", capture)
+    audit = WalDeliveryAudit()
+
+    synced = await store.sync(run, merged, audit=audit)
+
+    assert synced.state is DeliveryRunState.MERGED
+    assert synced.failure is failure
+    assert synced.merge == merged
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.extra["action"] == "merge_sync"
+    assert entry.extra["merge_state"] == "merged"
+    assert entry.extra["pr"] == merged.task_key
+    assert entry.extra["merged_sha"] == merged.merged_sha
+    assert entry.extra["folded_from"] == "needs_human"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state",
+    [
+        DeliveryRunState.REJECTED,
+        DeliveryRunState.FAILED,
+        DeliveryRunState.BUDGET_EXHAUSTED,
+    ],
+)
+async def test_sync_from_merge_keeps_terminal_run_unchanged_when_merged(
+    monkeypatch, tmp_path: Path, state: DeliveryRunState
+) -> None:
+    store = DeliveryRunStore(tmp_path)
+    merged = _merge_record(state=MergeState.MERGED.value, merged_sha="c" * 40)
+    run = replace(_pushed_run(state=state), merge=merged)
+    await store.save(run)
+
+    entries = []
+
+    async def capture(entry):
+        entries.append(entry)
+
+    monkeypatch.setattr("apps.code_review_pipeline.delivery.audit.record_audit", capture)
+    audit = WalDeliveryAudit()
+
+    synced = await store.sync(run, merged, audit=audit)
+
+    assert synced is run
+    assert synced.state is state
+    assert synced.merge == merged
+    assert entries == []
+
+
+@pytest.mark.asyncio
 async def test_reconcile_persists_latest_merge_record(tmp_path: Path) -> None:
     store = DeliveryRunStore(tmp_path)
     run = _pushed_run()
