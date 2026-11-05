@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import tempfile
 from dataclasses import dataclass
@@ -250,6 +251,67 @@ class GitHubClient:
         resp = await self._client.get(f"/repos/{repo.owner}/{repo.name}/pulls/{pr_number}")
         resp.raise_for_status()
         return dict(resp.json())
+
+    async def get_authenticated_login(self) -> str:
+        """token 对应的登录名。凭证无效时正文是 GitHub 的原话。"""
+        resp = await self._client.get("/user")
+        _raise_github_error(resp, "读取当前身份")
+        return str(dict(resp.json()).get("login") or "")
+
+    async def get_repo(self, repo: GitHubRepo) -> dict[str, Any]:
+        resp = await self._client.get(f"/repos/{repo.owner}/{repo.name}")
+        _raise_github_error(resp, f"读取仓库 {repo.owner}/{repo.name}")
+        return dict(resp.json())
+
+    async def get_branch_sha(self, repo: GitHubRepo, branch: str) -> str | None:
+        """分支头 sha；分支不存在返回 ``None``——404 在这里是答案，不是错误。"""
+        resp = await self._client.get(
+            f"/repos/{repo.owner}/{repo.name}/git/ref/heads/{branch}"
+        )
+        if resp.status_code == 404:
+            return None
+        _raise_github_error(resp, f"读取分支 {branch}")
+        return str(dict(resp.json()).get("object", {}).get("sha") or "")
+
+    async def get_commit(self, repo: GitHubRepo, sha: str) -> dict[str, Any]:
+        resp = await self._client.get(
+            f"/repos/{repo.owner}/{repo.name}/git/commits/{sha}"
+        )
+        _raise_github_error(resp, f"读取 commit {sha}")
+        return dict(resp.json())
+
+    async def probe_workflow_write(self, repo: GitHubRepo, *, base_tree: str) -> None:
+        """用一个**不被任何 ref 引用**的 tree 试探能不能改 workflow 文件。
+
+        GitHub 只在 tree 里出现 ``.github/workflows/`` 下的新内容时才检查
+        Workflows 写权限；内容没变就一律放行，所以离线无法判断，只能真的建一个
+        tree。这个 tree 不被 commit 或 ref 引用，仓库里看不到任何东西，GitHub
+        会自行回收未引用对象。
+
+        被拒时抛 ``RuntimeError``，正文是 GitHub 的原话加上缺哪项权限。
+        """
+        path = ".github/workflows/.moa-preflight-probe.yml"
+        blob = await self._client.post(
+            f"/repos/{repo.owner}/{repo.name}/git/blobs",
+            json={
+                "content": base64.b64encode(b"moa preflight probe\n").decode("ascii"),
+                "encoding": "base64",
+            },
+        )
+        _raise_github_error(blob, "创建预检 blob")
+        blob_sha = str(dict(blob.json()).get("sha") or "")
+        tree = await self._client.post(
+            f"/repos/{repo.owner}/{repo.name}/git/trees",
+            json={
+                "base_tree": base_tree,
+                "tree": [
+                    {"path": path, "mode": "100644", "type": "blob", "sha": blob_sha}
+                ],
+            },
+        )
+        _raise_github_error(
+            tree, "创建预检 tree", hint=_workflow_scope_hint([{"path": path}])
+        )
 
     async def download_archive(self, repo: GitHubRepo, ref: str, dest: Path) -> None:
         """下载某个 commit 的 tarball 并解压到 ``dest``。
