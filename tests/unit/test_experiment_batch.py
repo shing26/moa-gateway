@@ -74,6 +74,14 @@ class ConcurrencyProbeExecutor:
         self.active = 0
         self.max_active = 0
         self.starts: list[float] = []
+        # 记录"真正开跑"的时刻：gate + pacer 都已通过。execute 的进入时刻会被
+        # 繁忙的事件循环推迟——2026-11-05 CI 上 rate-limit 测试因此 flake
+        # （pacer 明明按 0.2s 节流了，但第三个 execute 进入时循环被挤住，
+        # 观测到的 gap 掉到 0.11s）。速度承诺由 pacer 负责，观测也要贴着它。
+        self._pacer: object | None = None
+
+    def attach_pacer(self, pacer) -> None:
+        self._pacer = pacer
 
     async def execute(self, spec, trial_index: int):
         loop = asyncio.get_running_loop()
@@ -353,6 +361,9 @@ async def test_batch_enforces_trial_start_rate_limit(tmp_path) -> None:
         for earlier, later in zip(executor.starts, executor.starts[1:])
     ]
     assert len(gaps) == 2
+    # 300/min = 每 0.2s 一次。下限给 0.15s 而不是 0.2s：事件循环繁忙时 sleep
+    # 的唤醒会略迟，但不会早——下限测的是"pacer 有没有节流"，不是精度。
+    # CI 曾因 execute 进入时刻被繁忙循环推迟而观测到 0.11s 的假 gap。
     assert all(gap >= 0.15 for gap in gaps)
 
 
