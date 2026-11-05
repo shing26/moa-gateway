@@ -158,10 +158,13 @@ class DeliveryFlow:
                         "action": "preflight_blocked",
                         "code": FailureCode.PREFLIGHT_FAILED.value,
                         "message": message,
+                        "preflight": report.to_dict(),
                     },
                 )
                 return updated
-        run = await self._move(run, DeliveryRunState.IMPLEMENTING, "start")
+        run = await self._move(
+            run, DeliveryRunState.IMPLEMENTING, "start", extra={"preflight": report.to_dict()}
+        ) if self._github is not None else await self._move(run, DeliveryRunState.IMPLEMENTING, "start")
 
         feedback = ""
         revisions = 0
@@ -403,16 +406,20 @@ class DeliveryFlow:
         run: DeliveryRun,
         target: DeliveryRunState,
         detail: str,
+        extra: dict[str, Any] | None = None,
     ) -> DeliveryRun:
         assert_transition(run.state, target)
         previous = run.state
         updated = replace(run, state=target, updated_at=self._clock())
         await self._recorder.save(updated)
+        audit_detail = {"action": detail}
+        if extra:
+            audit_detail.update(extra)
         await self._audit.record(
             run=updated,
             previous=previous,
             current=target,
-            detail={"action": detail},
+            detail=audit_detail,
         )
         return updated
 

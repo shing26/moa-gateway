@@ -191,6 +191,7 @@ class FakeAudit:
     def __init__(self, events: list[str]) -> None:
         self._events = events
         self.transitions: list[tuple[str, str]] = []
+        self.details: list[dict[str, object]] = []
 
     async def record(
         self,
@@ -207,6 +208,7 @@ class FakeAudit:
                 current.value,
             )
         )
+        self.details.append(detail)
 
 
 def _flow(
@@ -286,6 +288,9 @@ async def test_s0_happy_path_reaches_waiting_ci(tmp_path: Path) -> None:
         ("ready_for_push_approval", "pushing"),
         ("pushing", "waiting_ci"),
     ]
+    # 验证没有 github 时，preparing -> implementing 的 detail 只有 action 键
+    detail = audit.details[1]
+    assert list(detail.keys()) == ["action"]
 
 
 class _FakePreflightGithub:
@@ -328,6 +333,10 @@ async def test_blocked_preflight_terminates_before_any_implementer_attempt(
     assert implementer.feedback == []  # 没有进入实现
     assert ("preparing", "needs_human") in audit.transitions
     assert ("preparing", "implementing") not in audit.transitions
+    # 验证 audit detail 包含 preflight 报告且 push 状态为 blocked
+    detail = audit.details[audit.transitions.index(("preparing", "needs_human"))]
+    assert "preflight" in detail
+    assert any(c["name"] == "push" and c["status"] == "blocked" for c in detail["preflight"]["checks"])
     assert recorder.runs[-1] == run
 
 
@@ -356,6 +365,10 @@ async def test_passing_preflight_leaves_the_flow_unchanged(tmp_path: Path) -> No
     assert publisher.calls == 1
     # 开头多不出新迁移：preflight 通过不产生额外状态跳转。
     assert audit.transitions[:2] == [("", "preparing"), ("preparing", "implementing")]
+    # 验证 preparing -> implementing 的 detail 包含 preflight 报告
+    detail = audit.details[1]
+    assert "preflight" in detail
+    assert "action" in detail and detail["action"] == "start"
 
 
 @pytest.mark.asyncio
