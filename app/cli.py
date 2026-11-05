@@ -502,6 +502,58 @@ def cmd_delivery_view(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_delivery_preflight(args: argparse.Namespace) -> int:
+    """开工前自检。
+
+    两次真实交付（issue #43）都是实现+验证全部跑完，才在推送那一步被 403 拒掉；
+    这条命令把那组判断提到开工之前。默认只读，``--probe-workflows`` 才会为了
+    验证 Workflows 写权限建一个不被任何 ref 引用的 tree。
+    """
+    import json as _json
+
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.preflight import run_preflight
+    from apps.code_review_pipeline.merge_store import build_merge_store
+    from apps.code_review_pipeline.routing.github_provider import build_github_client
+
+    if not settings.github_token:
+        print("GITHUB_TOKEN 未配置", file=sys.stderr)
+        return 2
+
+    github = build_github_client()
+    merge_store = None
+    try:
+        merge_store = build_merge_store()
+    except Exception as exc:  # noqa: BLE001 - 自检要把失败说出来，不是崩掉
+        print(f"MergeStore 初始化失败: {exc}", file=sys.stderr)
+
+    async def execute():
+        try:
+            return await run_preflight(
+                args.repo,
+                github=github,
+                base_branch=args.base_branch,
+                merge_store=merge_store,
+                probe_workflows=args.probe_workflows,
+            )
+        finally:
+            close = getattr(github, "aclose", None)
+            if close is not None:
+                await close()
+            if merge_store is not None:
+                store_close = getattr(merge_store, "close", None)
+                if store_close is not None:
+                    await store_close()
+
+    report = asyncio.run(execute())
+    if args.json:
+        print(_json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        for check in report.checks:
+            print(f"{check.status:<8} {check.name:<12} {check.detail}")
+    return 0 if report.ok else 1
+
+
 def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
     """Collect and diagnose failed CI evidence without writing to GitHub."""
     import httpx
@@ -677,6 +729,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     delivery_view.add_argument("--run-id", required=True)
     delivery_view.set_defaults(func=cmd_delivery_view)
+
+    delivery_preflight = delivery_sub.add_parser(
+        "preflight",
+        help="开工前自检：身份、仓库写权限、base 分支、合并通道、workflow 写权限",
+    )
+    delivery_preflight.add_argument("--repo", required=True)
+    delivery_preflight.add_argument("--base-branch", default="main")
+    delivery_preflight.add_argument(
+        "--probe-workflows",
+        action="store_true",
+        help="建一个不被任何 ref 引用的 tree 来验证 Workflows 写权限",
+    )
+    delivery_preflight.add_argument("--json", action="store_true")
+    delivery_preflight.set_defaults(func=cmd_delivery_preflight)
 
     delivery_ci_triage = delivery_sub.add_parser(
         "ci-triage",
