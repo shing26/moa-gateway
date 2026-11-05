@@ -415,6 +415,45 @@ def test_parse_selector_accepts_known_flags_and_relative_paths() -> None:
     assert tokens == ["tests/unit/test_x.py::test_y", "-k", "login", "-x"]
 
 
+def test_parse_selector_keeps_a_quoted_expression_in_one_token() -> None:
+    """``-k "a or b"`` 必须是一个表达式，不是一个悬空的 ``or``。
+
+    回归（2026-11-05，issue #50 交付）：按空白切分会把表达式拆碎，pytest
+    回 "file or directory not found: or"，模型看不懂，连着重试了 8 次。
+    """
+    tokens, reason = parse_selector('tests/unit/test_x.py -k "needs_human or never_reopens"')
+
+    assert reason is None
+    assert tokens == [
+        "tests/unit/test_x.py",
+        "-k",
+        "needs_human or never_reopens",
+    ]
+
+
+def test_parse_selector_keeps_single_quoted_expression() -> None:
+    tokens, reason = parse_selector("tests/unit/test_x.py -k 'needs_human'")
+
+    assert reason is None
+    assert tokens == ["tests/unit/test_x.py", "-k", "needs_human"]
+
+
+def test_parse_selector_keeps_windows_backslashes() -> None:
+    """引号处理不能顺手把反斜杠当转义——``shlex`` 的 POSIX 模式会。"""
+    tokens, reason = parse_selector(r"tests\unit\test_x.py -k login")
+
+    assert reason is None
+    assert tokens == [r"tests\unit\test_x.py", "-k", "login"]
+
+
+def test_parse_selector_rejects_unclosed_quote() -> None:
+    tokens, reason = parse_selector('tests/unit/test_x.py -k "needs_human')
+
+    assert tokens == []
+    assert reason is not None
+    assert "引号" in reason
+
+
 def test_parse_selector_rejects_unknown_flag() -> None:
     tokens, reason = parse_selector("--import-mode=importlib")
     assert tokens == []

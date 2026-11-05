@@ -233,17 +233,59 @@ def create_verification_workspace(root: Path) -> tuple[Path, Path]:
     return target, parent
 
 
+def _split_selector_tokens(text: str) -> list[str]:
+    """按空白切分，但引号内的空白留在一个 token 里。
+
+    ``-k "needs_human or never_reopens"`` 必须变成 ``-k`` 与
+    ``needs_human or never_reopens`` 两个 token。``str.split()`` 会切成
+    ``-k`` / ``"needs_human`` / ``or`` / ``never_reopens"``，pytest 于是把
+    ``or`` 当成路径，回一句 "file or directory not found: or"——报错说不到
+    点子上，模型只好反复重试同一条命令。
+
+    不用 ``shlex``：POSIX 模式会把 Windows 路径里的反斜杠当转义吃掉。
+    """
+    tokens: list[str] = []
+    current: list[str] = []
+    quote = ""
+    for char in text:
+        if quote:
+            if char == quote:
+                quote = ""
+            else:
+                current.append(char)
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            continue
+        if char.isspace():
+            if current:
+                tokens.append("".join(current))
+                current = []
+            continue
+        current.append(char)
+    if quote:
+        raise ValueError("unclosed quote")
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
 def parse_selector(selector: str) -> tuple[list[str], str | None]:
     """把 ``selector`` 拆成可安全追加的参数。返回 ``(tokens, 拒绝原因)``。
 
     基底命令不可变——这是"不允许换可执行文件"的结构性保证：tokens 只会被
-    **追加**在任务定义好的 argv 后面。
+    **追加**在任务定义好的 argv 后面。引号只用于把带空白的表达式（典型是
+    ``-k "a or b"``）合成一个参数，引号本身不进 argv。
     """
     text = (selector or "").strip()
     if not text:
         return [], None
+    try:
+        raw_tokens = _split_selector_tokens(text)
+    except ValueError:
+        return [], "筛选参数里的引号未闭合"
     tokens: list[str] = []
-    for token in text.split():
+    for token in raw_tokens:
         if token.startswith("-"):
             flag = token.split("=", 1)[0]
             if flag not in _ALLOWED_SELECTOR_FLAGS:
