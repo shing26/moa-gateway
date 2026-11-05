@@ -168,7 +168,26 @@ class MergeOutcome:
     sha: str = ""
 
 
-def _raise_github_error(resp: httpx.Response, action: str) -> None:
+def _workflow_scope_hint(entries: list[dict[str, Any]]) -> str:
+    """403 且改动包含 workflow 文件时，把真正缺的那项权限说出来。
+
+    2026-11-05 的交付在这里连撞两次：token 的 Contents 是 write，blob 也建得出来，
+    唯独 ``.github/workflows/ci.yml`` 一进 tree 就 403 —— 细粒度 PAT 还需要单独
+    「Workflows: Read and write」，classic token 需要 ``workflow`` scope。GitHub
+    的报错只说 "Resource not accessible"，不说缺哪一项。
+    """
+    if not any(
+        str(entry.get("path", "")).startswith(".github/workflows/")
+        for entry in entries
+    ):
+        return ""
+    return (
+        "本次改动包含 .github/workflows/ 下的文件：fine-grained PAT 需要 "
+        "Workflows: Read and write，classic token 需要 workflow scope"
+    )
+
+
+def _raise_github_error(resp: httpx.Response, action: str, *, hint: str = "") -> None:
     """把裸 ``raise_for_status`` 换成带 GitHub 原话的失败。
 
     2026-11-05 的交付在 ``POST /git/trees`` 上收到 403，异常里只有 URL——没有
@@ -178,8 +197,10 @@ def _raise_github_error(resp: httpx.Response, action: str) -> None:
     if not resp.is_error:
         return
     message = _gh_message(resp)
+    suffix = f"；{hint}" if hint else ""
     raise RuntimeError(
-        f"GitHub 拒绝{action}（HTTP {resp.status_code}）: {message or '响应无正文'}"
+        f"GitHub 拒绝{action}（HTTP {resp.status_code}）: "
+        f"{message or '响应无正文'}{suffix}"
     )
 
 
@@ -547,14 +568,14 @@ class GitHubClient:
             f"/repos/{repo.owner}/{repo.name}/git/trees",
             json={"base_tree": base_tree, "tree": entries},
         )
-        _raise_github_error(tree_resp, "创建 tree")
+        _raise_github_error(tree_resp, "创建 tree", hint=_workflow_scope_hint(entries))
         tree_sha = str(dict(tree_resp.json()).get("sha") or "")
 
         commit_resp = await self._client.post(
             f"/repos/{repo.owner}/{repo.name}/git/commits",
             json={"message": message, "tree": tree_sha, "parents": [base_sha]},
         )
-        _raise_github_error(commit_resp, "创建 commit")
+        _raise_github_error(commit_resp, "创建 commit", hint=_workflow_scope_hint(entries))
         commit_sha = str(dict(commit_resp.json()).get("sha") or "")
 
         # 分支 ref 推进到新 commit（非 force：GitHub 要求 fast-forward）
