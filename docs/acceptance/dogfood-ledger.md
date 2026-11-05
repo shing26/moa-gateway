@@ -61,5 +61,13 @@
 > 37 行 / 约 3%，任何阈值都抓不住，改为把代价摊开给模型与人审）。注释与行为不一致
 > 的收尾见 PR #55。
 
+| 7 | 2026-11-05 | dlv-b5a92fcc（40 步 / 405,915 tok，0 写入）、dlv-e2e63201（40 步 / 354,564 tok，8 处写入 + 47 测试通过后差测试编写）、dlv-039c4e7f（16 步假完成，no_changes）、dlv-18bd7a53（60 步 / 576,576 tok，无限重读 0 写入）（issue #59） | moa-gateway / `delivery run` 开工前自动跑 preflight，blocked 即终止（goal：issue #59，2026-11-05 开工前记录；中途按轨迹归因 descope 一次，见 issue 评论） | 任务级 `python -m pytest tests/unit/test_delivery_cli.py tests/unit/test_delivery_preflight.py tests/unit/test_delivery_flow.py -q`（第 2 次尝试中 47 passed） | 4 次尝试未成，**负结论**：非门禁拦截、非环境缺陷（本轮无工具层缺陷），是单 implementer 在横跨状态机/审计/CLI 的多约束任务上行为方差过大——四次失败形状各异（上下文烧尽 / 差测试步数 / 假完成 / 无限重读），而第 2 次已证明任务本身可完成。goal 转人工 | 否（未完成；能力边界如实记录，goal 未关闭） |
+
+
+> 2026-11-05（第 7 行）：第一个"重跑也不指望变好"的负样本。第 2 行的三次失败
+> 后人接管完成了一半；这一次四个失败形状互不相同、且第 2 次证明可完成，说明
+> 约束不在任务而在模型稳定性。处理方式照 ADR-033：负结论入账，goal 转人工，
+> 不加预算硬凑（第 4 次已是 60 步 / 700k 档，仍然 0 写入——预算不是约束）。
+
 > 每行交付完成后补齐 run_id 与结果；失败与 NEEDS_HUMAN 也如实记录。
 
