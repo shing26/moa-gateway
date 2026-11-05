@@ -50,5 +50,16 @@
 > ② 推送成功后本机 PostgreSQL 5433 停机，合并登记失败（PR 已真实存在），按 `recover` 路径补登记、
 > 没有重推。因此该运行的记录停在 `needs_human`，而合并通道记录为 `merged`（`7c8fa231`）。
 
+| 6 | 2026-11-05 | dlv-569c901db52746ea88811e91cd10674f（PR #52，merge `10f21243`） | moa-gateway / 交付运行在 recover 后与合并通道对账：`needs_human` 可折叠到 `merged`（goal：issue #50，2026-11-05 开工前记录） | 任务级 `python -m pytest tests/unit/test_delivery_store.py tests/unit/test_delivery_state.py -q`（33 passed，基线 29 + 新增 4）；CI / test（真门禁，PR #52 绿） | 已合并（PR #52，merge `10f21243`）。3 次运行：第 1 次 40 步预算耗尽（重新读 500 行测试文件，未写到测试）；第 2 次 70 步耗尽——`run_tests` 的 `-k "a or b"` 被按空白切碎、pytest 报 "file or directory not found: or"，8 步耗在同一条命令（→ PR #51 修引号切分）；第 3 次 36 calls / 253,914 tok 通过，人审推送（shing26，TTY）+ 人审合并（shing26，MergeExecutor） | 是 |
+
+> 2026-11-05（第 6 行）：这个 goal 修的正是第 5 行留下的矛盾——`needs_human` 的运行
+> 不能前进到 `merged`。交付本身按同一治理链路完成，落地后第 5 行那种"运行记录停在
+> needs_human、合并通道记录为 merged"的运行可以用折叠对账：状态前进、`failure`
+> 原样保留、审计带 `folded_from`。附带产出：PR #53（交付前能力自检，五项检查
+> ok/warn/blocked，把 issue #43 两次"实现+验证全跑完才被 403 拒"的最贵诊断提前）；
+> PR #54（`write_file` 整文件覆盖后在观察结果里报告删除了多少行——第 5 行那次只差
+> 37 行 / 约 3%，任何阈值都抓不住，改为把代价摊开给模型与人审）。注释与行为不一致
+> 的收尾见 PR #55。
+
 > 每行交付完成后补齐 run_id 与结果；失败与 NEEDS_HUMAN 也如实记录。
 
