@@ -17,6 +17,7 @@ import re
 # Fixed git argv; never shell-expanded.
 import subprocess  # nosec B404
 import tempfile
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -356,6 +357,46 @@ def _check_replacement(target: Path, display: str, arguments: dict) -> str | Non
     return None
 
 
+_MAX_SUMMARY_BYTES = 2_000_000
+
+
+def _existing_lines(target: Path) -> list[str] | None:
+    """覆盖前把原文件读成行；新文件、读不了或过大时返回 ``None``。"""
+    try:
+        if not target.is_file() or target.stat().st_size > _MAX_SUMMARY_BYTES:
+            return None
+        with target.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+            return handle.read().replace("\r\n", "\n").splitlines()
+    except OSError:
+        return None
+
+
+def _overwrite_summary(before: list[str] | None, body: str) -> str:
+    """整文件覆盖时，把"删掉了多少行"直接说给模型听。
+
+    真实轨迹（2026-11-05，第 5 行交付）：模型用 ``write_file`` 重写 README，把
+    没打算改的链接、徽章参数与事实一起改掉；验证脚本只断言了新增的那几句，于是
+    一路绿灯走到人审。差别只有 37 行——占全文约 3%，任何相似度阈值都抓不住。
+    所以这里不判对错，只把事实摊开：覆盖前多少行、覆盖后多少行、多少行真的
+    消失了。按行多重集比较，不做重排敏感的 diff（大文件上 SequenceMatcher 是
+    平方复杂度）。
+    """
+    if before is None:
+        return ""
+    after = body.splitlines()
+    if before == after:
+        return "；整文件覆盖：内容未变"
+    old = Counter(before)
+    new = Counter(after)
+    removed = sum((old - new).values())
+    added = sum((new - old).values())
+    hint = "；只想改其中几行时用 replace_in_file" if removed else ""
+    return (
+        f"；整文件覆盖：原 {len(before)} 行 → 新 {len(after)} 行，"
+        f"删除 {removed} 行、新增 {added} 行{hint}"
+    )
+
+
 def _check_overwrite(target: Path, display: str) -> str | None:
     """拒绝用 ``write_file`` 整体覆盖大文档。
 
@@ -504,12 +545,13 @@ def build_toolset(
         target = _resolved_for_write(root, path)
         target.parent.mkdir(parents=True, exist_ok=True)
         body = content if content.endswith("\n") else content + "\n"
+        before = _existing_lines(target)
         # newline="" 是必须的：text 模式默认把 \n 翻译成 os.linesep，在 Windows 上
         # 会把每行都变成 CRLF，于是"改了一个字符"在 git diff 里显示成整个文件重写
         # ——patch 是判决的证据，不能被换行翻译污染。
         with target.open("w", encoding="utf-8", newline="\n") as handle:
             handle.write(body)
-        return f"已写入 {path}（{len(content)} 字符）"
+        return f"已写入 {path}（{len(content)} 字符）{_overwrite_summary(before, body)}"
 
     async def replace_in_file(
         path: str, old: str, new: str, replace_all: bool = False
