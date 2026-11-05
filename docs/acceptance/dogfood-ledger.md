@@ -77,3 +77,15 @@
 
 > 每行交付完成后补齐 run_id 与结果；失败与 NEEDS_HUMAN 也如实记录。
 
+| 8 | 2026-11-06 | dlv-b44faac50e8c46799dd883e33592740d（PR #65，merge `55b94869`） | moa-gateway / preflight report 进审计 detail：blocked 路径加键、放行路径经 `_move` 的 `extra` 参数（goal：issue #62，2026-11-05 开工前记录；两次"只读不写"端点退化后的第三次尝试） | 任务级 `python -m pytest tests/unit/test_delivery_cli.py tests/unit/test_delivery_preflight.py tests/unit/test_delivery_flow.py -q`（exit 0）；CI / test（真门禁，PR #65 绿，2m12s） | 已合并（PR #65，merge `55b94869`）。1 次运行：23 步 / 22 calls / 167,821 tok / 530s，无修订轮一次通过；推送与合并审批均由 shing26 完成（TTY / MergeExecutor） | 是 |
+
+> 2026-11-06（第 8 行 + 端点挑选）：第 7 行注释记的端点退化有了定位结果。对
+> build.nvidia.com 免费模型做行为探测（模拟 harness 消息流 + tools schema，
+> 观察截断翻页行为）：53 个候选多数 404（Function not found for account），
+> 可用的里 reasoning 系（mistral-large、nemotron、deepseek 等）在看到截断观察
+> 时倾向继续翻页而非写——第 4 次尝试的 mistral-large 已实证能发合法 tool_calls
+> 但 0 写入。**gemma-4-31b-it 是唯一在截断观察下直接发写操作的模型**，换它后
+> 一次通过（此前同任务两次 0 写入耗尽）。经验：端点模型列表 ≠ 可用；模型行为
+> 差异在"读够了吗"这个判断上，不在工具调用能力上。台账推进按用户指示不再等
+> 每周两个的节奏。
+
