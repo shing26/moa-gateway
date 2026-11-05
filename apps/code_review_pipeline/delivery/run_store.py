@@ -82,7 +82,11 @@ def _merge_target(
         logger.warning("unknown merge state %r; leaving run unchanged", merge_state)
         return None
     target = _MERGE_TO_RUN_STATE.get(state)
-    if target is None or current in _TERMINAL_RUN_STATES:
+    if target is None:
+        return None
+    if current in _TERMINAL_RUN_STATES and not (
+        current is DeliveryRunState.NEEDS_HUMAN and state is MergeState.MERGED
+    ):
         return None
     if _RUN_STATE_ORDER.get(target, 0) < _RUN_STATE_ORDER.get(current, 0):
         return None
@@ -187,7 +191,10 @@ class DeliveryRunStore:
                 run.run_id,
             )
             return run
-        if run.state in _TERMINAL_RUN_STATES:
+        if run.state in _TERMINAL_RUN_STATES and not (
+            run.state is DeliveryRunState.NEEDS_HUMAN
+            and record.state == MergeState.MERGED.value
+        ):
             # A terminal run snapshot is immutable.  The merge channel keeps
             # the live record; a late/out-of-order poll must not overwrite it.
             return run
@@ -210,16 +217,19 @@ class DeliveryRunStore:
         )
         await self.save(updated)
         if audit is not None and updated.state is not run.state:
+            detail = {
+                "action": "merge_sync",
+                "merge_state": record.state,
+                "pr": record.task_key,
+                "merged_sha": record.merged_sha,
+            }
+            if run.state is DeliveryRunState.NEEDS_HUMAN:
+                detail["folded_from"] = run.state
             await audit.record(
                 run=updated,
                 previous=run.state,
                 current=updated.state,
-                detail={
-                    "action": "merge_sync",
-                    "merge_state": record.state,
-                    "pr": record.task_key,
-                    "merged_sha": record.merged_sha,
-                },
+                detail=detail,
             )
         return updated
 
