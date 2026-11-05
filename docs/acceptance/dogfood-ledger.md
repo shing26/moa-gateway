@@ -89,3 +89,14 @@
 > 差异在"读够了吗"这个判断上，不在工具调用能力上。台账推进按用户指示不再等
 > 每周两个的节奏。
 
+| 9 | 2026-11-06 | dlv-64c14f70（infra：端点瞬时过载，0 tok）、dlv-bfd15f75（15 步 / 128,446 tok，4 处写入 + 旧范围验证 exit 0，**未推送——人审闸门拦截**）、dlv-cebae2b20b24454a9ee3021160da0de3（PR #68，merge `8ef7018b`） | moa-gateway / read_file 截断提示带总行数与剩余行数，让模型能判断再翻一页值不值（goal：issue #67，2026-11-06 开工前记录） | 任务级 `python -m pytest tests/unit/test_bench_tools.py -q`（66 passed）；CI / test（真门禁，PR #68 绿，2m6s） | 已合并（PR #68，merge `8ef7018b`）。成行运行 1 次：15 步 / 14 calls / 128,526 tok，4 处写入；推送与合并审批均由 shing26 完成（TTY / MergeExecutor） | 是 |
+
+> 2026-11-06（第 9 行）：goal 直接来自第 7 行负结论的归因——截断提示只说"继续读
+> 请用 offset=N"不带总行数，模型无从判断"再翻一页值不值"，默认再翻；这是对
+> 无限重读形状的最小工具侧回应。三次启动两个教训：
+> ① launcher 的验证命令是上一单遗留（delivery 测试），第二次重跑的 bundle
+> 轨迹完美但验证不覆盖改动文件——**推送审批闸门前被人拦下未推**，验证范围
+> 错误在这一层被兜住（闸门设计按预期工作）；修正 launcher 后第三次通过。
+> ② 端点瞬时过载（Service temporarily overloaded）起步即失败，属 infra，
+> 不构成失败形状。交付本身一次通过：15 步 / 4 处写入，gemma-4-31b-it。
+
