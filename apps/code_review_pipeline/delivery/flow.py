@@ -5,6 +5,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from apps.code_review_pipeline.delivery.models import (
     SCHEMA_VERSION,
@@ -71,6 +72,7 @@ class DeliveryFlow:
         audit: DeliveryAuditPort,
         clock: Callable[[], datetime] = _utcnow,
         new_run_id: Callable[[], str] = _new_run_id,
+        github: Any = None,
     ) -> None:
         if policy.topology != "single":
             raise ValueError(
@@ -87,6 +89,10 @@ class DeliveryFlow:
         self._audit = audit
         self._clock = clock
         self._new_run_id = new_run_id
+        # 开工前自检用的 GitHub 客户端。None = 不自检：既有调用方与测试全部
+        # 保持原行为。这是 preflight 进 run 的第一半（issue #59）；把 report
+        # 写进审计 detail 是第二半，刻意不在这做。
+        self._github = github
 
     async def run(self, request: DeliveryRequest) -> DeliveryRun:
         now = self._clock()
@@ -115,6 +121,46 @@ class DeliveryFlow:
             current=DeliveryRunState.PREPARING,
             detail={"action": "created"},
         )
+        if self._github is not None:
+            # 开工前自检（issue #59 第一半）：blocked 就终止，一个实现步都不花。
+            # issue #43 的两次交付都是实现+验证全跑完才在推送时撞 403——诊断
+            # 落在最贵的一步之后。这里只读（probe_workflows=False）；workflow
+            # 写权限探测是唯一的写操作，保持为手动命令。
+            from apps.code_review_pipeline.delivery.preflight import (
+                MERGE_STORE_UNCHECKED,
+                run_preflight,
+            )
+
+            report = await run_preflight(
+                request.repo,
+                github=self._github,
+                base_branch=request.base_branch,
+                # flow 不持有 MergeStore（它在发布路径的 adapter 上）；显式
+                # 声明"这项未查"而不是让它误报 blocked。
+                merge_store=MERGE_STORE_UNCHECKED,
+                probe_workflows=False,
+            )
+            blocked = [c for c in report.checks if c.status == "blocked"]
+            if blocked:
+                message = "; ".join(f"{c.name}: {c.detail}" for c in blocked)
+                updated = replace(
+                    run,
+                    state=DeliveryRunState.NEEDS_HUMAN,
+                    failure=FailureInfo(FailureCode.PREFLIGHT_FAILED, message),
+                    updated_at=self._clock(),
+                )
+                await self._recorder.save(updated)
+                await self._audit.record(
+                    run=updated,
+                    previous=DeliveryRunState.PREPARING,
+                    current=DeliveryRunState.NEEDS_HUMAN,
+                    detail={
+                        "action": "preflight_blocked",
+                        "code": FailureCode.PREFLIGHT_FAILED.value,
+                        "message": message,
+                    },
+                )
+                return updated
         run = await self._move(run, DeliveryRunState.IMPLEMENTING, "start")
 
         feedback = ""

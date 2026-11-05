@@ -258,6 +258,7 @@ class FailureCode(str, Enum):
     MERGE_NOT_MERGEABLE = "merge_not_mergeable"
     MERGE_FAILED = "merge_failed"
     INFRA_ERROR = "infra_error"
+    PREFLIGHT_FAILED = "preflight_failed"
 
 
 @dataclass(frozen=True)

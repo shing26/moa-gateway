@@ -461,6 +461,7 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
                     publisher=adapter,
                     recorder=DeliveryRunStore(settings.delivery_run_record_dir),
                     audit=WalDeliveryAudit(),
+                    github=github,
                 )
                 return await flow.run(request)
         finally:

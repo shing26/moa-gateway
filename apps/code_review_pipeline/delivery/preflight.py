@@ -158,7 +158,19 @@ async def _check_workflows(
     )
 
 
+#: flow 层调用 preflight 时的哨兵： DeliveryFlow 不持有 MergeStore（它在 adapter
+#: 的发布路径上），这项检查归 ``delivery run`` 的 CLI 装配层负责。传这个值表示
+#: "调用方无法回答"，如实记 warn，而不是误报 blocked。
+MERGE_STORE_UNCHECKED = object()
+
+
 def _check_merge_store(merge_store: Any) -> PreflightCheck:
+    if merge_store is MERGE_STORE_UNCHECKED:
+        return PreflightCheck(
+            "merge_store",
+            STATUS_WARN,
+            "flow 层未携带 MergeStore，此检查由 delivery run 的装配层负责",
+        )
     if merge_store is None:
         return PreflightCheck(
             "merge_store",

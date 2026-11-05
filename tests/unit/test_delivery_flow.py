@@ -217,6 +217,7 @@ def _flow(
     approval: FakeApproval | None = None,
     publisher: FakePublisher | None = None,
     max_steps: int = 40,
+    github: object | None = None,
 ) -> tuple[DeliveryFlow, FakeRecorder, FakeAudit, FakePublisher]:
     events: list[str] = []
     recorder = FakeRecorder()
@@ -244,6 +245,7 @@ def _flow(
         audit=audit,
         clock=lambda: datetime(2026, 10, 27, tzinfo=UTC),
         new_run_id=lambda: "run-1",
+        github=github,
     )
     return flow, recorder, audit, publisher
 
@@ -284,6 +286,76 @@ async def test_s0_happy_path_reaches_waiting_ci(tmp_path: Path) -> None:
         ("ready_for_push_approval", "pushing"),
         ("pushing", "waiting_ci"),
     ]
+
+
+class _FakePreflightGithub:
+    """暴露 run_preflight 用到的三个只读方法的假 GitHub。"""
+
+    def __init__(self, *, permission: str, push: bool) -> None:
+        self._permission = permission
+        self._push = push
+
+    async def get_authenticated_login(self) -> str:
+        return "alice"
+
+    async def get_repo(self, repo):
+        return {"permission": self._permission, "permissions": {"push": self._push}}
+
+    async def get_branch_sha(self, repo, branch: str) -> str:
+        return "a" * 40
+
+
+@pytest.mark.asyncio
+async def test_blocked_preflight_terminates_before_any_implementer_attempt(
+    tmp_path: Path,
+) -> None:
+    """只读 token 在实现开始前就终止——一个实现步都不花（issue #59 第一半）。"""
+    implementer = FakeImplementer([_attempt()])
+    flow, recorder, audit, _ = _flow(
+        tmp_path,
+        implementer=implementer,
+        preparer=FakePreparer([]),
+        github=_FakePreflightGithub(permission="read", push=False),
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.NEEDS_HUMAN
+    assert run.failure is not None
+    assert run.failure.code is FailureCode.PREFLIGHT_FAILED
+    assert "push" in run.failure.message
+    assert "permission=read" in run.failure.message
+    assert implementer.feedback == []  # 没有进入实现
+    assert ("preparing", "needs_human") in audit.transitions
+    assert ("preparing", "implementing") not in audit.transitions
+    assert recorder.runs[-1] == run
+
+
+@pytest.mark.asyncio
+async def test_passing_preflight_leaves_the_flow_unchanged(tmp_path: Path) -> None:
+    bundle = _bundle()
+    flow, _, audit, publisher = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt()]),
+        preparer=FakePreparer(
+            [
+                ChangePreparation(
+                    status=PreparationStatus.READY,
+                    bundle=bundle,
+                    verification=_verification(),
+                )
+            ]
+        ),
+        github=_FakePreflightGithub(permission="admin", push=True),
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.WAITING_CI
+    assert run.failure is None
+    assert publisher.calls == 1
+    # 开头多不出新迁移：preflight 通过不产生额外状态跳转。
+    assert audit.transitions[:2] == [("", "preparing"), ("preparing", "implementing")]
 
 
 @pytest.mark.asyncio
