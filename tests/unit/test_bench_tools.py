@@ -768,6 +768,58 @@ async def test_write_allows_overwriting_a_small_document(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_write_reports_what_a_full_overwrite_deleted(tmp_path: Path) -> None:
+    """小文档允许覆盖，但覆盖的代价必须当场说出来。
+
+    上限只挡得住大文档；489 行 README 那次只改了 37 行（约 3%），任何阈值都
+    抓不住。这里把"删了几行"变成观察结果的一部分：模型下一次就知道自己顺手
+    改掉了什么。
+    """
+    (tmp_path / "NOTES.md").write_text(
+        "one\ntwo\nthree\n", encoding="utf-8", newline="\n"
+    )
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("write_file"),
+        {"path": "NOTES.md", "content": "one\nthree\nfour\n"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "ok"
+    assert "整文件覆盖" in outcome.detail
+    assert "原 3 行 → 新 3 行" in outcome.detail
+    assert "删除 1 行" in outcome.detail
+    assert "新增 1 行" in outcome.detail
+    assert "replace_in_file" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_write_of_identical_content_says_nothing_changed(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8", newline="\n")
+
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("write_file"),
+        {"path": "app.py", "content": "VALUE = 1\n"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "ok"
+    assert "内容未变" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_write_of_a_new_file_has_no_overwrite_summary(tmp_path: Path) -> None:
+    outcome = await call_bench_tool(
+        make_tools(tmp_path).get("write_file"),
+        {"path": "fresh.py", "content": "VALUE = 1\n"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "ok"
+    assert "整文件覆盖" not in outcome.detail
+
+
+@pytest.mark.asyncio
 async def test_write_still_allows_rewriting_a_large_code_file(tmp_path: Path) -> None:
     """代码保持在测试门禁之下，可以整份重写；只有文档受覆盖上限约束。"""
     (tmp_path / "app.py").write_text(
