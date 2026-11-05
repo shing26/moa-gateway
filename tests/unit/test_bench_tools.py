@@ -278,6 +278,8 @@ async def test_read_file_numbers_lines_and_truncates(tmp_path: Path) -> None:
     )
     assert outcome.kind == "ok"
     assert "已截断" in outcome.detail
+    assert "返回 1 行，共 1 行，还剩 0 行" in outcome.detail
+    assert "offset=2" in outcome.detail
 
 
 @pytest.mark.asyncio
@@ -300,6 +302,7 @@ async def test_read_file_paginates_by_offset_and_limit(tmp_path: Path) -> None:
     assert "line one" not in outcome.detail
     assert "line four" not in outcome.detail
     # 后面还有内容，要给下一页的锚点。
+    assert "返回 2 行，共 4 行，还剩 1 行" in outcome.detail
     assert "offset=4" in outcome.detail
 
 
@@ -347,6 +350,7 @@ async def test_read_file_pagination_still_respects_the_byte_cap(tmp_path: Path) 
 
     assert outcome.kind == "ok"
     assert "已截断" in outcome.detail
+    assert "返回 2 行，共 3 行，还剩 1 行" in outcome.detail
     assert "继续读请用 offset=3" in outcome.detail
 
 
