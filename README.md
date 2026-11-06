@@ -59,6 +59,7 @@
 | **评测 · 效果度量** | RAG 六维离线评测与同源特征止损（实测 nDCG 负向倒退即关闭）：[docs/retrieval-evaluation.md](docs/retrieval-evaluation.md)；预注册配对分析协议：[ADR-029](docs/adr/adr-029-preregistered-paired-analysis.md) |
 | **实验设计** | 实验协议与运行记录：[ADR-026](docs/adr/adr-026-experiment-protocol.md)、[ADR-025](docs/adr/adr-025-multi-agent-experiment-run-record.md)；等预算剂量设计：[ADR-023](docs/adr/adr-023-bench-agent-primitive.md)；实验台：`bench/` |
 | **交付门禁 · 写侧安全** | bundle 审批边界与确定性验证：[ADR-030](docs/adr/adr-030-governed-change-agent.md)、[`bundle.py`](apps/code_review_pipeline/change/bundle.py)；交付 Agent 全链路：[ADR-031](docs/adr/adr-031-governed-repository-delivery-agent.md)；工作区写隔离：[ADR-027](docs/adr/adr-027-workspace-write-isolation.md)；S1 数据门槛（dogfood 先行）：[ADR-033](docs/adr/adr-033-s1-data-gate-dogfood-first.md) |
+| **凭证 · 脱敏** | 纵深凭证防线：输入侧白名单（[`subprocess_env.py`](app/agents/subprocess_env.py)）+ 输出侧统一 `redact()`（[ADR-035](docs/adr/adr-035-output-redaction.md)、[`app/redact.py`](app/redact.py)）；触发层四契约预注册：[ADR-036](docs/adr/adr-036-trigger-layer-preregistration.md)；同类产品对照与取舍：[docs/competitive-analysis.md](docs/competitive-analysis.md) |
 | **上下文 · 记忆** | 会话记忆与预算：[`app/memory.py`](app/memory.py)、[`app/context_budget.py`](app/context_budget.py)；长期记忆：[`app/long_term_memory.py`](app/long_term_memory.py)；知识库访问控制：[`app/knowledge_access.py`](app/knowledge_access.py) |
 
 ---
@@ -385,7 +386,7 @@ moa-gateway/
 
 ## 📑 核心架构决策记录 (ADR)
 
-项目所有核心演化遵循「决策先行、代码在后」原则，完整归档于 `docs/adr/`（adr-002 ~ adr-032）：
+项目所有核心演化遵循「决策先行、代码在后」原则，完整归档于 `docs/adr/`（adr-002 ~ adr-036）：
 
 | ADR 编号 | 核心决策主题 | 关键设计与约束 |
 | :---: | :--- | :--- |
