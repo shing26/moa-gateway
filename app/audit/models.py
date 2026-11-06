@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from app.redact import redact, redact_value
+
 
 @dataclass
 class AuditEntry:
@@ -45,15 +47,22 @@ class AuditEntry:
         输出是**扁平**的（``extra`` 的键平铺到顶层）：这是审计 JSONL 的既定约定，
         ``app/services/audit_stats.py`` 与 ``scripts/collect_hitl_feedback.py``
         都按顶层键读取。
+
+        **脱敏在序列化时做**（``app.redact``，ADR-035）：agent_output 与 extra 的
+        字符串值来自子进程回显 / CI 日志等不可信内容，密钥形态一旦落盘就是长期
+        留痕。在这里做而不是在调用方做，是因为这是 WAL 与 ES 的唯一出口——哈希链
+        覆盖的就是脱敏后的内容，跨机器可复算。``agent_output_len`` 因此取脱敏后
+        的长度，与实际落盘一致。
         """
+        agent_output = redact(self.agent_output)
         typed: dict[str, Any] = {
             "trace_id": self.trace_id,
             "session_id": self.session_id,
             "agent_name": self.agent_name,
             "intent": self.intent,
             "timestamp": self.timestamp.isoformat(),
-            "agent_output": self.agent_output,
-            "agent_output_len": len(self.agent_output),
+            "agent_output": agent_output,
+            "agent_output_len": len(agent_output),
             "eval_score": self.eval_score,
             "eval_issues": list(self.eval_issues),
             "guard_action": self.guard_action,
@@ -66,4 +75,4 @@ class AuditEntry:
             "entry_hash": self.entry_hash,
         }
         # extra 先铺开、类型化字段后覆盖：同名时以 dataclass 上的值为准（确定性）。
-        return {**self.extra, **typed}
+        return {**redact_value(self.extra), **typed}
