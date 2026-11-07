@@ -225,6 +225,120 @@ async def test_bundle_collection_ignores_agent_supplied_git_extensions(
     assert not marker.exists()
 
 
+@ pytest.mark.asyncio
+async def test_stale_verify_command_uncovered_test_file_produces_warning(
+    repo: Path,
+) -> None:
+    """Stale verify command that doesn't reference a changed test file should
+    produce a warning in message and audit keys verify_covers_changes=False
+    with uncovered_files list."""
+    (repo / "tests").mkdir(exist_ok=True)
+    (repo / "tests" / "test_bench_tool.py").write_text(
+        "def test_bench():\n    assert True\n", encoding="utf-8"
+    )
+    (repo / "tests" / "test_delivery.py").write_text(
+        "def test_delivery():\n    assert True\n", encoding="utf-8"
+    )
+
+    # Verify command only runs delivery tests, not bench tool tests
+    # This simulates a stale verify command from a previous delivery
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=(sys.executable, "-c", "raise SystemExit(0)", "tests/test_delivery.py"),
+        model_name="test-model",
+    )
+
+    result = await pipeline.prepare_bundle(_request())
+
+    assert result.status is ChangeStatus.VERIFIED
+    assert result.bundle is not None
+    assert "未覆盖" in result.message
+    assert "test_bench_tool.py" in result.message
+    assert result.audit.get("verify_covers_changes") is False
+    uncovered = result.audit.get("uncovered_files")
+    assert uncovered is not None
+    assert "tests/test_bench_tool.py" in uncovered
+
+
+@ pytest.mark.asyncio
+async def test_verify_command_referencing_tests_directory_covers_all(
+    repo: Path,
+) -> None:
+    """Verify command that references 'tests/' directory should cover
+    all test files and produce verify_covers_changes=True."""
+    (repo / "tests").mkdir(exist_ok=True)
+    (repo / "tests" / "test_bench_tool.py").write_text(
+        "def test_bench():\n    assert True\n", encoding="utf-8"
+    )
+
+    # Use a passing command that includes "tests/" as a path token
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=(sys.executable, "-c", "raise SystemExit(0)", "tests/"),
+        model_name="test-model",
+    )
+
+    result = await pipeline.prepare_bundle(_request())
+
+    assert result.status is ChangeStatus.VERIFIED
+    assert result.audit.get("verify_covers_changes") is True
+    assert "未覆盖" not in result.message
+
+
+@ pytest.mark.asyncio
+async def test_source_only_change_skips_coverage_check(
+    repo: Path,
+) -> None:
+    """Source-only change (no test files) should skip the coverage check
+    and produce verify_covers_changes=True."""
+    (repo / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+    )
+
+    result = await pipeline.prepare_bundle(_request())
+
+    assert result.status is ChangeStatus.VERIFIED
+    assert result.audit.get("verify_covers_changes") is True
+    assert "uncovered" not in result.message.lower()
+
+
+@ pytest.mark.asyncio
+async def test_bare_command_no_path_tokens_covers_everything(
+    repo: Path,
+) -> None:
+    """Bare command with no path tokens (e.g., 'pytest -q') should be
+    treated as covering everything."""
+    (repo / "tests").mkdir(exist_ok=True)
+    (repo / "tests" / "test_bench_tool.py").write_text(
+        "def test_bench():\n    assert True\n", encoding="utf-8"
+    )
+
+    # Use a passing command with no path tokens (just options)
+    pipeline = ChangePipeline(
+        github=object(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=(sys.executable, "-c", "raise SystemExit(0)", "-q"),
+        model_name="test-model",
+    )
+
+    result = await pipeline.prepare_bundle(_request())
+
+    assert result.status is ChangeStatus.VERIFIED
+    assert result.audit.get("verify_covers_changes") is True
+    assert "未覆盖" not in result.message
+
+
 def test_no_changes_is_not_exportable(repo: Path) -> None:
     pipeline = ChangePipeline(
         github=object(),

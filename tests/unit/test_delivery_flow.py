@@ -372,6 +372,71 @@ async def test_passing_preflight_leaves_the_flow_unchanged(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_ready_for_push_approval_detail_carries_message_when_nonempty(
+    tmp_path: Path,
+) -> None:
+    """READY_FOR_PUSH_APPROVAL 的 audit detail 在 preparation.message 非空时
+    必须带 message 键（issue #70：verify 覆盖缺口要在准备期可见）。"""
+    bundle = _bundle()
+    preparer = FakePreparer(
+        [
+            ChangePreparation(
+                status=PreparationStatus.READY,
+                bundle=bundle,
+                verification=_verification(),
+                message="verification passed; uncovered files: tests/test_bench.py",
+            )
+        ]
+    )
+    flow, _, audit, _ = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt()]),
+        preparer=preparer,
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.WAITING_CI
+    idx = audit.transitions.index(("checking", "ready_for_push_approval"))
+    detail = audit.details[idx]
+    assert detail.get("action") == "awaiting_push_approval"
+    assert detail.get("message") == (
+        "verification passed; uncovered files: tests/test_bench.py"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ready_for_push_approval_detail_has_only_action_when_message_empty(
+    tmp_path: Path,
+) -> None:
+    """preparation.message 为空时，detail 只有 action 键，与历史行为一致。"""
+    bundle = _bundle()
+    preparer = FakePreparer(
+        [
+            ChangePreparation(
+                status=PreparationStatus.READY,
+                bundle=bundle,
+                verification=_verification(),
+                message="",
+            )
+        ]
+    )
+    flow, _, audit, _ = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt()]),
+        preparer=preparer,
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.WAITING_CI
+    idx = audit.transitions.index(("checking", "ready_for_push_approval"))
+    detail = audit.details[idx]
+    assert list(detail.keys()) == ["action"]
+    assert detail["action"] == "awaiting_push_approval"
+
+
+@pytest.mark.asyncio
 async def test_verify_failure_uses_one_revision_and_passes_feedback(tmp_path: Path) -> None:
     bundle = _bundle()
     implementer = FakeImplementer([_attempt(), _attempt(summary="fixed second time")])
