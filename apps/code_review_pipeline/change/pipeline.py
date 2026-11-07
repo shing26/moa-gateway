@@ -24,6 +24,7 @@ from typing import Any, Protocol
 
 from app.agents.command_runner import run_command
 from app.agents.workspace_tools import create_verification_workspace
+from app.redact import redact
 from apps.code_review_pipeline.change.bundle import (
     ChangeBundle,
     build_change_bundle,
@@ -471,6 +472,10 @@ class ChangePipeline:
             )
         repo = _split_repo(self._repo)
         await self._require_remote_base(bundle.base_sha)
+        # 外发内容统一过 redact（ADR-035）：title/body 可能含 agent 输出或 CI 日志
+        # 引文——commit message 与 PR 正文一旦写进 GitHub 就是删不干净的长期留痕。
+        title = redact(bundle.title)
+        body = redact(bundle.body)
         await create_ref(repo, bundle.branch, bundle.base_sha)
         commit_sha = str(
             await create_commit(
@@ -478,7 +483,7 @@ class ChangePipeline:
                 base_sha=bundle.base_sha,
                 branch=bundle.branch,
                 message=(
-                    f"{bundle.title}\n\n{bundle.body}\n\n"
+                    f"{title}\n\n{body}\n\n"
                     f"MoA-Trace-Id: {bundle.trace_id}\n"
                     f"MoA-Bundle-Hash: {bundle.bundle_hash}"
                 ).strip(),
@@ -489,8 +494,8 @@ class ChangePipeline:
             repo,
             branch=bundle.branch,
             base_branch=self._base_branch,
-            title=bundle.title,
-            body=bundle.body,
+            title=title,
+            body=body,
         )
         if not isinstance(pull_request, PullRequestRef):
             raise TypeError("create_pull_request must return PullRequestRef")

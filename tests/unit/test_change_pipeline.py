@@ -1538,3 +1538,62 @@ def test_publish_rejects_a_bundle_file_deleted_after_prepare(repo: Path) -> None
                 ),
             )
         )
+
+@pytest.mark.asyncio
+async def test_publish_redacts_title_and_body_before_any_remote_write(repo: Path) -> None:
+    """ADR-035：外发到 GitHub 的 title/body 必须先过 redact——PR 正文与 commit
+    message 一旦写进 GitHub 就是删不干净的长期留痕。"""
+    (repo / "app.py").write_text(
+        "def add(a, b):" + chr(10) + "    return a + b" + chr(10), encoding="utf-8"
+    )
+    gh_token = "ghp_" + "a" * 36
+    request = _request()
+    request = replace(request, title=f"fix: correct add [{gh_token}]",
+                      body=f"agent change with {gh_token} inside")
+    seen: dict[str, str] = {}
+
+    class RecordingGitHub:
+        async def commit_exists(self, repo, sha):
+            return True
+
+        async def create_ref(self, repo, branch, base_sha):
+            return {}
+
+        async def create_commit(self, repo, **kwargs):
+            seen["commit_message"] = kwargs["message"]
+            return "b" * 40
+
+        async def create_pull_request(self, repo, **kwargs):
+            seen["pr_title"] = kwargs["title"]
+            seen["pr_body"] = kwargs["body"]
+            return _pr_ref()
+
+    pipeline = ChangePipeline(
+        github=RecordingGitHub(),
+        repo="owner/name",
+        workspace=repo,
+        verify_command=_passing(),
+        model_name="test-model",
+        base_branch="main",
+        push_enabled=True,
+    )
+    prepared = await pipeline.prepare_bundle(request)
+    assert prepared.bundle is not None
+
+    result = await pipeline.publish_bundle(
+        prepared.bundle,
+        ChangeApproval(
+            approver="alice",
+            trace_id="trace-1",
+            bundle_hash=prepared.bundle.bundle_hash,
+            run_id="run-1",
+        ),
+    )
+
+    assert result.status is ChangeStatus.PUSHED
+    assert gh_token not in seen["pr_title"]
+    assert gh_token not in seen["pr_body"]
+    assert gh_token not in seen["commit_message"]
+    assert seen["pr_title"] == "fix: correct add [[REDACTED:github-token]]"
+    assert "[REDACTED:github-token]" in seen["pr_body"]
+    assert "[REDACTED:github-token]" in seen["commit_message"]
