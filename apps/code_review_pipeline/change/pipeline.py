@@ -230,6 +230,54 @@ class ChangePipeline:
                 message="工作区没有改动",
                 audit=audit,
             )
+
+        # Coverage check: verify command should reference changed test files
+        test_files = [
+            f.path
+            for f in bundle.files
+            if "tests/" in f.path or os.path.basename(f.path).startswith("test_")
+        ]
+        if test_files:
+            # Extract path tokens from verify command (skip the command itself, e.g., "pytest")
+            cmd_str = " ".join(self._verify_command)
+            tokens = [t.strip().strip("'\"") for t in cmd_str.split()]
+            # Skip the first token (the command name like "pytest")
+            # Only consider tokens that look like paths (contain / or \) or are special dir tokens
+            path_tokens = []
+            for t in tokens[1:]:
+                if t.startswith("-"):
+                    continue
+                # Token looks like a path if it contains path separators or is a known dir token
+                if "/" in t or "\\" in t or t in (".", "./", "tests", "tests/"):
+                    path_tokens.append(t)
+
+            def covers(file_path: str) -> bool:
+                if not path_tokens:
+                    # Bare command (e.g., pytest -q) covers everything
+                    return True
+                for token in path_tokens:
+                    token_stripped = token.rstrip("/")
+                    if token in (".", "./", "tests", "tests/"):
+                        return True
+                    if file_path == token or file_path.startswith(token_stripped + "/"):
+                        return True
+                return False
+
+            uncovered = [f for f in test_files if not covers(f)]
+            if uncovered:
+                audit = {**audit, "verify_covers_changes": False, "uncovered_files": sorted(uncovered)}
+                message = (
+                    "验证通过，等待人工推送审批；"
+                    f"但验证命令未覆盖以下测试文件：{', '.join(sorted(uncovered))}"
+                )
+                return ChangeResult(
+                    status=ChangeStatus.VERIFIED,
+                    bundle=bundle,
+                    message=message,
+                    audit=audit,
+                )
+
+        audit = {**audit, "verify_covers_changes": True}
         return ChangeResult(
             status=ChangeStatus.VERIFIED,
             bundle=bundle,

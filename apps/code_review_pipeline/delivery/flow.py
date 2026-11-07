@@ -318,6 +318,7 @@ class DeliveryFlow:
             run,
             DeliveryRunState.READY_FOR_PUSH_APPROVAL,
             "awaiting_push_approval",
+            extra={"message": preparation.message} if preparation.message else None,
         )
         try:
             approval = await self._approval.request(
