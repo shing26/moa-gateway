@@ -100,3 +100,16 @@
 > ② 端点瞬时过载（Service temporarily overloaded）起步即失败，属 infra，
 > 不构成失败形状。交付本身一次通过：15 步 / 4 处写入，gemma-4-31b-it。
 
+
+| 10 | 2026-11-08 | dlv-c72fc65a（infra：单次调用 300s 超时）、dlv-772162d9（infra：900s 超时，单次调用可无限挂起）、dlv-f0dcd3ad（60 步 41 calls 全部只读零写入）、dlv-0f799136（mistral-large 大 prompt 两次 180s 超时后循环卡死，会话重启终止）、dlv-87419c6f（laguna-xs 100 calls / 1.6M tok 全读零写）、dlv-b86a595（gemma 每调用 120s 超时，fallback nemotron 写出两文件后随会话重启终止）、dlv-333e70b6（nemotron 主选 104 读零写）、dlv-30872304（9 处写入后 120 步上限）、dlv-dfba8210（8 处写入 + 6 轮验证后陷入 `_GitHub` 存根搜索螺旋，200 步上限）、dlv-0e9f6389（17 处写入 + 15 轮验证，3.5M tok 超限，284 步）、dlv-79db8a3d（PR #72，merge `ec52e7f3`） | moa-gateway / 验证命令与改动文件的一致性检查：改动含测试文件而验证命令未引用时，prepare_bundle 在 VERIFIED 分支记 `verify_covers_changes=False` + `uncovered_files` 并在 message 附警告；flow 把 preparation.message 带进推送审批审计 detail（goal：issue #70，2026-11-06 开工前记录） | 任务级 `python -m pytest tests/unit/test_change_pipeline.py tests/unit/test_delivery_flow.py -q`（64 passed, 1 skipped；合并后本地复核同）；CI / test（真门禁，PR #72 绿） | 已合并（PR #72，merge `ec52e7f3`）。成行运行 1 次：114 步 / 108 calls / 1,139,427 tok / 22.9 分钟，20 处 replace_in_file + 12 轮验证；推送与合并审批均由 shing26 完成（TTY / MergeExecutor） | 是 |
+
+> 2026-11-08（第 10 行）：goal 来自第 9 行实证的缺陷——验证命令陈旧时闸门兜住了
+> 但成本是整次实现预算；把"命令引用到改动测试文件"变成 prepare 时的机器检查。
+> 本行的真实故事是收敛而非实现：四个文件（含 1426/798 行的两个测试文件）对
+> 端点现有模型池太重，15 次启动中 10 次在"无限重读"上耗尽步数或 token 预算，
+> 其余为 infra（超时 / 429 / 内容安全）。两个有效干预：① goal 写明工作顺序
+> （先读两个源文件 → 先编辑 → 测试文件只读头尾、存根自己内联定义）；② 预算
+> 上限逐级抬高（60→400 步、700k→5M tok），最后 tokens 仍是约束（1.14M / 5M
+> 完成）。dogfood 结论：工具循环不给模型剩余预算信号、不阻止重复读同一文件，
+> 是下一行候选缺陷；模型收敛运气占成行成本的大头。合并登记一次 infra 失败
+> （Postgres 5433 未启动），按预案 `recover()` 重注册、未重复远端写入。
