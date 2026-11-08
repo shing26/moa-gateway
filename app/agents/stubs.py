@@ -224,6 +224,11 @@ async def execute_tool_loop(
     usage = ToolLoopUsage()
     current_messages = list(messages)
     executed_tool_calls = 0
+    # Repeat tracking: key -> count
+    repeat_counts: dict[tuple, int] = {}
+    # Slot counters
+    slot.setdefault("loop_repeat_marks", 0)
+    slot.setdefault("loop_budget_nudges", 0)
     def request_tokens() -> int | None:
         """本次调用的 completion 上限，**不是**剩余总预算。
 
@@ -380,6 +385,43 @@ async def execute_tool_loop(
                     policy,
                     keep_tail=name == "run_tests",
                 )
+                # ---- repeat marker (read_file / search) ----
+                if policy.mark_repeated_reads:
+                    # parse key: tool name + args tuple
+                    try:
+                        if name == "read_file":
+                            args = arguments
+                            key = ("read_file", (args.get("path"), args.get("offset"), args.get("limit")))
+                        elif name == "search":
+                            args = arguments
+                            key = ("search", (args.get("path"), args.get("pattern")))
+                        else:
+                            key = None
+                        if key is not None:
+                            count = repeat_counts.get(key, 0) + 1
+                            repeat_counts[key] = count
+                            if count >= 2:
+                                repeat_line = f"[repeat #{count} of this exact call - the content is already in your context; do not read it again]"
+                                model_observation = repeat_line + "\n" + model_observation
+                                slot["loop_repeat_marks"] = int(slot.get("loop_repeat_marks", 0)) + 1
+                    except (json.JSONDecodeError, TypeError):
+                        # skip marker if arguments failed to parse as JSON
+                        pass
+                # ---- budget line ----
+                executed_tool_calls += 1
+                A = usage.total_tokens
+                B = max_tokens
+                if B > 0:
+                    P = A * 100 // B
+                    cycle_line = f"[cycle {executed_tool_calls}/{max_steps} - tokens {A}/{B} - {P} percent used]"
+                    if policy.budget_nudge_ratio and P >= policy.budget_nudge_ratio * 100:
+                        cycle_line += " Budget running low: stop reading, move to editing and verification now."
+                    model_observation = model_observation + "\n" + cycle_line
+                    if policy.budget_nudge_ratio and P >= policy.budget_nudge_ratio * 100:
+                        slot["loop_budget_nudges"] = int(slot.get("loop_budget_nudges", 0)) + 1
+                else:
+                    cycle_line = f"[cycle {executed_tool_calls}/{max_steps}]"
+                    model_observation = model_observation + "\n" + cycle_line
                 result.messages.append(
                     {
                         "role": "tool",
@@ -387,7 +429,6 @@ async def execute_tool_loop(
                         "content": model_observation,
                     }
                 )
-                executed_tool_calls += 1
             # 同一条会话推进多轮后，早期轮次只留一行摘要。没有这一步，40 步
             # 的探索会把整段历史重复送进每一次调用——实测 17 次调用烧掉 101 万
             # prompt token，却还没开始写文件。
