@@ -113,3 +113,24 @@
 > 完成）。dogfood 结论：工具循环不给模型剩余预算信号、不阻止重复读同一文件，
 > 是下一行候选缺陷；模型收敛运气占成行成本的大头。合并登记一次 infra 失败
 > （Postgres 5433 未启动），按预案 `recover()` 重注册、未重复远端写入。
+
+**当前进度：累计 8 个真实交付 / 终点 10**（第 11 行入账，2026-11-12；窗口至 2026-11-28）。
+
+
+| 11 | 2026-11-08 | dlv-8255727b（5.01M tok 耗尽，308 步，全读零写）、dlv-5473e7bec（400 步上限，6.40M tok，325 读）、dlv-4d50e4c0（验证 exit 0，**推送闸门拦截**：操作者输入 `AAPROVE` 而非 `APPROVE`，rejected）、dlv-08aaa668（验证 exit 0，TTY 提示无人应答，rejected）、dlv-07b8da0a（端点 502，44 步 infra）、dlv-a658267d（高峰限流下 verify 循环冻结 20+ 分钟，人工终止）、dlv-7288a46e（10.02M tok / 474 步耗尽，41 轮验证）、dlv-df48b430（12.03M tok / 528 步耗尽，65 轮验证）、dlv-c9d274ba（verify exit 1：14 个新测试里 2 个把 `policy=` 当成 `execute_tool_loop` 的 kwarg，真名 `memory_policy=`）、dlv-f39d8564（PR #78，merge `8ed4e6ce`） | moa-gateway / 工具循环剩余预算信号 + 重复读标记：`MemoryPolicy` 增 `budget_nudge_ratio`（0.75）与 `mark_repeated_reads`（True）；`execute_tool_loop` 在每条**回给模型**的观察末尾追加 `[cycle X/Y - tokens A/B - P percent used]`（max_tokens=0 时仅 `[cycle X/Y]`），越过阈值追加强提示；精确重复的 `read_file`/`search` 前置 `[repeat #N ...]`，只标记不拦截、翻页不算重复；slot 增 `loop_budget_nudges` / `loop_repeat_marks`；`steps[].observation` 审计证据逐字节不变（goal：issue #77，2026-11-08 四点设计定稿后登记） | 任务级 `python -m pytest tests/unit/test_structured_tool_loop.py tests/unit/test_bench_memory.py -q`（22 passed，run 记录 exit 0）；独立 verifier 在 PR head 隔离 worktree 重跑全套 `tests/unit`（1918 passed, 6 既有 skipped）+ 契约核对；CI / test（真门禁，PR #78 绿，1m32s） | 已合并（PR #78，merge `8ed4e6ce`）。成行运行 1 次：327 步 / 322 calls / 5,791,008 tok / 50.2 分钟，242 read_file + 21 replace_in_file + 31 run_tests + 24 git_diff + 8 search；推送与合并审批均由 shing26 完成（TTY / MergeExecutor） | 是 |
+
+> 2026-11-12（第 11 行）：goal 来自第 10 行实证的缺陷（步数/token 从不进入模型
+> 消息流），四点设计在会话里定稿后才登记 issue（预注册）：混合式注入、v1 精确
+> 重复只标记不拦截、MemoryPolicy 配置、slot 计数器。本行 10 次启动的形状比第
+> 10 行更完整地暴露了闸门两侧：① 两道人审闸门的"拒"路径首次都有实证——
+> `AAPROVE` 错拼被严格等值比较拒绝、TTY 提示无人应答超时拒绝，两次都是验证
+> exit 0 的成品运行被拦（拦截即闸门按设计工作，但提示词对操作者不友好是真实
+> 摩擦）；② 两次在 10M/12M token 上限耗尽，验证循环 41/65 轮——模型在无预算
+> 信号时会把预算全部烧在追绿色上，goal 里"验证最多两次"的指令是唯一有效约束；
+> ③ 一次卡在 kwarg 名（`policy=` vs `memory_policy=`），验证门禁按预期兜住。
+> 本次交付的是"观测"而非"拦截"：预算行与重复标记对模型行为的实际效果要等
+> 下一次大 goal 交付时从 slot 计数器读数，这是 v1 故意留的测量面。已知非阻断
+> 项（verifier 提出，留作候选）：arguments 为合法 JSON 但非对象时 `args.get`
+> 抛 `AttributeError` 冒泡成整轮 error；`search` 重复标记缺专门测试。合并登记
+> 再次因 Postgres 5433 未启动失败，`recover()` 重注册解决——该恢复路径已三次
+> 实证，候选下一行：推送后自动拉起/检查数据库依赖。
