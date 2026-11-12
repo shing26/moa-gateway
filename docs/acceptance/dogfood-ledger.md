@@ -114,7 +114,7 @@
 > 是下一行候选缺陷；模型收敛运气占成行成本的大头。合并登记一次 infra 失败
 > （Postgres 5433 未启动），按预案 `recover()` 重注册、未重复远端写入。
 
-**当前进度：累计 8 个真实交付 / 终点 10**（第 11 行入账，2026-11-12；窗口至 2026-11-28）。
+**当前进度：累计 9 个真实交付 / 终点 10**（第 12 行入账，2026-11-12；窗口至 2026-11-28）。
 
 
 | 11 | 2026-11-08 | dlv-8255727b（5.01M tok 耗尽，308 步，全读零写）、dlv-5473e7bec（400 步上限，6.40M tok，325 读）、dlv-4d50e4c0（验证 exit 0，**推送闸门拦截**：操作者输入 `AAPROVE` 而非 `APPROVE`，rejected）、dlv-08aaa668（验证 exit 0，TTY 提示无人应答，rejected）、dlv-07b8da0a（端点 502，44 步 infra）、dlv-a658267d（高峰限流下 verify 循环冻结 20+ 分钟，人工终止）、dlv-7288a46e（10.02M tok / 474 步耗尽，41 轮验证）、dlv-df48b430（12.03M tok / 528 步耗尽，65 轮验证）、dlv-c9d274ba（verify exit 1：14 个新测试里 2 个把 `policy=` 当成 `execute_tool_loop` 的 kwarg，真名 `memory_policy=`）、dlv-f39d8564（PR #78，merge `8ed4e6ce`） | moa-gateway / 工具循环剩余预算信号 + 重复读标记：`MemoryPolicy` 增 `budget_nudge_ratio`（0.75）与 `mark_repeated_reads`（True）；`execute_tool_loop` 在每条**回给模型**的观察末尾追加 `[cycle X/Y - tokens A/B - P percent used]`（max_tokens=0 时仅 `[cycle X/Y]`），越过阈值追加强提示；精确重复的 `read_file`/`search` 前置 `[repeat #N ...]`，只标记不拦截、翻页不算重复；slot 增 `loop_budget_nudges` / `loop_repeat_marks`；`steps[].observation` 审计证据逐字节不变（goal：issue #77，2026-11-08 四点设计定稿后登记） | 任务级 `python -m pytest tests/unit/test_structured_tool_loop.py tests/unit/test_bench_memory.py -q`（22 passed，run 记录 exit 0）；独立 verifier 在 PR head 隔离 worktree 重跑全套 `tests/unit`（1918 passed, 6 既有 skipped）+ 契约核对；CI / test（真门禁，PR #78 绿，1m32s） | 已合并（PR #78，merge `8ed4e6ce`）。成行运行 1 次：327 步 / 322 calls / 5,791,008 tok / 50.2 分钟，242 read_file + 21 replace_in_file + 31 run_tests + 24 git_diff + 8 search；推送与合并审批均由 shing26 完成（TTY / MergeExecutor） | 是 |
@@ -134,3 +134,22 @@
 > 抛 `AttributeError` 冒泡成整轮 error；`search` 重复标记缺专门测试。合并登记
 > 再次因 Postgres 5433 未启动失败，`recover()` 重注册解决——该恢复路径已三次
 > 实证，候选下一行：推送后自动拉起/检查数据库依赖。
+
+
+| 12 | 2026-11-12 | dlv-4862bf4a（合并版 v1，26 个 UP006 lint 错误，verifier 拦截）、dlv-b894c70a（Part A v5，22/25，缺 `source` 存在性检查 + 非法 JSON 被静默跳过 + 8 处 `/tmp` 硬编码）、dlv-44206696（v6，15/15 自测通过但 `env` 注解被放宽并用 `# type: ignore` 掩盖 + 死代码）、dlv-13d2e598（v7，18/19）、dlv-03586935（v8 非 TTY，重新引入 4 个 ISC004，会使 CI 变红）、dlv-bbdf9919（v8 TTY 闸门，verifier 查出名为「报告物理行号」的测试只断言 `len(cases)==3`）、dlv-a9cb36d7（PR #82，merge `9741c1f0`） | moa-gateway / agent 评测集 Part A：`eval/schema.py` 定义 frozen `EvalCase`（14 字段）与模块级 `load_cases`，读 JSONL、7 个必填字段逐一存在性检查、非法 JSON 按物理行号报 ValueError、未知枚举拒绝、6 个字符串元组字段与 `env` 二元组分别归一化；`tests/unit/test_eval_schema.py` 16 个测试（goal：issue #80，2026-11-12 落地顺序第 1 步登记） | 任务级 `python -m pytest tests/unit/test_eval_schema.py -q`（16 passed，verify exit 0）、`python -m ruff check .`（绿）；独立 verifier 在隔离 worktree 重跑 17 项并做 mutation testing（16/17，唯一非阻断项为 1 个未使用 `pathlib.Path` import，分类 MINOR）；CI / test（真门禁，PR #82 绿；docker 按设计 skipped） | 已合并（PR #82，merge `9741c1f0`）。成行运行 1 次：52 步 / 52 calls / 643,646 tok，16 read_file + 11 write_file + 13 run_tests + 5 search + 3 replace_in_file；推送与合并审批均由 shing26 完成（TTY / MergeExecutor） | 是 |
+
+> 2026-11-12（第 12 行）：goal 来自「按建议的落地顺序」第 1 步——先让评测集的
+> schema 与 L0 checker 成为受治理交付，再谈语料与基线。本行把交付从 5 文件拆成
+> Part A（3 文件）/ Part B（2 文件）：合并版在 12M token 上限内烧掉 396 步仍不收敛，
+> 拆分后单轮 15–52 步即可收敛。真正的成本不在实现而在**验收契约的迭代**：
+> 七轮里逐轮暴露 `write_file` 不能造 0 字节文件、`--goal` 里双引号被 PowerShell
+> 5.1 吃掉、字段顺序在 dataclass 里不可行、5 个元组字段静默返回 `()`、`source`
+> 裸下标触发 KeyError、非法 JSON 被静默丢弃、`ruff` 在本仓库忽略 F401 因此
+> lint 绿也仍有死代码、以及最严重的一次——测试名与 docstring 声称「报告物理
+> 行号」但正文只写 3 行合法数据并断言 `len(cases)==3`。最后一项由独立 verifier
+> 发现而非自测 harness（当场补 A20 并做 mutation testing 验证每个测试确实会因
+> 其声称的缺陷而失败）。dogfood 结论：**生成与裁决分离不是形式主义**；同一会话
+> 的 harness 会继承自己的盲点，verifier 是唯一抓到「测试在撒谎」的一层。已知
+> 非阻断项（人审签收时接受）：一个未使用的 `pathlib.Path` import；frozen 测试
+> 断言 `AttributeError` 而非更窄的 `FrozenInstanceError`。候选下一行：把
+> `--isolated --select F401,F841,RUF100` 与测试强度检查做成 pipeline 的常设门禁。
