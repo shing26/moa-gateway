@@ -114,7 +114,7 @@
 > 是下一行候选缺陷；模型收敛运气占成行成本的大头。合并登记一次 infra 失败
 > （Postgres 5433 未启动），按预案 `recover()` 重注册、未重复远端写入。
 
-**当前进度：累计 9 个真实交付 / 终点 10**（第 12 行入账，2026-11-12；窗口至 2026-11-28）。
+**当前进度：累计 10 个真实交付 / 终点 10 —— 终点达成**（第 13 行入账，2026-11-13；窗口 2026-11-28，提前两周完成）。
 
 
 | 11 | 2026-11-08 | dlv-8255727b（5.01M tok 耗尽，308 步，全读零写）、dlv-5473e7bec（400 步上限，6.40M tok，325 读）、dlv-4d50e4c0（验证 exit 0，**推送闸门拦截**：操作者输入 `AAPROVE` 而非 `APPROVE`，rejected）、dlv-08aaa668（验证 exit 0，TTY 提示无人应答，rejected）、dlv-07b8da0a（端点 502，44 步 infra）、dlv-a658267d（高峰限流下 verify 循环冻结 20+ 分钟，人工终止）、dlv-7288a46e（10.02M tok / 474 步耗尽，41 轮验证）、dlv-df48b430（12.03M tok / 528 步耗尽，65 轮验证）、dlv-c9d274ba（verify exit 1：14 个新测试里 2 个把 `policy=` 当成 `execute_tool_loop` 的 kwarg，真名 `memory_policy=`）、dlv-f39d8564（PR #78，merge `8ed4e6ce`） | moa-gateway / 工具循环剩余预算信号 + 重复读标记：`MemoryPolicy` 增 `budget_nudge_ratio`（0.75）与 `mark_repeated_reads`（True）；`execute_tool_loop` 在每条**回给模型**的观察末尾追加 `[cycle X/Y - tokens A/B - P percent used]`（max_tokens=0 时仅 `[cycle X/Y]`），越过阈值追加强提示；精确重复的 `read_file`/`search` 前置 `[repeat #N ...]`，只标记不拦截、翻页不算重复；slot 增 `loop_budget_nudges` / `loop_repeat_marks`；`steps[].observation` 审计证据逐字节不变（goal：issue #77，2026-11-08 四点设计定稿后登记） | 任务级 `python -m pytest tests/unit/test_structured_tool_loop.py tests/unit/test_bench_memory.py -q`（22 passed，run 记录 exit 0）；独立 verifier 在 PR head 隔离 worktree 重跑全套 `tests/unit`（1918 passed, 6 既有 skipped）+ 契约核对；CI / test（真门禁，PR #78 绿，1m32s） | 已合并（PR #78，merge `8ed4e6ce`）。成行运行 1 次：327 步 / 322 calls / 5,791,008 tok / 50.2 分钟，242 read_file + 21 replace_in_file + 31 run_tests + 24 git_diff + 8 search；推送与合并审批均由 shing26 完成（TTY / MergeExecutor） | 是 |
@@ -153,3 +153,20 @@
 > 非阻断项（人审签收时接受）：一个未使用的 `pathlib.Path` import；frozen 测试
 > 断言 `AttributeError` 而非更窄的 `FrozenInstanceError`。候选下一行：把
 > `--isolated --select F401,F841,RUF100` 与测试强度检查做成 pipeline 的常设门禁。
+
+| 13 | 2026-11-13 | Part B1：dlv-d659d996（合并版 goal，150 步重读螺旋）、dlv-ac6ee671（端点挂起 36 分钟零进展）、dlv-ce8ea4b0（6 步探索即收尾，verify exit 4）→ 拆分后 dlv-c18e5e78（PR #85，merge `2f05e4f2`）；Part B2：v1–v16 十余轮（代表：dlv-5b0e3bdce v15 被第二位 verifier 查出 12 个 detail-only 测试 + 未使用 `_PATCH` 常量）、dlv-0b22f974（v17 mistral，PR #86，第三位 verifier 查出唯一一个只断言 passed 不断言 detail 的 fails 命名测试，拒收后关 PR）、dlv-1c4d3ea7 与 dlv-d08d2102（18a/18b，120s 超时根因定位：整文件生成的单次调用超时，非端点故障）、dlv-d141a5f5（v18 poolside，24/28：textwrap 未使用 + verify_cycles 缺 action 键 + 两处缺 detail 断言 + 覆盖退化，推送闸门前拒收）、dlv-63f4ecea（v19，PR #87，merge `3e0433be`） | moa-gateway / agent 评测集 Part B（B1+B2 记一行）：B1 `eval/l0.py` 346 行——六项确定性 L0 检查（changed_paths_match / verify_exit_zero / forbidden_paths_touched / test_files_append_only / read_ratio / verify_cycles），共享 `_patch_section`，含「非末节最后一行 -assert 仍被抓」回归项；B2 `tests/unit/test_eval_l0.py` 437 行 26 个测试（goal：issue #80 落地顺序第 1 步，2026-11-13 登记） | B1：import 冒烟 + `.scratch/probe-l0.py` 对照参考实现 + 独立 verifier mutation testing；B2：任务级 pytest 26 passed + 本地 harness **28/28**（8 必需变异、9 个契约分支 pass 翻转、detail 抑制、A7 命名测试 flag+detail 规则、强制 ruff 基线对照 141=141）+ **第四位**独立 verifier 独立重建并亲跑全部命令判 PASS；CI / test（真门禁，PR #87 绿） | 已合并（PR #85 + #87）。成行运行 2 次：B1 23 步 / 193,719 tok（nemotron），B2 12 步 / 159,399 tok（poolside，5 read + 2 write + 2 run_tests + 1 list + 1 git_diff）；推送与合并审批均由 shing26 完成（TTY 重入门禁 / MergeExecutor ci_green→approve） | 是 |
+
+> 2026-11-13（第 13 行，终点行）：第 12 行把 Part B 拆出去之后，本行把 B1、B2
+> 记成一行收口。三轮独立 verifier 各抓到一类自测 harness 抓不到的「测试在撒谎」：
+> v15 的 12 个 detail-only 测试（翻转 passed 旗标套件仍绿）、v17 的 1 个 flag-only
+> 测试（兄弟测试恰好盖住同一分支）、以及 18c 的 verify_cycles 夹具缺 `action`
+> 键（变异体靠巧合被抓住）。每一处裁决失败都固化成 harness 永久探针（P1 翻转、
+> P2 detail 抑制、A6/A7），并回归验证它仍拒绝旧 FAIL 工件。工程侧三个环境事实
+> 入册：goal ≤6.6k 字符单轮收敛、≥7.1k 触发截断；整文件生成需要 LLM_TIMEOUT
+> ≥300s（120s 时唯一超时的就是那一次写 350 行的调用，同会话其余调用秒回）；
+> 实现方模型三换（nemotron 截断 → mistral 中途劣化 → poolside 稳定）。流程侧
+> 两个真实缺陷留档：门禁进程随会话重启死亡后流水线无 resume，只能用重入脚本
+> 重放「批准→发布」两步（bundle 哈希先与记录核对、发布器自带 `_assert_bundle_current`
+> 守卫、人工 TTY 门禁原样保留）；以及 11-12 的两个 delivery 进程无看护存活 22
+> 小时。**台账 10/10 达成，窗口内提前两周收口。**候选下一行：`--isolated` ruff
+> 与测试强度检查做成 pipeline 常设门禁；delivery 重入/恢复命令；进程看护。
