@@ -654,6 +654,63 @@ def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_delivery_resume(args: argparse.Namespace) -> int:
+    """重入搁浅记录：门禁重入或合并对齐，绝不重跑实现者。"""
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.resume import resume_run
+    from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
+    from apps.code_review_pipeline.merge_store import (
+        PostgresMergeStore,
+        build_merge_store,
+    )
+    from apps.code_review_pipeline.routing.github_provider import build_github_client
+
+    if not settings.github_token:
+        print("GITHUB_TOKEN 未配置", file=sys.stderr)
+        return 2
+    merge_store = build_merge_store()
+    if not isinstance(merge_store, PostgresMergeStore):
+        print(
+            "delivery resume 需要共享 MergeStore（publish 要登记合并记录）；"
+            "请配置 VECTOR_DB_DSN 或 CODE_REVIEW_DATABASE_URL",
+            file=sys.stderr,
+        )
+        return 2
+    github = build_github_client()
+    store = DeliveryRunStore(settings.delivery_run_record_dir)
+
+    async def execute():
+        try:
+            return await resume_run(
+                args.run_id,
+                store=store,
+                github=github,
+                merge_store=merge_store,
+                settings=settings,
+                approval_port=TerminalPushApprovalPort(),
+            )
+        finally:
+            close = getattr(merge_store, "close", None)
+            if close is not None:
+                await close()
+            await github.aclose()
+
+    outcome = asyncio.run(execute())
+    if outcome.view is not None:
+        print(json.dumps(outcome.view, ensure_ascii=False, indent=2))
+        return outcome.exit_code
+    run = outcome.run
+    if run is not None:
+        print(f"run_id    : {run.run_id}")
+        print(f"state     : {run.state.value}")
+        if run.push is not None:
+            print(f"pr        : {run.push.pull_request.url}")
+            print(f"head_sha  : {run.push.commit_sha}")
+    if outcome.reason:
+        print(outcome.reason, file=sys.stderr)
+    return outcome.exit_code
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app.cli", description="moa-gateway 操作入口"
@@ -730,6 +787,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     delivery_view.add_argument("--run-id", required=True)
     delivery_view.set_defaults(func=cmd_delivery_view)
+
+    delivery_resume = delivery_sub.add_parser(
+        "resume",
+        help="重入搁浅记录的推送门禁或对齐合并状态（不重跑实现者）",
+    )
+    delivery_resume.add_argument("--run-id", required=True)
+    delivery_resume.set_defaults(func=cmd_delivery_resume)
 
     delivery_preflight = delivery_sub.add_parser(
         "preflight",
