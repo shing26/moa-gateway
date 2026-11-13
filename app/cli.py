@@ -353,6 +353,11 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
     )
     from apps.code_review_pipeline.delivery.audit import WalDeliveryAudit
     from apps.code_review_pipeline.delivery.flow import DeliveryFlow
+    from apps.code_review_pipeline.delivery.lockfile import (
+        StaleLockReplaced,
+        acquire,
+        read_holder,
+    )
     from apps.code_review_pipeline.delivery.models import (
         DeliveryPolicy,
         DeliveryRequest,
@@ -392,92 +397,126 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
         print("GITHUB_TOKEN 未配置", file=sys.stderr)
         return 2
 
-    merge_store = build_merge_store()
-    if not isinstance(merge_store, PostgresMergeStore):
+    # 防重复启动（delivery-watchdog-v1）：同一条 (record_dir, repo) 一次只
+    # 允许一个 delivery 进程。持有者还活着就拒绝（exit 3）；持有者已死就
+    # 抢走锁并警告——2026-11-12 有两个被放弃的 run 挂了 22 小时没人发现。
+    lock_path = (
+        Path(settings.delivery_run_record_dir)
+        / ".locks"
+        / f"delivery-{args.repo.replace('/', '-')}.lock"
+    )
+    lock = acquire(lock_path)
+    if lock is None:
+        holder = read_holder(lock_path)
+        if holder is not None:
+            print(
+                f"delivery 已在运行: pid={holder.pid} "
+                f"started_at={holder.started_at} host={holder.host}; "
+                f"拒绝重复启动 ({lock_path})",
+                file=sys.stderr,
+            )
+        else:
+            print(f"delivery lock 被占用: {lock_path}", file=sys.stderr)
+        return 3
+    if isinstance(lock, StaleLockReplaced):
         print(
-            "delivery run 需要共享 MergeStore；请配置 "
-            "VECTOR_DB_DSN 或 CODE_REVIEW_DATABASE_URL",
+            f"warning: replaced stale lock held by pid={lock.previous.pid} "
+            f"started_at={lock.previous.started_at} host={lock.previous.host}",
             file=sys.stderr,
         )
-        return 2
 
-    config = LLMConfig.from_env("LLM")
-    config.model = settings.change_agent_model
-    llm = LLMClient(config)
-    github = build_github_client()
-    policy = DeliveryPolicy(
-        verify_command=verify_command,
-        topology=settings.delivery_topology,
-        max_steps=settings.delivery_max_steps,
-        max_tokens=settings.delivery_max_tokens,
-    )
-    request = DeliveryRequest(
-        trace_id=args.trace_id,
-        repo=args.repo,
-        base_sha=args.base_sha,
-        base_branch=args.base_branch,
-        branch=args.branch,
-        goal=args.goal,
-        title=args.title,
-        body=args.body,
-        origin=args.origin,
-        source_ref=args.source_ref,
-    )
+    try:
+        merge_store = build_merge_store()
+        if not isinstance(merge_store, PostgresMergeStore):
+            print(
+                "delivery run 需要共享 MergeStore；请配置 "
+                "VECTOR_DB_DSN 或 CODE_REVIEW_DATABASE_URL",
+                file=sys.stderr,
+            )
+            return 2
 
-    async def execute():
-        try:
-            with tempfile.TemporaryDirectory(prefix="moa-delivery-") as raw:
-                workspace = await GitHubWorkspaceProvisioner(
-                    github=github
-                ).materialize(
-                    repo=args.repo,
-                    base_sha=args.base_sha,
-                    destination=Path(raw) / "workspace",
-                )
-                pipeline = ChangePipeline(
-                    github=github,
-                    repo=args.repo,
-                    workspace=workspace,
-                    verify_command=verify_command,
-                    model_name=settings.change_agent_model,
-                    base_branch=args.base_branch,
-                    push_enabled=True,
-                    verify_timeout_s=settings.change_agent_verify_timeout_s,
-                )
-                adapter = GitHubChangeAdapter(
-                    pipeline=pipeline,
-                    merge_store=merge_store,
-                )
-                flow = DeliveryFlow(
-                    workspace=workspace,
-                    policy=policy,
-                    implementer=ProductionImplementer(
-                        llm=llm,
+        config = LLMConfig.from_env("LLM")
+        config.model = settings.change_agent_model
+        llm = LLMClient(config)
+        github = build_github_client()
+        policy = DeliveryPolicy(
+            verify_command=verify_command,
+            topology=settings.delivery_topology,
+            max_steps=settings.delivery_max_steps,
+            max_tokens=settings.delivery_max_tokens,
+        )
+        request = DeliveryRequest(
+            trace_id=args.trace_id,
+            repo=args.repo,
+            base_sha=args.base_sha,
+            base_branch=args.base_branch,
+            branch=args.branch,
+            goal=args.goal,
+            title=args.title,
+            body=args.body,
+            origin=args.origin,
+            source_ref=args.source_ref,
+        )
+
+        async def execute():
+            try:
+                with tempfile.TemporaryDirectory(prefix="moa-delivery-") as raw:
+                    workspace = await GitHubWorkspaceProvisioner(
+                        github=github
+                    ).materialize(
+                        repo=args.repo,
+                        base_sha=args.base_sha,
+                        destination=Path(raw) / "workspace",
+                    )
+                    pipeline = ChangePipeline(
+                        github=github,
+                        repo=args.repo,
+                        workspace=workspace,
                         verify_command=verify_command,
-                        command_timeout_s=settings.change_agent_verify_timeout_s,
-                    ),
-                    preparer=adapter,
-                    approval=TerminalPushApprovalPort(),
-                    publisher=adapter,
-                    recorder=DeliveryRunStore(settings.delivery_run_record_dir),
-                    audit=WalDeliveryAudit(),
-                    github=github,
-                )
-                return await flow.run(request)
-        finally:
-            await merge_store.close()
-            await llm.aclose()
-            await github.aclose()
+                        model_name=settings.change_agent_model,
+                        base_branch=args.base_branch,
+                        push_enabled=True,
+                        verify_timeout_s=settings.change_agent_verify_timeout_s,
+                    )
+                    adapter = GitHubChangeAdapter(
+                        pipeline=pipeline,
+                        merge_store=merge_store,
+                    )
+                    flow = DeliveryFlow(
+                        workspace=workspace,
+                        policy=policy,
+                        implementer=ProductionImplementer(
+                            llm=llm,
+                            verify_command=verify_command,
+                            command_timeout_s=settings.change_agent_verify_timeout_s,
+                        ),
+                        preparer=adapter,
+                        approval=TerminalPushApprovalPort(),
+                        publisher=adapter,
+                        recorder=DeliveryRunStore(
+                            settings.delivery_run_record_dir
+                        ),
+                        audit=WalDeliveryAudit(),
+                        github=github,
+                        heartbeat_dir=Path(settings.delivery_run_record_dir),
+                    )
+                    return await flow.run(request)
+            finally:
+                await merge_store.close()
+                await llm.aclose()
+                await github.aclose()
 
-    run = asyncio.run(execute())
-    print(f"run_id    : {run.run_id}")
-    print(f"state     : {run.state.value}")
-    print(f"failure   : {run.failure.to_dict() if run.failure else '-'}")
-    if run.push is not None:
-        print(f"pr        : {run.push.pull_request.url}")
-        print(f"head_sha  : {run.push.pull_request.head_sha}")
-    print(f"record    : {settings.delivery_run_record_dir}/{run.run_id}.json")
-    return 0 if run.state.value in {"waiting_ci", "ready_for_push_approval"} else 1
+        run = asyncio.run(execute())
+        print(f"run_id    : {run.run_id}")
+        print(f"state     : {run.state.value}")
+        print(f"failure   : {run.failure.to_dict() if run.failure else '-'}")
+        if run.push is not None:
+            print(f"pr        : {run.push.pull_request.url}")
+            print(f"head_sha  : {run.push.pull_request.head_sha}")
+        print(f"record    : {settings.delivery_run_record_dir}/{run.run_id}.json")
+        return 0 if run.state.value in {"waiting_ci", "ready_for_push_approval"} else 1
+    finally:
+        lock.release()
 
 
 def cmd_delivery_view(args: argparse.Namespace) -> int:
