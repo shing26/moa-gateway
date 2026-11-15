@@ -68,7 +68,7 @@ class EvalCase:
 def load_cases(path: str) -> list[EvalCase]:
     """Read JSONL one JSON object per line; blank lines skipped."""
     cases: list[EvalCase] = []
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         lines = f.readlines()
     for lineno, line in enumerate(lines, start=1):
         stripped = line.strip()
