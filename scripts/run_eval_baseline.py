@@ -41,13 +41,16 @@ from eval.schema import EvalCase, load_cases
 REPO = "shing26/moa-gateway"
 CLASS_ORDER = ("business", "failure", "boundary", "security")
 
-#: Frozen in issue #95 §2 (v1.2 amendment). ``.env`` stays untouched; these are
+#: Frozen in issue #95 §2 (v1.4 amendment). ``.env`` stays untouched; these are
 #: process-level overrides. The model is pinned here rather than inherited: the
-#: ``.env`` value 404s on this account and ``nemotron-3.5-lightning`` answers 200
-#: with empty content, so the protocol registered ``poolside/laguna-xs-2.1``
-#: (the only candidate that returned real text) explicitly.
+#: ``.env`` value 404s on this account. v1.2 had registered ``poolside/laguna-xs-2.1``
+#: on a connectivity probe alone; the first governed smoke run then showed it
+#: cannot drive the tool loop at all - 121 steps, every one a ``read_file``, zero
+#: writes, 1.37M tokens, ``budget_exhausted``. v1.4 pins
+#: ``nvidia/nemotron-3.5-super-vl-120b-a12b``, the model behind the ledger's
+#: 28/28 v19 run, after probing that it emits ``write_file`` tool calls in seconds.
 ENV_OVERRIDES = {
-    "CHANGE_AGENT_MODEL": "poolside/laguna-xs-2.1",
+    "CHANGE_AGENT_MODEL": "nvidia/nemotron-3.5-super-vl-120b-a12b",
     "CHANGE_AGENT_PUSH_ENABLED": "1",
     "LLM_TIMEOUT": "300",
     "DELIVERY_MAX_STEPS": "120",
