@@ -343,6 +343,28 @@ def test_env_given_as_json_arrays_becomes_tuple_of_tuples(tmp_path):
     assert not isinstance(c.env[0], list)
 
 
+def test_non_ascii_case_loads_regardless_of_locale_encoding(tmp_path):
+    """The file is UTF-8 by definition; a Chinese-locale default (GBK) must not break it."""
+    goal = "实现 issue #62：preflight 报告进入审计 detail — blocked 与通过路径都要带键。"
+    row = json.dumps(
+        {
+            "id": "tc-utf8",
+            "class_": "business",
+            "source": "repo",
+            "base_sha": "abc123",
+            "goal": goal,
+            "allowed_paths": ["a.py"],
+            "oracle_type": "script",
+        },
+        ensure_ascii=False,
+    )
+    path = tmp_path / "cases.jsonl"
+    path.write_text(row + "\n", encoding="utf-8")
+    cases = load_cases(str(path))
+    assert len(cases) == 1
+    assert cases[0].goal == goal
+
+
 def test_frozen_dataclass_rejects_attribute_assignment(tmp_path):
     """The frozen dataclass rejects attribute assignment (FrozenInstanceError)."""
     row = json.dumps(
