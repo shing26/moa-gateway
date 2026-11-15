@@ -1,6 +1,5 @@
 from eval.schema import EvalCase
 from dataclasses import dataclass
-from typing import Any
 
 
 @dataclass(frozen=True)
@@ -10,13 +9,42 @@ class L0Check:
     detail: str
 
 
+#: Checks that decide whether a delivery is acceptable: where it wrote, whether
+#: the verify command actually ran green, whether it touched forbidden paths, and
+#: whether it weakened test assertions.
+CONTRACT_CHECKS = frozenset({
+    'changed_paths_match',
+    'verify_exit_zero',
+    'forbidden_paths_touched',
+    'test_files_append_only',
+})
+
+#: Shape signals, NOT acceptance criteria. Their thresholds are heuristics
+#: derived from the failure corpus (pure read loops, verify chasing) and they
+#: fire on healthy deliveries too: six of the eight known-good merged runs in
+#: eval/cases/business.jsonl fail at least one of them (e.g. reads=11/22 is
+#: exactly the 50% boundary; 13 run_tests is normal for a multi-file change).
+#: Report their raw numbers; never fold them into "is this delivery good".
+SHAPE_CHECKS = frozenset({'read_ratio', 'verify_cycles'})
+
+
 @dataclass(frozen=True)
 class L0Report:
     checks: tuple[L0Check, ...]
 
     @property
     def all_passed(self) -> bool:
+        """Every check passed, shape signals included. Prefer contract_passed."""
         return all(c.passed for c in self.checks)
+
+    @property
+    def contract_passed(self) -> bool:
+        """The contract checks passed; shape signals are ignored."""
+        return all(c.passed for c in self.checks if c.name in CONTRACT_CHECKS)
+
+    def shape(self) -> dict[str, L0Check]:
+        """The shape-signal checks by name, for reporting raw numbers."""
+        return {c.name: c for c in self.checks if c.name in SHAPE_CHECKS}
 
 
 def _patch_section(patch: str, file_path: str) -> list[str]:
