@@ -122,4 +122,7 @@ C4  python -m pytest tests/unit -q
   在构造 request 之前就拒绝启动，因此既到不了推送门，也产不出 run 记录。
   协议里"26 条全跑"实际可达 17 条；9 条需要在语料里补一条中性的声明式 verify 命令，
   或另建 gate-state 测试台。这一步会改动策展数据，需要单独一次带 verifier 的改动。
-- 模型 `poolside/laguna-xs-2.1` 是本机唯一探测健康的模型（#95 v1.2 记录）。
+- **模型在 v1.4 改为 `nvidia/nemotron-3.5-super-vl-120b-a12b`**（#95 记录）。v1.2 的
+  `poolside/laguna-xs-2.1` 只经连通性探测就被录取，第一次真实冒烟即被证伪：121 步全是
+  `read_file`、零写入、1.37M tokens、`budget_exhausted`。新模型是台账 v19（28/28）用过的那一个，
+  探测确认能在数秒内发出 `write_file` 工具调用。
