@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from apps.code_review_pipeline.merge_state import (
+    InvalidMergeTransition,
     MergeAction,
     MergeState,
     is_terminal,

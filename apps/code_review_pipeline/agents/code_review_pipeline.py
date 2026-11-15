@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from app.agents.contract import AgentEnvelope
 from app.models.events import MoAEvent
 from apps.code_review_pipeline.agents.report_agent import ReportAgent
 from apps.code_review_pipeline.agents.review_critic import (

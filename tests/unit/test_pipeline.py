@@ -88,6 +88,11 @@ class FakeGuard:
         self.calls.append((agent_name, intent, payload, hitl_enabled))
         return self.verdict
 
+    def evaluate_output(self, text, *, intent="assistant", role=None, hitl_enabled=True):
+        # 输出守卫 fail-closed（ADR-037）后，桩缺这个方法会被宽捕获当成守卫
+        # 崩溃升级 REVIEW。这里补上，表示"配置了且健康"的守卫（返回放行）。
+        return GuardVerdict(action=GuardianAction.ALLOW, reason="ok"), ()
+
 
 class OkAgent:
     async def execute(self, envelope):
@@ -876,18 +881,38 @@ async def test_normal_output_has_empty_policy_hits(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_output_policy_exception_keeps_pipeline_ok(monkeypatch):
+async def test_output_policy_exception_fails_closed_to_review(monkeypatch):
+    """输出守卫自身抛异常时必须 fail-closed（契约 guard-failclosed-20261116、ADR-037）。
+
+    旧实现把守卫异常当放行（verdict=ALLOW、status="ok"）：守卫失明时危险输出
+    照样送达。修复后异常升级为 REVIEW——宽捕获不炸主请求，但最终 verdict
+    action 是 REVIEW、走 HITL，且 reason 携带异常类型与消息供审批人判断。
+
+    一致性覆盖说明：app/orchestration/graph.py 与 app/orchestration/collaboration.py
+    的守卫节点与此处是同一份 except 块的逐行镜像（reason 构造完全相同），
+    两运行时的一致性由 tests/unit/test_engine_parity_golden.py 的 golden parity
+    门禁守护；本用例覆盖 pipeline 站点的行为语义。
+    """
     patch_agents(monkeypatch, OkAgent())
+    engine = Engine()
     guard = GuardService()
 
     def boom(text, *, intent="assistant", role=None, hitl_enabled=True):
         raise RuntimeError("policy engine exploded")
 
     monkeypatch.setattr(guard, "evaluate_output", boom)
-    p = make_pipeline(guard=guard)
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "hitl_enabled", True)
+    p = make_pipeline(engine=engine, guard=guard)
     result = await p.run(make_event(), channel="test", target="s1")
-    assert result.status == "ok"
-    assert result.policy_hits == ()
+    # 最终 verdict 是 REVIEW 而非旧实现的 ALLOW：请求没炸（故障转移），
+    # 但以 pending_review 收场，守卫崩溃的事实进了审批单 reason。
+    assert result.status == "pending_review"
+    stored = engine.session_store.get_hitl(result.trace_id)
+    assert stored is not None
+    assert stored.reason.startswith("output guard failed closed:")
+    assert "RuntimeError: policy engine exploded" in stored.reason
 
 
 class ConcurrencyProbeAgent:

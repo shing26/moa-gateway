@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from apps.code_review_pipeline.schemas.pr_context import PRContext
+
 
 @dataclass(frozen=True)
 class Finding:

@@ -1450,8 +1450,14 @@ class CollabOrchestrator:
                 output_verdict, policy_ids = self._guard.evaluate_output(
                     raw_output, intent=guard_intent, role=role, hitl_enabled=hitl_enabled
                 )
-            except Exception:  # noqa: BLE001 - mirrored from the request path
-                output_verdict = GuardVerdict(action=GuardianAction.ALLOW, reason="ok")
+            except Exception as exc:  # noqa: BLE001 - mirrored from the request path
+                # 与请求路径（app/pipeline.py）同语义的 fail-closed（契约
+                # guard-failclosed-20261116、ADR-037）：守卫崩溃时升级 REVIEW 走
+                # HITL，宽捕获不向上抛，异常细节进 reason 不吞。
+                output_verdict = GuardVerdict(
+                    action=GuardianAction.REVIEW,
+                    reason=f"output guard failed closed: {type(exc).__name__}: {exc}",
+                )
                 policy_ids = ()
             eval_verdict = _verdict_from_eval_issues(
                 tuple(state.get("eval_issues", ()) or ())
