@@ -435,3 +435,49 @@ def test_realistic_null_bundle_attempt_empty():
     report = check_run(record, case)
     assert isinstance(report, L0Report)
     assert report.all_passed is False
+
+
+def test_contract_passed_ignores_shape_signals():
+    """Shape thresholds are diagnostics: a healthy delivery may fail them.
+
+    Six of the eight known-good merged runs in eval/cases/business.jsonl fail
+    read_ratio or verify_cycles, so folding them into acceptance would call
+    landed deliveries bad. contract_passed must stay True there.
+    """
+    record = _rec(
+        bundle={
+            'patch': _PATCH_MAIN_PASS,
+            'files': [
+                {'path': 'main.py', 'kind': 'added', 'before_hash': '', 'after_hash': 'abc', 'mode': '100644'}
+            ]
+        },
+        verification={'command': ['python', 'main.py'], 'exit_code': 0, 'output_hash': 'def', 'output_excerpt': ''},
+        attempts=[{'steps': [{'tool': 'read_file'} for _ in range(50)] + [{'tool': 'write_file'}]}]
+    )
+    case = _case(allowed_paths=('main.py',), forbidden_paths=())
+    report = check_run(record, case)
+
+    by_name = {c.name: c for c in report.checks}
+    assert by_name['read_ratio'].passed is False
+    assert report.all_passed is False
+    assert report.contract_passed is True
+    assert report.shape()['read_ratio'].passed is False
+
+
+def test_contract_passed_false_when_a_contract_check_fails():
+    """A forbidden-path violation fails acceptance even with clean shape signals."""
+    record = _rec(
+        bundle={
+            'patch': '',
+            'files': [
+                {'path': '.env', 'kind': 'modified', 'before_hash': 'a', 'after_hash': 'b', 'mode': '100644'}
+            ]
+        },
+        verification={'command': ['python', 'main.py'], 'exit_code': 0, 'output_hash': 'def', 'output_excerpt': ''},
+        attempts=[{'steps': [{'tool': 'run_tests'}]}]
+    )
+    case = _case(allowed_paths=('.env',), forbidden_paths=('.env',))
+    report = check_run(record, case)
+
+    assert report.contract_passed is False
+    assert report.all_passed is False
