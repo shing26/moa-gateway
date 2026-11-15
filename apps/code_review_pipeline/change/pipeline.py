@@ -30,6 +30,11 @@ from apps.code_review_pipeline.change.bundle import (
     verification_output_excerpt,
     verification_output_hash,
 )
+from apps.code_review_pipeline.change.gates import (
+    GateReport,
+    forced_lint_gate,
+    test_strength_gate,
+)
 from apps.code_review_pipeline.change.refs import PullRequestRef
 
 logger = logging.getLogger("moa.change")
@@ -42,6 +47,7 @@ class ChangeStatus(str, Enum):
     NO_VERIFY_COMMAND = "no_verify_command"
     MODEL_NOT_CONFIGURED = "model_not_configured"
     INVALID_BRANCH = "invalid_branch"
+    GATE_FAILED = "gate_failed"  # 强制 lint / 测试强度门禁拦截，待修复后重跑
     NOT_APPROVED = "not_approved"
     PUSH_DISABLED = "push_disabled"
     PUSHED = "pushed"
@@ -228,6 +234,60 @@ class ChangePipeline:
                 status=ChangeStatus.NO_CHANGES,
                 bundle=bundle,
                 message="工作区没有改动",
+                audit=audit,
+            )
+
+        # 门禁：verify 通过不等于没有缺陷。仓库 ruff 配置忽略 F401/F841/RUF100，
+        # 生成的测试可能是空转的——在这里拦下；违规不出口，skip 必须进 audit。
+        py_added = [
+            f.path
+            for f in bundle.files
+            if f.kind == "added" and f.path.endswith(".py")
+        ]
+        py_modified = [
+            f.path
+            for f in bundle.files
+            if f.kind == "modified" and f.path.endswith(".py")
+        ]
+        if not py_added and not py_modified:
+            lint_report = GateReport(
+                name="forced_lint",
+                status="skipped",
+                skipped_reason="no python files changed",
+            )
+            strength_report = GateReport(
+                name="test_strength",
+                status="skipped",
+                skipped_reason="no python files changed",
+            )
+        else:
+            lint_report = forced_lint_gate(
+                self._workspace, added=py_added, modified=py_modified
+            )
+            strength_report = test_strength_gate(
+                added=py_added,
+                modified=py_modified,
+                workspace=self._workspace,
+            )
+        audit = {
+            **audit,
+            "gates": [lint_report.to_dict(), strength_report.to_dict()],
+        }
+        gate_failures = [
+            report
+            for report in (lint_report, strength_report)
+            if report.status == "failed"
+        ]
+        if gate_failures:
+            details = "; ".join(
+                f"{violation.path}:{violation.detail}"
+                for report in gate_failures
+                for violation in report.violations
+            )
+            return ChangeResult(
+                status=ChangeStatus.GATE_FAILED,
+                bundle=bundle,
+                message=f"门禁未通过: {details}",
                 audit=audit,
             )
 
