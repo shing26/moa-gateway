@@ -584,8 +584,15 @@ class MoAPipeline:
                 output_verdict, policy_ids = self.guard_service.evaluate_output(
                     raw_output, intent=guard_intent, role=role, hitl_enabled=guard_hitl,
                 )
-            except Exception:
-                output_verdict = GuardVerdict(action=GuardianAction.ALLOW, reason="ok")
+            except Exception as exc:
+                # 输出守卫自身崩溃时 fail-closed（契约 guard-failclosed-20261116、
+                # ADR-037）：守卫没给出判定就不能当放行——verdict 升级 REVIEW 走
+                # HITL 人工审批。保持宽捕获不向上抛，守卫故障不应炸掉请求主流程，
+                # 但异常类型与消息必须进 reason 留给审批人，不许吞掉细节。
+                output_verdict = GuardVerdict(
+                    action=GuardianAction.REVIEW,
+                    reason=f"output guard failed closed: {type(exc).__name__}: {exc}",
+                )
                 policy_ids = ()
             eval_verdict = _verdict_from_eval_issues(
                 eval_result.issues

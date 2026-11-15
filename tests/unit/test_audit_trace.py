@@ -104,6 +104,11 @@ def _fakes():
         def evaluate(self, agent_name, intent, payload, *, hitl_enabled=True):
             return GuardVerdict(action=GuardianAction.ALLOW, reason="ok")
 
+        def evaluate_output(self, text, *, intent="assistant", role=None, hitl_enabled=True):
+            # 输出守卫 fail-closed（ADR-037）后，桩缺这个方法会被宽捕获当成守卫
+            # 崩溃升级 REVIEW。这里补上，表示"配置了且健康"的守卫（返回放行）。
+            return GuardVerdict(action=GuardianAction.ALLOW, reason="ok"), ()
+
     class FakeAgent:
         async def execute(self, envelope):
             return "agent reply"
