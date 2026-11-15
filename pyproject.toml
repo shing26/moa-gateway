@@ -24,7 +24,6 @@ dependencies = [
 dev = ["pytest>=8.2", "pytest-asyncio>=0.23", "ruff>=0.6", "bandit>=1.7"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.2", "pytest-asyncio>=0.23", "ruff>=0.6", "bandit>=1.7"]
 # Optional, deliberately NOT installed by default: the LangGraph orchestration
 # adapter (app/orchestration/graph.py). Resolving it pulls ~20 packages
 # including langsmith, which is exactly the dependency surface the default
