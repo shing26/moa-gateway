@@ -170,3 +170,16 @@
 > 守卫、人工 TTY 门禁原样保留）；以及 11-12 的两个 delivery 进程无看护存活 22
 > 小时。**台账 10/10 达成，窗口内提前两周收口。**候选下一行：`--isolated` ruff
 > 与测试强度检查做成 pipeline 常设门禁；delivery 重入/恢复命令；进程看护。
+
+> 2026-11-15（第 13 行候选缺陷收口，不计入交付数）：上述三个候选全部按验收链路
+> 落地——契约先冻结（`plans/pipeline-gates-v1.md`、`delivery-resume-v1.md`、
+> `delivery-watchdog-v1.md`），各自独立 worktree 实现、独立 verifier 亲跑裁决：
+> 常设门禁 PR #89（`merge d0c7e84`，变异测试证明测试有效）、delivery resume
+> PR #90（`merge 1472218`，篡改 bundle 哈希在任何远端/工作区活动前拒绝）、进程
+> 看护 PR #91（`merge 81ebe24`）。**看护任务首轮 verifier 判 FAIL**：抢占陈旧锁后
+> `finally: lock.release()` 对无 `release()` 的返回对象抛 `AttributeError`——即
+> 每次恢复运行都会在主体完成后崩溃，而实现方 15 个自测全绿也未发现（CLI 测试
+> 只覆盖拒绝路径未覆盖抢占路径）。修复 = `StaleLockReplaced` 改为 `LockHandle`
+> 子类并补 CLI 抢占路径端到端回归测试（verifier 亲自用旧代码复现失败、新代码
+> 通过），复裁 PASS。教训与第 13 行同型：**实现方自测的覆盖面本身就是待验证项**，
+> 验收必须由独立方对「未测试的分支」提问，而不是重跑实现方的同一批测试。
