@@ -29,6 +29,7 @@ from apps.code_review_pipeline.delivery.ports import (
     PushRecoveryRequired,
     RunRecorderPort,
 )
+from apps.code_review_pipeline.delivery.heartbeat import Heartbeat
 from apps.code_review_pipeline.delivery.state import assert_transition
 
 
@@ -73,6 +74,7 @@ class DeliveryFlow:
         clock: Callable[[], datetime] = _utcnow,
         new_run_id: Callable[[], str] = _new_run_id,
         github: Any = None,
+        heartbeat_dir: Path | None = None,
     ) -> None:
         if policy.topology != "single":
             raise ValueError(
@@ -93,8 +95,37 @@ class DeliveryFlow:
         # 保持原行为。这是 preflight 进 run 的第一半（issue #59）；把 report
         # 写进审计 detail 是第二半，刻意不在这做。
         self._github = github
+        # None = 不写 heartbeat（既有调用方与测试保持原行为）；配置后由
+        # CLI 传 record_dir，run 期间写 <dir>/<run_id>.heartbeat。
+        self._heartbeat_dir = Path(heartbeat_dir) if heartbeat_dir is not None else None
 
     async def run(self, request: DeliveryRequest) -> DeliveryRun:
+        """Run one delivery with a heartbeat covering the WHOLE run.
+
+        heartbeat 在 run record 首次落盘后立即启动（那时 run_id 才存在），
+        在覆盖全部出口路径的 ``finally`` 里停掉——不管 run 是 finished、
+        failed、rejected 还是抛了异常。
+        """
+        heartbeat: Heartbeat | None = None
+
+        def start(run_id: str) -> None:
+            nonlocal heartbeat
+            if self._heartbeat_dir is not None:
+                heartbeat = Heartbeat.start(
+                    self._heartbeat_dir / f"{run_id}.heartbeat"
+                )
+
+        try:
+            return await self._run_locked(request, start)
+        finally:
+            if heartbeat is not None:
+                heartbeat.stop()
+
+    async def _run_locked(
+        self,
+        request: DeliveryRequest,
+        start_heartbeat: Callable[[str], None],
+    ) -> DeliveryRun:
         now = self._clock()
         run = DeliveryRun(
             schema_version=SCHEMA_VERSION,
@@ -115,6 +146,9 @@ class DeliveryFlow:
             updated_at=now,
         )
         await self._recorder.save(run)
+        # run record 首次落盘后立刻开始心跳：运维看到时间戳在走，就知道
+        # run 活着（2026-11-12 复盘：误杀 7+ 个健康 run 的观测缺口）。
+        start_heartbeat(run.run_id)
         await self._audit.record(
             run=run,
             previous=None,
