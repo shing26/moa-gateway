@@ -8,14 +8,17 @@
 
 ## 背景
 
-凭证防线此前只有**输入侧**的 `subprocess_env`：白名单环境变量，保证子进程
-"拿不到"新凭证。但它防不了**输出侧**：治理运行时会把三类**不可信内容**写进
-持久化位置——
+凭证防线的主力是**输入侧**的 `subprocess_env`：白名单环境变量，保证子进程
+"拿不到"新凭证。输出侧并非完全空白——`apps/code_review_pipeline/delivery/ci_triage.py`
+自 S0 起就有 `redact_ci_log()`，对 CI 日志引文做局部脱敏（ANSI 清洗 + 固定
+`[REDACTED]` 占位）；但它只覆盖那一条证据链，其余输出没有统一层。治理运行时
+会把三类**不可信内容**写进持久化位置——
 
 1. agent 输出（实现 Implementer 的返回，进审计 WAL / ES）；
 2. verify 命令回显（进 bundle 的 `verify_output`）；
 3. CI 日志引文（`ci_triage.py` 的报告正文，引用的是自己都声明 untrusted 的
-   日志数据）。
+   日志数据）——仍由其自带的 `redact_ci_log()` 处理，未并入本模块（见「后果」
+   的已知边界）。
 
 这些内容一旦带着密钥落盘或外发，就是删不干净的长期留痕：GitHub 上的 PR
 正文 / commit message 进 git 历史，WAL 的哈希链让"事后悄悄删掉那一行"本身
@@ -31,8 +34,10 @@
 
 1. **新增 `app/redact.py`**：`redact(text)` 与 `redact_value(value)`（递归
    容器）。八类高置信度形态：GitHub token（经典 + fine-grained）、OpenAI
-   `sk-`、AWS `AKIA`、Bearer、Authorization 头、PEM 私钥、URL 内嵌凭证、
-   通用 `key=value`。占位符统一 `[REDACTED:<kind>]`——grep 可盘点，不静默。
+   `sk-`、AWS `AKIA`、Bearer、Authorization 头（保留 Basic / token / Digest /
+   Bearer 等 scheme，只换凭证）、PEM 私钥、URL 内嵌凭证、通用 `key=value`
+   （含 `DB_PASSWORD` 这类带前缀变量名与 `{"password": "..."}` 这类 JSON 字段
+   形态）。占位符统一 `[REDACTED:<kind>]`——grep 可盘点，不静默。
 2. **只接两处汇聚点，不在调用方散接**：
    - `AuditEntry.to_audit_dict()`——WAL 与 ES 的唯一序列化出口。哈希链覆盖
      的就是脱敏后落盘的内容；`agent_output_len` 取脱敏后长度，与落盘一致。
@@ -48,9 +53,15 @@
 
 ## 后果
 
-- 正面：凭证防线从单点（输入侧）变成纵深（输入 + 输出落盘 + 输出外发），
-  三处都有可点开的 artifact；形态清单集中在 `_PATTERNS` 一处，测试逐形态
-  覆盖且含确定性判据。
+- 正面：凭证防线从以输入侧为主变成纵深（输入 + 输出落盘 + 输出外发），
+  三处都有可点开的 artifact；`app/redact.py` **内部**的形态清单集中在
+  `_PATTERNS`，测试逐形态覆盖，且含确定性判据与"普通审计文本不误杀"的反例。
+- 已知边界（如实陈述）：仓库里目前是**两套**脱敏正则——本模块的 `_PATTERNS`
+  （占位符 `[REDACTED:<kind>]`）与 `apps/code_review_pipeline/delivery/ci_triage.py`
+  的 `_REDACTIONS`（占位符 `[REDACTED]`，另含 ANSI 清洗）。两者形态清单与
+  占位符均未统一，本 ADR 记录时也未合并；后续方向是单独 PR 把 CI triage
+  的清单收敛到同一套正则/占位符，并为 CI 日志补上与 `_PATTERNS` 同级的
+  回归用例。在此之前，"某形态被脱敏"只对本模块覆盖的出口成立。
 - 负面（如实陈述）：误杀风险仍存在——普通文本若恰好长得像密钥（如 ≥12 字符
   的 `password: ...` 值）会被占位符替换；接受，因为漏杀的代价（密钥永久
   留痕）远高于误杀的代价（审计里多一个占位符）。
