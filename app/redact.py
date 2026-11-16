@@ -58,8 +58,9 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str], int | None], ...] = (
     #     一个数字、大写字母或符号**（`+ / = . _ ~ -`）。纯小写字母的 ≥12 字符串
     #     按普通英文词处理（如 "Basic authentication failed"），否则
     #     "authentication"（14 个小写字母）会被当成凭证误杀。取舍：极少数纯小写
-    #     不透明 token 会漏杀——但 base64、手写 token 和大部分随机 token 都带
-    #     数字/大写/符号；漏杀的代价由通用 key-value 与 Bearer 模式兜底。
+    #     不透明 token 会漏杀，且**没有别的规则兜底**（key-value 的键白名单不含
+    #     authorization，Bearer 分支只覆盖 Bearer）——这是刻意的：ADR-035 的口径是
+    #     宁漏勿误，审计记录被吞成占位符比漏掉一个低熵 token 更难补救。
     #   * Digest 的 `key="value", key2="value2"` 参数串——含 `=` 的整行剩余部分。
     # 注意 `(?i)` 下 `[A-Z]` 也会匹配小写，故"非小写字母"部分用 `(?-i:...)` 局部关闭。
     (
