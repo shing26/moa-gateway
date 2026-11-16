@@ -13,6 +13,7 @@ if str(ROOT) not in sys.path:
 from eval.schema import EvalCase
 from scripts.run_eval_baseline import (
     ENV_OVERRIDES,
+    GATE_STATE_ARM,
     build_command,
     build_env,
     case_arm,
@@ -31,6 +32,27 @@ def _case(**kw) -> EvalCase:
         "allowed_paths": ("a.py",),
         "oracle_type": "script",
         "verify_commands": ("python -m pytest tests/unit/test_a.py -q",),
+    }
+    base.update(kw)
+    return EvalCase(**base)
+
+
+def _probe_case(**kw) -> EvalCase:
+    base = {
+        "id": "exc-postgres-down",
+        "class_": "boundary",
+        "source": "synthesized; probe",
+        "base_sha": "a" * 40,
+        "goal": "(no LLM) recovery",
+        "allowed_paths": (),
+        "oracle_type": "script",
+        "verify_commands": (),
+        "oracle_checks": (
+            "recover_registers_once",
+            "second_recover_idempotent",
+            "no_duplicate_remote_write",
+        ),
+        "tags": ("l1-harness", "gate-state-probe"),
     }
     base.update(kw)
     return EvalCase(**base)
@@ -59,8 +81,8 @@ def test_env_pins_the_frozen_overrides_and_the_case_verify_command() -> None:
 def test_env_clears_verify_command_when_case_has_none() -> None:
     """A case without a verify command must not inherit .env's default.
 
-    Otherwise 9 of 26 cases would be gated by a command the case never
-    declared (issue #95 §3.2).
+    Probe cases never spawn, but the env builder must stay fail-closed: an empty
+    value makes the CLI refuse instead of gating on an undeclared command.
     """
     env = build_env(_case(verify_commands=()), {"CHANGE_AGENT_VERIFY_COMMAND": "python -m pytest -q"})
 
@@ -69,45 +91,76 @@ def test_env_clears_verify_command_when_case_has_none() -> None:
 
 def test_case_arm_splits_live_and_gate_state() -> None:
     assert case_arm(_case()) == "live"
-    assert case_arm(_case(verify_commands=())) == "gate_state"
+    assert case_arm(_probe_case()) == "gate_state"
+    # A live gate-state case declares its neutral command and still runs.
+    assert (
+        case_arm(
+            _case(
+                class_="security",
+                verify_commands=("python -c pass",),
+                tags=("l2-live", "gate-state-live"),
+            )
+        )
+        == "live"
+    )
 
 
 def test_gate_state_case_is_recorded_but_never_spawned(tmp_path: Path) -> None:
-    """A case with no verify command cannot start a delivery run (cli exit 2).
-
-    It must still get a row so the denominator stays 26, and it must not spend
-    a model call to rediscover a refusal the CLI makes before the request is
-    even built.
-    """
+    """A probe case runs in-process: no child, no log, a real verdict row."""
     row = run_case(
-        _case(verify_commands=()),
+        _probe_case(),
         stamp="20260101-000000",
         timeout_s=0.001,
         log_dir=tmp_path,
     )
 
     assert row["arm"] == "gate_state"
-    assert row["state"] == "not_run_by_design"
+    assert row["state"] in {"gate_state_passed", "gate_state_failed"}
+    assert row["state"] == "gate_state_passed"
     assert row["run_id"] == ""
     assert row["exit_code"] is None
-    assert "CHANGE_AGENT_VERIFY_COMMAND" in row["reason"]
+    assert row["gate_state"]["checks"][0]["name"] == "recover_registers_once"
+    assert [check["name"] for check in row["gate_state"]["checks"]] == list(
+        _probe_case().oracle_checks
+    )
+    assert row["reason"] == GATE_STATE_ARM
     assert list(tmp_path.iterdir()) == []
 
 
+def test_probe_verdict_is_exactly_the_oracle_checks() -> None:
+    """A probe whose names do not match the corpus is a hard error."""
+    case = _probe_case(oracle_checks=("wrong_name",))
+
+    row = run_case(case, stamp="s", timeout_s=0.001, log_dir=Path("."))
+
+    assert row["state"] == "gate_state_failed"
+    assert [c["name"] for c in row["gate_state"]["checks"]] == ["wrong_name"]
+    assert "probe checks" in row["gate_state"]["checks"][0]["detail"]
+
+
 def test_prepare_report_refreshes_metadata_and_keeps_rows(tmp_path: Path) -> None:
-    """A report from an older protocol must not keep its stale model."""
+    """A report from an older protocol must not keep its stale model or arm."""
     path = tmp_path / "report.json"
     path.write_text(
-        json.dumps({"protocol": "old", "model": "", "rows": [{"case_id": "biz-x"}]}),
+        json.dumps(
+            {
+                "protocol": "old",
+                "model": "",
+                "deferred_arm": "old reason",
+                "rows": [{"case_id": "biz-x"}],
+            }
+        ),
         encoding="utf-8",
     )
 
     report = prepare_report(path, "20260101-000000")
 
-    assert report["protocol"] == "issue #95 (v1.2)"
+    assert report["protocol"] == "issue #95 (v1.5 gate-state)"
     assert report["model"] == ENV_OVERRIDES["CHANGE_AGENT_MODEL"]
     assert report["stamp"] == "20260101-000000"
     assert report["rows"] == [{"case_id": "biz-x"}]
+    assert report["gate_state_arm"] == GATE_STATE_ARM
+    assert "deferred_arm" not in report
 
 
 def test_prepare_report_survives_a_report_without_rows(tmp_path: Path) -> None:

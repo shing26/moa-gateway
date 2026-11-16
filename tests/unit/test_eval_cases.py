@@ -14,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from eval.schema import load_cases
+from eval.gate_state import PROBES, is_live_gate_case, is_probe_case
+from eval.schema import EvalCase, load_cases
 
 CASES_DIR = Path(__file__).resolve().parents[2] / "eval" / "cases"
 
@@ -30,9 +31,34 @@ ID_PREFIXES = {
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _DLV_RE = re.compile(r"dlv-[0-9a-f]{32}")
 
+#: The nine cases the baseline v1 report recorded as not_run_by_design. Four
+#: are model-behaviour cases (live + gate verdict); five are gate mechanisms
+#: measured directly by eval/gate_state.py.
+LIVE_GATE_IDS = {
+    "bnd-empty-diff",
+    "sec-env-edit",
+    "sec-ledger-selfwrite",
+    "sec-issue-injection",
+}
+PROBE_IDS = {
+    "exc-postgres-down",
+    "exc-ci-red",
+    "bnd-aapprove-typo",
+    "sec-skip-push-gate",
+    "sec-merge-selfapprove",
+}
+
 
 def _case_paths() -> list[Path]:
     return sorted(CASES_DIR.glob("*.jsonl"))
+
+
+def _all_cases() -> dict[str, EvalCase]:
+    return {
+        case.id: case
+        for path in _case_paths()
+        for case in load_cases(str(path))
+    }
 
 
 @pytest.mark.parametrize("case_class", sorted(EXPECTED_COUNTS))
@@ -72,3 +98,44 @@ def test_every_case_is_replayable(path: Path) -> None:
             # checks the oracle runs.
             assert case.oracle_checks, f"{case.id}: no oracle_checks"
             assert case.source.strip(), f"{case.id}: no anchor in source"
+
+
+def test_the_nine_formerly_deferred_cases_have_a_measurable_path() -> None:
+    """No boundary/security case may be unreachable: CLI exit 2 is not a path."""
+    cases = _all_cases()
+    for case_id in LIVE_GATE_IDS | PROBE_IDS:
+        assert case_id in cases, f"{case_id} disappeared from the corpus"
+    for case_id, case in cases.items():
+        if case.class_ not in ("boundary", "security"):
+            continue
+        assert case.verify_commands or is_probe_case(case), (
+            f"{case_id}: neither a declared verify command nor a gate-state probe"
+        )
+
+
+def test_live_and_probe_tags_cover_exactly_the_nine_cases() -> None:
+    cases = _all_cases()
+    live = {case_id for case_id, case in cases.items() if is_live_gate_case(case)}
+    probe = {case_id for case_id, case in cases.items() if is_probe_case(case)}
+
+    assert live == LIVE_GATE_IDS
+    assert probe == PROBE_IDS
+    assert set(PROBES) == PROBE_IDS
+    for case_id in live:
+        assert cases[case_id].verify_commands, f"{case_id}: live gate needs a verify command"
+        assert case_id not in PROBES, f"{case_id}: a live case must not also be a probe"
+    for case_id in probe:
+        assert not cases[case_id].verify_commands, f"{case_id}: probe must declare no verify command"
+        assert cases[case_id].oracle_checks, f"{case_id}: probe needs oracle_checks"
+
+
+def test_every_live_case_declares_the_neutral_verify_command() -> None:
+    """The four live gate cases declare it in the corpus; the runner injects nothing."""
+    cases = _all_cases()
+    for case_id in LIVE_GATE_IDS:
+        assert cases[case_id].verify_commands == (
+            "python -c \"print('gate-state-declared-verify')\"",
+        ), case_id
+        # The injection payload says `python -c pass`; sharing it would make
+        # "not neutered" indistinguishable from "declared that way".
+        assert cases[case_id].verify_commands[0] != "python -c pass"

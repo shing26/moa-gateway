@@ -36,6 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from eval import gate_state
 from eval.schema import EvalCase, load_cases
 
 REPO = "shing26/moa-gateway"
@@ -92,10 +93,11 @@ def build_command(case: EvalCase, stamp: str) -> list[str]:
 def build_env(case: EvalCase, base_env: dict[str, str]) -> dict[str, str]:
     """Process env for one case: frozen overrides plus the case's verify command.
 
-    The verify command is ALWAYS set explicitly. A case without one gets the
-    empty string, which the pipeline reads as "no verify command" and stops at
-    NO_VERIFY_COMMAND - it must never fall through to ``.env``'s default, or the
-    run would be gated by a command the case never declared.
+    The verify command is ALWAYS set explicitly. Probe cases never reach this
+    point (they run in-process); if one ever did, the empty string makes the
+    CLI refuse with exit 2 instead of inheriting ``.env``'s default. The four
+    live gate-state cases declare a neutral command in the corpus itself, so the
+    runner still injects nothing the case does not declare.
     """
     env = dict(base_env)
     env.update(ENV_OVERRIDES)
@@ -104,25 +106,26 @@ def build_env(case: EvalCase, base_env: dict[str, str]) -> dict[str, str]:
 
 
 def case_arm(case: EvalCase) -> str:
-    """Which pre-registered arm a case belongs to (issue #95 §3.2).
+    """Which arm a case belongs to.
 
-    ``live`` - the case declares a verify command and runs the whole pipeline.
-    ``gate_state`` - synthesized cases carry no verify command by design. They
-    are NOT replayable: ``app/cli.py:392-395`` refuses to start a delivery run
-    without ``CHANGE_AGENT_VERIFY_COMMAND`` (exit 2, no run record), and the
-    corpus deliberately declares none. Injecting one would gate the run on a
-    command the case never declared, so this runner records them as deferred
-    instead of pretending to measure them (see ``GATE_STATE_REASON``).
+    ``gate_state`` - the case carries the ``gate-state-probe`` tag: its gate is
+    measured by constructing it directly (``eval/gate_state.py``), with no model,
+    no subprocess and no network. These are the cases a ``delivery run`` cannot
+    measure: three declare ``(no LLM)`` and two gate mechanisms are unreachable
+    from a normal model run.
+
+    ``live`` - everything else. Four gate-state cases are live too: the corpus
+    declares their neutral verify command, the run executes, and the run record
+    is scored against ``oracle_checks`` afterwards (``evaluate_record``).
     """
-    return "live" if case.verify_commands else "gate_state"
+    return "gate_state" if gate_state.is_probe_case(case) else "live"
 
 
-#: Why gate_state cases are not run by this runner. Repeated in every row and
-#: in the report so a reader cannot mistake "deferred" for "passed".
-GATE_STATE_REASON = (
-    "no verify command declared; the CLI refuses to start a delivery run "
-    "without CHANGE_AGENT_VERIFY_COMMAND (app/cli.py:392-395, exit 2). "
-    "Gate-state cases need their own harness; they are not L0-scoreable."
+#: How the probe arm works. Repeated in the report so a reader cannot mistake
+#: an in-process gate measurement for a model run.
+GATE_STATE_ARM = (
+    "deterministic probe in eval/gate_state.py: the gate is constructed "
+    "directly (no model, no subprocess, no network); judged by oracle_checks."
 )
 
 
@@ -143,7 +146,23 @@ def _parse_field(stdout: str, name: str) -> str:
 def _run_record_dir() -> Path:
     from app.config import settings
 
-    return Path(settings.delivery_run_record_dir)
+    directory = Path(settings.delivery_run_record_dir)
+    if not directory.is_absolute():
+        # The child runs with cwd=ROOT; resolve the same way here so a runner
+        # started from another directory still reads the child's records.
+        directory = ROOT / directory
+    return directory
+
+
+def _load_run_record(run_id: str) -> dict | None:
+    if not run_id:
+        return None
+    path = _run_record_dir() / f"{run_id}.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _find_run_id_for_branch(branch: str) -> str:
@@ -182,13 +201,22 @@ def _kill_tree(pid: int) -> None:
         pass
 
 
-def _deferred_row(case: EvalCase, branch: str) -> dict:
-    """The row for a gate_state case: recorded, never run.
+def _gate_state_row(case: EvalCase, branch: str) -> dict:
+    """Run one in-process probe and return its verdict row.
 
-    A row (not silence) so the report's denominator stays 26 and a reader sees
-    which nine cases have no measurement instead of reading an absent row as a
-    pass.
+    No child process and no log: the verdict carries every check's detail, and
+    the probe arm is the only arm that can be reproduced without model, network
+    or Postgres.
     """
+    started = dt.datetime.now(dt.timezone.utc)
+    try:
+        verdict = gate_state.run_probe(case)
+    except Exception as exc:
+        # One broken probe must not stop the baseline: its row says so explicitly.
+        verdict = gate_state.failed_verdict(
+            case, f"probe failed: {type(exc).__name__}: {exc}"
+        )
+    elapsed = (dt.datetime.now(dt.timezone.utc) - started).total_seconds()
     return {
         "case_id": case.id,
         "class": case.class_,
@@ -196,12 +224,13 @@ def _deferred_row(case: EvalCase, branch: str) -> dict:
         "base_sha": case.base_sha,
         "branch": branch,
         "run_id": "",
-        "state": "not_run_by_design",
+        "state": verdict.state,
         "exit_code": None,
         "wall_timeout": False,
-        "elapsed_s": 0.0,
+        "elapsed_s": round(elapsed, 1),
         "log": "",
-        "reason": GATE_STATE_REASON,
+        "reason": GATE_STATE_ARM,
+        "gate_state": verdict.to_dict(),
     }
 
 
@@ -217,7 +246,12 @@ def run_case(
     env = build_env(case, dict(os.environ))
     branch = f"eval/{case.id}-{stamp}"
     if case_arm(case) == "gate_state":
-        return _deferred_row(case, branch)
+        return _gate_state_row(case, branch)
+    if not case.verify_commands:
+        # Corpus invariant: every case is either a probe or declares a verify
+        # command. Reaching here means the invariant test is broken, so fail
+        # loudly instead of spawning a child that the CLI will refuse.
+        raise ValueError(f"{case.id}: no verify command and no gate-state probe")
 
     popen_kwargs: dict = {}
     if os.name == "nt":
@@ -272,7 +306,7 @@ def run_case(
     except ValueError:
         log_ref = str(log_path)
 
-    return {
+    row = {
         "case_id": case.id,
         "class": case.class_,
         "arm": case_arm(case),
@@ -285,6 +319,17 @@ def run_case(
         "elapsed_s": round(elapsed, 1),
         "log": log_ref,
     }
+    if gate_state.is_live_gate_case(case):
+        record = _load_run_record(run_id)
+        if record is None:
+            verdict = gate_state.failed_verdict(
+                case,
+                f"no readable run record for run_id={run_id or '-'}",
+            )
+        else:
+            verdict = gate_state.evaluate_record(case, record)
+        row["gate_state"] = verdict.to_dict()
+    return row
 
 
 def prepare_report(report_path: Path, stamp: str) -> dict:
@@ -299,12 +344,15 @@ def prepare_report(report_path: Path, stamp: str) -> dict:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     if not isinstance(report.get("rows"), list):
         report["rows"] = []
+    # A report written before the probe arm existed must not keep claiming that
+    # the nine cases are unmeasurable.
+    report.pop("deferred_arm", None)
     report.update({
-        "protocol": "issue #95 (v1.2)",
+        "protocol": "issue #95 (v1.5 gate-state)",
         "stamp": stamp,
         "model": ENV_OVERRIDES["CHANGE_AGENT_MODEL"],
         "env_overrides": dict(ENV_OVERRIDES),
-        "deferred_arm": GATE_STATE_REASON,
+        "gate_state_arm": GATE_STATE_ARM,
     })
     return report
 
@@ -344,9 +392,11 @@ def main(argv: list[str] | None = None) -> int:
         tmp_path = report_path.with_suffix(report_path.suffix + ".tmp")
         tmp_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp_path, report_path)
+        gate = row.get("gate_state") or {}
         print(
             f"    run_id={row['run_id'] or '-'} state={row['state'] or '-'} "
             f"exit={row['exit_code']} {row['elapsed_s']}s"
+            + (f" gate_state={gate.get('state')}" if gate else "")
             + (" TIMEOUT" if row["wall_timeout"] else ""),
             flush=True,
         )
