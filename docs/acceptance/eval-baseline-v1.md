@@ -1,5 +1,8 @@
 # 评测基线 v1（2026-11-16）
 
+> **已被 [v2](eval-baseline-v2.md) 取代**（同日第二版，26 条全部可测）。本文保留为第一跑的历史记录；
+> 其中「9 条 gate_state 用例无测量」与「非 TTY 拒绝的终态是 rejected」两处结论已被 v2 修正。
+
 S1 预注册实验的第一次基线跑。协议：[issue #95](https://github.com/shing26/moa-gateway/issues/95)
 （v1.2 → v1.4）。运行器：`scripts/run_eval_baseline.py`（PR #96、#98 已合并）。
 裁决仪器：`eval/l0.py` 的 `contract_passed`（PR #96）。

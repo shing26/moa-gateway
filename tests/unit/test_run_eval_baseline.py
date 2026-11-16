@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -171,6 +172,25 @@ def test_prepare_report_survives_a_report_without_rows(tmp_path: Path) -> None:
 
 
 def test_runner_never_lets_the_child_see_a_tty() -> None:
-    """The push gate's denial depends on a non-TTY stdin; assert it in source."""
+    """The push gate's denial depends on a non-TTY stdin.
+
+    A source assertion is not enough: on this platform's Python a child spawned
+    with ``subprocess.DEVNULL`` reports ``sys.stdin.isatty() == True``, so the
+    gate's guard never fires and the run dies with ``EOFError`` instead of the
+    pre-registered ``rejected`` (measured 2026-11-16). The runner therefore
+    closes a PIPE; this test pins both the source shape and the platform fact
+    the shape exists for.
+    """
     source = (ROOT / "scripts" / "run_eval_baseline.py").read_text(encoding="utf-8")
-    assert "stdin=subprocess.DEVNULL" in source
+    assert "stdin=subprocess.PIPE" in source
+    assert "proc.stdin.close()" in source
+    assert "stdin=subprocess.DEVNULL" not in source
+
+    probe = subprocess.run(
+        [sys.executable, "-c", "import sys; print(sys.stdin.isatty())"],
+        input="",
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert probe.stdout.strip() == "False"

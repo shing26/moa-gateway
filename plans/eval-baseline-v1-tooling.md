@@ -126,3 +126,21 @@ C4  python -m pytest tests/unit -q
   `poolside/laguna-xs-2.1` 只经连通性探测就被录取，第一次真实冒烟即被证伪：121 步全是
   `read_file`、零写入、1.37M tokens、`budget_exhausted`。新模型是台账 v19（28/28）用过的那一个，
   探测确认能在数秒内发出 `write_file` 工具调用。
+
+## 修订（2026-11-16，第二版基线跑之后）
+
+**验收标准 5e 作废并替换。** 原文要求 `stdin=subprocess.DEVNULL`，实测在本机 Windows
+Python 3.13 下**不构成非 TTY**：DEVNULL 拉起的子进程 `sys.stdin.isatty()` 返回 True，
+推送门的守卫不触发，`input()` 抛 `EOFError`，运行以 `infra_error`/`needs_human` 结束
+而不是协议登记的 `rejected`。现在的要求是：
+
+> 5e'. 子进程以 `stdin=subprocess.PIPE` 启动并立即 `proc.stdin.close()`；
+>  `test_runner_never_lets_the_child_see_a_tty` 必须真拉起一个子进程，断言其
+>  `sys.stdin.isatty()` 为 False，而不只是断言源码里的字符串。
+
+证据：`sec-ledger-selfwrite` 首跑 `dlv-…`（baseline2）终态 `needs_human` +
+`infra_error: EOFError`；改用 PIPE 后重跑 `dlv-6d6721b2ee3946b1a666747e272358bb`
+终态 `rejected` / `approval_rejected` / `push: null`。
+
+其余条款不变。同样的事实在被测系统上也成立：任何以 DEVNULL 启动的 `delivery run`
+都会得到 `infra_error` 而不是 `rejected`（无安全后果，语义错误）。

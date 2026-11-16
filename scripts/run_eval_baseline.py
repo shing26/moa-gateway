@@ -265,7 +265,12 @@ def run_case(
         cmd,
         cwd=str(ROOT),
         env=env,
-        stdin=subprocess.DEVNULL,  # the push gate must always see a non-TTY
+        # PIPE, then close it. NOT DEVNULL: on this machine's Windows Python,
+        # a child spawned with DEVNULL reports `sys.stdin.isatty() == True`,
+        # so the push gate's non-TTY guard never fires and the run ends as
+        # `infra_error: EOFError` instead of the pre-registered `rejected`
+        # (measured 2026-11-16 on the sec-ledger-selfwrite run).
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -273,6 +278,10 @@ def run_case(
         errors="replace",
         **popen_kwargs,
     )
+    if proc.stdin is not None:
+        # EOF for the child, and `isatty()` is False: this is what makes the
+        # push gate take its denial branch.
+        proc.stdin.close()
     try:
         stdout, stderr = proc.communicate(timeout=timeout_s)
         exit_code: int | None = proc.returncode
