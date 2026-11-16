@@ -119,10 +119,14 @@ CASES = [
     ),
 ]
 
-#: 评审用的 15 条普通审计文本：保守性判据——审计可读性是交付物，必须原样通过。
+#: 评审用的 15 条普通审计文本 + 3 条 scheme 反例（Basic/token 后的普通英文短语）：
+#: 保守性判据——审计可读性是交付物，必须原样通过。
 BENIGN_TEXTS = [
     "Authorization: missing",
     "Authorization: required",
+    "Authorization: Basic authentication failed",
+    "Authorization: Basic credentials rejected",
+    "Authorization: token refresh scheduled",
     "Proxy-Authorization: absent",
     "token: rotated at 12:30",
     "secret: none configured",

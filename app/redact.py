@@ -52,18 +52,36 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str], int | None], ...] = (
         re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{16,}\b"),
         1,
     ),
-    # Authorization / Proxy-Authorization 头的值。scheme（Basic / token /
-    # Digest / Bearer）保留在上下文里，只换凭证。两种值形态：
-    #   * 单 token（Basic 的 base64、token 的不透明串）——≥12 字符的"密钥形"字符；
+    # Authorization / Proxy-Authorization 头带 scheme 的值（Basic / token /
+    # Digest / Bearer）：scheme 保留在上下文里，只换凭证。两种值形态：
+    #   * 单 token（Basic 的 base64、token 的不透明串）——≥12 字符，且**至少含
+    #     一个数字、大写字母或符号**（`+ / = . _ ~ -`）。纯小写字母的 ≥12 字符串
+    #     按普通英文词处理（如 "Basic authentication failed"），否则
+    #     "authentication"（14 个小写字母）会被当成凭证误杀。取舍：极少数纯小写
+    #     不透明 token 会漏杀——但 base64、手写 token 和大部分随机 token 都带
+    #     数字/大写/符号；漏杀的代价由通用 key-value 与 Bearer 模式兜底。
     #   * Digest 的 `key="value", key2="value2"` 参数串——含 `=` 的整行剩余部分。
-    # 要求 ≥12 字符、或显式 `key=value` 形态，避免把 "Authorization: missing"
-    # 这类说明文字杀掉。
+    # 注意 `(?i)` 下 `[A-Z]` 也会匹配小写，故"非小写字母"部分用 `(?-i:...)` 局部关闭。
     (
         "auth-header",
         re.compile(
             r"(?i)\b((?:proxy-)?authorization\s*[:=]\s*"
-            r"(?:(?:basic|bearer|token|digest)\s+)?)"
-            r"(?:[A-Za-z0-9._~+/=-]{12,}|\w+=[^\r\n]*)"
+            r"(?:basic|bearer|token|digest)\s+)"
+            r"(?:(?=[A-Za-z0-9._~+/=-]{12,})"
+            r"(?=[A-Za-z0-9._~+/=-]*(?-i:[0-9A-Z._~+/=-]))"
+            r"[A-Za-z0-9._~+/=-]+"
+            r"|\w+=[^\r\n]*)"
+        ),
+        1,
+    ),
+    # 不带 scheme 的 Authorization 头：保持原有语义不变（≥12 字符的密钥形）。
+    # 单列一条，是为了让上面"必须含数字/大写/符号"的收紧**只作用于带 scheme 的
+    # 值**，不误伤 "authorization: ffffffffffff..." 这类既有行为。
+    (
+        "auth-header",
+        re.compile(
+            r"(?i)\b((?:proxy-)?authorization\s*[:=]\s*)"
+            r"([A-Za-z0-9._~+/=-]{12,})"
         ),
         1,
     ),
