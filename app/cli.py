@@ -318,16 +318,26 @@ class TerminalPushApprovalPort:
         print(f"bundle   : {bundle.bundle_hash}")
         print(f"patch    : {bundle.patch_hash}")
         print(f"verify   : exit={bundle.verify_exit_code}")
-        if not sys.stdin.isatty():
+        # `isatty()` alone is not enough. A child spawned with stdin bound to
+        # DEVNULL/NUL reports `isatty() == True` on this machine's Windows
+        # Python, so the guard below lets it through and `input()` then raises
+        # EOFError - which the flow maps to `infra_error`/`needs_human`, not the
+        # `rejected` a denied gate must produce. Both no-stdin and non-TTY deny
+        # here; an EOF while prompting denies below. Nothing may raise.
+        if sys.stdin is None or not sys.stdin.isatty():
             print("non-interactive stdin; push approval denied")
             return None
-        operator = (await asyncio.to_thread(input, "approver: ")).strip()
-        answer = (
-            await asyncio.to_thread(
-                input,
-                "type APPROVE to push this exact bundle: ",
-            )
-        ).strip()
+        try:
+            operator = (await asyncio.to_thread(input, "approver: ")).strip()
+            answer = (
+                await asyncio.to_thread(
+                    input,
+                    "type APPROVE to push this exact bundle: ",
+                )
+            ).strip()
+        except EOFError:
+            print("stdin closed; push approval denied")
+            return None
         if not operator or answer != "APPROVE":
             return None
         return ChangeApproval(

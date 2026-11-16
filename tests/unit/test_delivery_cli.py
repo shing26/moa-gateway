@@ -727,3 +727,144 @@ def test_cmd_ci_triage_unexpected_failure_invalidates_all_stale_artifacts(
     assert cmd_delivery_ci_triage(args) == 1
     assert "unexpected parser bug" in capsys.readouterr().err
     assert not any(path.exists() for path in stale_paths)
+
+
+def _approval_bundle() -> SimpleNamespace:
+    return SimpleNamespace(
+        branch="moa/fix-1",
+        bundle_hash="bundle-1",
+        patch_hash="patch-1",
+        verify_exit_code=0,
+        trace_id="trace-1",
+    )
+
+
+def test_terminal_approval_denies_without_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("app.cli.sys.stdin", None)
+
+    approval = asyncio.run(
+        TerminalPushApprovalPort().request(run_id="run-1", bundle=_approval_bundle())
+    )
+
+    assert approval is None
+    assert "non-interactive stdin" in capsys.readouterr().out
+
+
+def test_terminal_approval_denies_on_eof_at_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A stdin that claims to be a TTY but has nothing to read.
+
+    This is the DEVNULL case: `isatty()` is True on this platform, so the
+    non-TTY guard is passed and `input()` raises EOFError. The port must deny,
+    not raise - an exception becomes `infra_error`, not `rejected`.
+    """
+
+    class EofStdin:
+        def isatty(self) -> bool:
+            return True
+
+    def eof(prompt: str) -> str:
+        raise EOFError
+
+    monkeypatch.setattr("app.cli.sys.stdin", EofStdin())
+    monkeypatch.setattr("builtins.input", eof)
+
+    approval = asyncio.run(
+        TerminalPushApprovalPort().request(run_id="run-1", bundle=_approval_bundle())
+    )
+
+    assert approval is None
+    out = capsys.readouterr().out
+    # Bound to the exact wording, not a substring: criteria 2 forbids wording
+    # that suggests an infrastructure failure, so every word of the denial
+    # matters. One denial line, exactly this one.
+    assert [line for line in out.splitlines() if "denied" in line] == [
+        "stdin closed; push approval denied"
+    ]
+    for word in ("error", "exception", "traceback"):
+        assert word not in out.lower()
+
+
+def test_terminal_approval_denies_on_eof_at_second_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class EofStdin:
+        def isatty(self) -> bool:
+            return True
+
+    answers = iter(["alice"])
+
+    def answer(prompt: str) -> str:
+        try:
+            return next(answers)
+        except StopIteration:
+            raise EOFError from None
+
+    monkeypatch.setattr("app.cli.sys.stdin", EofStdin())
+    monkeypatch.setattr("builtins.input", answer)
+
+    approval = asyncio.run(
+        TerminalPushApprovalPort().request(run_id="run-1", bundle=_approval_bundle())
+    )
+
+    assert approval is None
+    out = capsys.readouterr().out
+    assert [line for line in out.splitlines() if "denied" in line] == [
+        "stdin closed; push approval denied"
+    ]
+
+
+def test_terminal_approval_denies_under_a_real_devnull_child() -> None:
+    """The defect as it happened: a real child whose stdin is DEVNULL.
+
+    On this machine's Windows Python such a child reports `isatty() == True`,
+    so the non-TTY guard does not fire and the port reaches `input()`. It must
+    still deny, print a denial line and exit 0 - never raise EOFError (which
+    the flow maps to `infra_error`/`needs_human` instead of `rejected`).
+    """
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    code = (
+        "import asyncio\n"
+        "import sys\n"
+        "from types import SimpleNamespace\n"
+        "from app.cli import TerminalPushApprovalPort\n"
+        "bundle = SimpleNamespace(branch='b', bundle_hash='h', patch_hash='p',"
+        " verify_exit_code=0, trace_id='t')\n"
+        "print('ISATTY', sys.stdin.isatty())\n"
+        "approval = asyncio.run("
+        "TerminalPushApprovalPort().request(run_id='r', bundle=bundle))\n"
+        "print('RESULT', approval is None)\n"
+    )
+    proc = subprocess.run(  # fixed argv, no shell
+        [sys.executable, "-c", code],
+        cwd=str(root),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "RESULT True" in proc.stdout
+    assert "EOFError" not in proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr
+    # The branch is decided by what the child actually reports, so this pins the
+    # platform fact instead of assuming it: where DEVNULL reads as a TTY (this
+    # machine) the guard is passed and only the EOF handler can deny; where it
+    # does not, the guard denies. Either way the gate refuses and nothing raises.
+    if "ISATTY True" in proc.stdout:
+        assert "stdin closed; push approval denied" in proc.stdout
+    else:
+        assert "ISATTY False" in proc.stdout
+        assert "non-interactive stdin; push approval denied" in proc.stdout
