@@ -868,3 +868,88 @@ def test_terminal_approval_denies_under_a_real_devnull_child() -> None:
     else:
         assert "ISATTY False" in proc.stdout
         assert "non-interactive stdin; push approval denied" in proc.stdout
+
+
+def test_terminal_approval_denies_when_isatty_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Probing stdin fails on its own: a closed file raises ValueError."""
+
+    class ClosedStdin:
+        def isatty(self) -> bool:
+            raise ValueError("I/O operation on closed file")
+
+    monkeypatch.setattr("app.cli.sys.stdin", ClosedStdin())
+
+    approval = asyncio.run(
+        TerminalPushApprovalPort().request(run_id="run-1", bundle=_approval_bundle())
+    )
+
+    assert approval is None
+    out = capsys.readouterr().out
+    assert [line for line in out.splitlines() if "denied" in line] == [
+        "non-interactive stdin; push approval denied"
+    ]
+    for word in ("error", "exception", "traceback"):
+        assert word not in out.lower()
+
+
+def test_terminal_approval_denies_when_isatty_raises_oserror(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class BrokenStdin:
+        def isatty(self) -> bool:
+            raise OSError("bad file descriptor")
+
+    monkeypatch.setattr("app.cli.sys.stdin", BrokenStdin())
+
+    approval = asyncio.run(
+        TerminalPushApprovalPort().request(run_id="run-1", bundle=_approval_bundle())
+    )
+
+    assert approval is None
+    assert [line for line in capsys.readouterr().out.splitlines() if "denied" in line] == [
+        "non-interactive stdin; push approval denied"
+    ]
+
+
+def test_terminal_approval_denies_under_a_closed_stdin_child() -> None:
+    """The real interpreter: a child that closed its own stdin.
+
+    `sys.stdin.isatty()` raises `ValueError` there, not EOFError, so this is a
+    different failure from the DEVNULL case and must deny for the same reason:
+    an exception would be recorded as `infra_error` instead of `rejected`.
+    """
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    code = (
+        "import asyncio\n"
+        "import sys\n"
+        "from types import SimpleNamespace\n"
+        "from app.cli import TerminalPushApprovalPort\n"
+        "sys.stdin.close()\n"
+        "bundle = SimpleNamespace(branch='b', bundle_hash='h', patch_hash='p',"
+        " verify_exit_code=0, trace_id='t')\n"
+        "approval = asyncio.run("
+        "TerminalPushApprovalPort().request(run_id='r', bundle=bundle))\n"
+        "print('RESULT', approval is None)\n"
+    )
+    proc = subprocess.run(  # fixed argv, no shell
+        [sys.executable, "-c", code],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "non-interactive stdin; push approval denied" in proc.stdout
+    assert "RESULT True" in proc.stdout
+    assert "Traceback" not in proc.stderr
+    assert "ValueError" not in proc.stderr

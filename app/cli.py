@@ -324,7 +324,16 @@ class TerminalPushApprovalPort:
         # EOFError - which the flow maps to `infra_error`/`needs_human`, not the
         # `rejected` a denied gate must produce. Both no-stdin and non-TTY deny
         # here; an EOF while prompting denies below. Nothing may raise.
-        if sys.stdin is None or not sys.stdin.isatty():
+        try:
+            interactive = sys.stdin is not None and sys.stdin.isatty()
+        except (ValueError, OSError):
+            # Probing stdin can fail on its own: a closed file raises
+            # `ValueError: I/O operation on closed file`. A gate that cannot
+            # confirm an interactive operator must deny - raising would be
+            # mapped to `infra_error`. Only these two: Ctrl-C must still
+            # propagate rather than be turned into a denial.
+            interactive = False
+        if not interactive:
             print("non-interactive stdin; push approval denied")
             return None
         try:
