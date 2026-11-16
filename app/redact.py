@@ -52,13 +52,18 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str], int | None], ...] = (
         re.compile(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{16,}\b"),
         1,
     ),
-    # Authorization / Proxy-Authorization 头的值。要求 ≥12 字符的"密钥形"
-    # 字符，避免把 "Authorization: missing" 这类说明文字杀掉。
+    # Authorization / Proxy-Authorization 头的值。scheme（Basic / token /
+    # Digest / Bearer）保留在上下文里，只换凭证。两种值形态：
+    #   * 单 token（Basic 的 base64、token 的不透明串）——≥12 字符的"密钥形"字符；
+    #   * Digest 的 `key="value", key2="value2"` 参数串——含 `=` 的整行剩余部分。
+    # 要求 ≥12 字符、或显式 `key=value` 形态，避免把 "Authorization: missing"
+    # 这类说明文字杀掉。
     (
         "auth-header",
         re.compile(
-            r"(?i)\b((?:proxy-)?authorization\s*[:=]\s*)"
-            r"([A-Za-z0-9._~+/=-]{12,})"
+            r"(?i)\b((?:proxy-)?authorization\s*[:=]\s*"
+            r"(?:(?:basic|bearer|token|digest)\s+)?)"
+            r"(?:[A-Za-z0-9._~+/=-]{12,}|\w+=[^\r\n]*)"
         ),
         1,
     ),
@@ -75,12 +80,20 @@ _PATTERNS: tuple[tuple[str, re.Pattern[str], int | None], ...] = (
     ("url-credential", re.compile(r"(?i)\b(https?://)[^\s/:@]+:[^\s/@]+@"), 1),
     # 通用的 key=value / key: value 形态。字段名白名单 + 值长 ≥12 的双门槛，
     # 仍然是最容易误杀的一条，所以放在最后、置信度最低。
-    # 保留组 = 字段名 + 分隔符（合为一组），值本身换占位符。
+    # 覆盖三种常见书写形态：
+    #   * `password = <value>`
+    #   * `DB_PASSWORD=<value>` / `GITHUB_TOKEN=<value>`（带下划线前缀的变量名，
+    #     此前 `\b` 锚定在 `_` 前失效而漏杀）
+    #   * `{"password": "<value>"}`（JSON：字段名与分隔符之间、值外侧都有引号）
+    # 保留组 = 字段名（含其收尾引号）+ 分隔符 + 值的开引号，值本身换占位符；
+    # 值的收尾引号**不**吃掉，保证脱敏后仍是可读的合法片段。
     (
         "key-value",
         re.compile(
-            r"(?i)\b((?:api[_-]?key|secret|password|passwd|token|access[_-]?token)\b"
-            r"\s*[:=]\s*[\"']?)([A-Za-z0-9._~/+=-]{12,})[\"']?"
+            r"(?i)\b((?:[A-Za-z0-9]+[_-])*"
+            r"(?:api[_-]?key|secret|password|passwd|token|access[_-]?token)"
+            r"[\"']?\s*[:=]\s*[\"']?)"
+            r"([A-Za-z0-9._~/+=-]{12,})"
         ),
         1,
     ),

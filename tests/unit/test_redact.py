@@ -81,7 +81,67 @@ CASES = [
         "api_key = [REDACTED:key-value] end",
         id="generic-key-value",
     ),
+    pytest.param(
+        "Authorization: Basic c3ludGhldGljOnZhbHVlMTIzNA==",
+        "Authorization: Basic [REDACTED:auth-header]",
+        id="auth-header-basic-scheme-kept",
+    ),
+    pytest.param(
+        "Authorization: token opaquetokenvalue1234",
+        "Authorization: token [REDACTED:auth-header]",
+        id="auth-header-token-scheme-kept",
+    ),
+    pytest.param(
+        'Authorization: Digest username="Mufasa", '
+        'realm="testrealm@host.com", nonce="dcd98b7102dd2f0e8b11d0f600bfb0c093"',
+        "Authorization: Digest [REDACTED:auth-header]",
+        id="auth-header-digest-scheme-kept",
+    ),
+    pytest.param(
+        "DB_PASSWORD=envvalue123456",
+        "DB_PASSWORD=[REDACTED:key-value]",
+        id="prefixed-env-var-password",
+    ),
+    pytest.param(
+        "GITHUB_TOKEN=envvalue123456",
+        "GITHUB_TOKEN=[REDACTED:key-value]",
+        id="prefixed-env-var-token",
+    ),
+    pytest.param(
+        '{"password": "envvalue123456"}',
+        '{"password": "[REDACTED:key-value]"}',
+        id="json-key-value",
+    ),
+    pytest.param(
+        'password = "envvalue123456"',
+        'password = "[REDACTED:key-value]"',
+        id="trailing-quote-preserved",
+    ),
 ]
+
+#: 评审用的 15 条普通审计文本：保守性判据——审计可读性是交付物，必须原样通过。
+BENIGN_TEXTS = [
+    "Authorization: missing",
+    "Authorization: required",
+    "Proxy-Authorization: absent",
+    "token: rotated at 12:30",
+    "secret: none configured",
+    "access_token: absent",
+    "password policy updated for all users",
+    "Bearer of bad news: retry scheduled",
+    "api_key: (not configured)",
+    "GET https://github.com/owner/repo -> 200 OK",
+    "oauth token refresh scheduled for midnight",
+    "the token bucket refilled; retry 3/5",
+    "secret scanning enabled on the repository",
+    "password: required for production deploy",
+    "API_KEY rotation is documented in runbook 4",
+]
+
+
+@pytest.mark.parametrize("text", BENIGN_TEXTS)
+def test_benign_text_passes_through_unchanged(text: str) -> None:
+    assert redact(text) == text
 
 
 @pytest.mark.parametrize("dirty,expected", CASES)
