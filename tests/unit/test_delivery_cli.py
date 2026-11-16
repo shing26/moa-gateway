@@ -780,8 +780,14 @@ def test_terminal_approval_denies_on_eof_at_prompt(
 
     assert approval is None
     out = capsys.readouterr().out
-    assert "stdin closed" in out
-    assert "error" not in out.lower()
+    # Bound to the exact wording, not a substring: criteria 2 forbids wording
+    # that suggests an infrastructure failure, so every word of the denial
+    # matters. One denial line, exactly this one.
+    assert [line for line in out.splitlines() if "denied" in line] == [
+        "stdin closed; push approval denied"
+    ]
+    for word in ("error", "exception", "traceback"):
+        assert word not in out.lower()
 
 
 def test_terminal_approval_denies_on_eof_at_second_prompt(
@@ -808,7 +814,10 @@ def test_terminal_approval_denies_on_eof_at_second_prompt(
     )
 
     assert approval is None
-    assert "stdin closed" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert [line for line in out.splitlines() if "denied" in line] == [
+        "stdin closed; push approval denied"
+    ]
 
 
 def test_terminal_approval_denies_under_a_real_devnull_child() -> None:
@@ -825,10 +834,12 @@ def test_terminal_approval_denies_under_a_real_devnull_child() -> None:
     root = Path(__file__).resolve().parents[2]
     code = (
         "import asyncio\n"
+        "import sys\n"
         "from types import SimpleNamespace\n"
         "from app.cli import TerminalPushApprovalPort\n"
         "bundle = SimpleNamespace(branch='b', bundle_hash='h', patch_hash='p',"
         " verify_exit_code=0, trace_id='t')\n"
+        "print('ISATTY', sys.stdin.isatty())\n"
         "approval = asyncio.run("
         "TerminalPushApprovalPort().request(run_id='r', bundle=bundle))\n"
         "print('RESULT', approval is None)\n"
@@ -845,7 +856,15 @@ def test_terminal_approval_denies_under_a_real_devnull_child() -> None:
     )
 
     assert proc.returncode == 0, proc.stderr
-    assert "push approval denied" in proc.stdout
     assert "RESULT True" in proc.stdout
     assert "EOFError" not in proc.stdout + proc.stderr
     assert "Traceback" not in proc.stderr
+    # The branch is decided by what the child actually reports, so this pins the
+    # platform fact instead of assuming it: where DEVNULL reads as a TTY (this
+    # machine) the guard is passed and only the EOF handler can deny; where it
+    # does not, the guard denies. Either way the gate refuses and nothing raises.
+    if "ISATTY True" in proc.stdout:
+        assert "stdin closed; push approval denied" in proc.stdout
+    else:
+        assert "ISATTY False" in proc.stdout
+        assert "non-interactive stdin; push approval denied" in proc.stdout

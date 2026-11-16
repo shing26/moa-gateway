@@ -131,3 +131,28 @@ base   bc323d3:  ISATTY True   →  RAISED EOFError: EOF when reading a line
 `ISATTY True` 两行相同，正是缺陷前提：守卫不触发，差别全在 `input()` 之后。
 EOFError 一旦抛出，`flow.py` 映射成 `NEEDS_HUMAN` + `INFRA_ERROR`；现在返回 `None`，
 走 `flow.py` 的 `REJECTED` + `APPROVAL_REJECTED` 分支。
+
+## 修订 2（2026-11-16，第一轮 verifier PASS 之后，操作者指示收紧测试）
+
+第一轮 verifier 裁决 PASS，同时提出两条非阻塞建议，指出新增测试**弱于它们所声称覆盖的
+条款**。操作者指示先收紧再验证。本轮**只改测试断言**，产品代码零改动
+（`app/cli.py` 与第一轮裁决的字节相同），验收标准一条未放宽——只是把断言从
+「子串」提升到「条款本身」：
+
+1. **criteria 2**（拒绝说明的措辞）：原断言 `"error" not in out.lower()` 抓不到
+   `exception`，也不绑定具体拒绝行。现在断言：输出中所有含 `denied` 的行**恰好等于**
+   `["stdin closed; push approval denied"]`（一条、原文），且 `error`/`exception`/
+   `traceback` 三个词都不出现。两条 EOF 测试都这样断言。
+   说明：`"non-interactive stdin; push approval denied"` 这条既有措辞由既有测试
+   `test_terminal_approval_denies_non_tty` 覆盖，未改。
+2. **criteria 4b**（进程级 DEVNULL 测试）：原实现不断言子进程的 `isatty()`，因此在
+   DEVNULL 不算 TTY 的平台上它会走另一条拒绝分支而照样通过——契约声称这条测试
+   「钉死平台事实」，实际没有。现在子进程先打印 `ISATTY <bool>`，测试**按实测值分支**：
+   `True` → 必须出现 `stdin closed; push approval denied`（本机走的就是这条，即缺陷路径）；
+   `False` → 必须出现 `non-interactive stdin; push approval denied`。两平台都断言
+   「恰好匹配那一条」，因此任何一种环境下的错配都会失败。
+3. **未采纳**：verifier 第 3 条（`sys.stdin.isatty()` 自身可能抛 `ValueError`，如 stdin
+   已 close）不在 criteria 1 枚举的三档内，且修复它要动产品代码、需重新裁决产品行为，
+   本轮不做。
+
+这一轮不能沿用第一轮的证据：被验证的树变了（新增 commit），V1–V4 必须整轮重跑。
