@@ -62,6 +62,53 @@ jobs:
       - name: Verify imports
         run: uv run python -c "import app.main"
 
+  # 2026-11-16（锐评 P1）：tests/integration 9 个文件都有自跳过设计（服务缺席即
+  # skip），此前 CI 只跑 tests/unit，等于集成层零覆盖。这里起真实 Postgres/Redis
+  # 把它们跑起来。**独立 job 且不进 required checks**：基础设施缺席导致的 skip 是
+  # 预期行为，不应挡合并；端口对齐 docker-compose.dev.yml（5433/6380），本地与
+  # CI 看到同一套 DSN。-ra 让 skip 原因在输出里可见——"永远不跑的门禁比没有门
+  # 禁更坏"，至少要看得见它为什么没跑。
+  integration:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        ports:
+          - 5433:5432
+        env:
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: gateway
+          POSTGRES_DB: gateway
+        options: >-
+          --health-cmd "pg_isready -U gateway -d gateway"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      CODE_REVIEW_DATABASE_URL: postgres://gateway:gateway@localhost:5433/gateway
+      REDIS_URL: redis://localhost:6380/0
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pip install uv
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+      - name: Run integration tests
+        run: uv run pytest tests/integration -q -ra
+
   docker:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.run_docker == 'true')
     needs: test

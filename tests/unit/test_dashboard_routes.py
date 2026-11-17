@@ -106,7 +106,10 @@ def test_dashboard_knowledge_file_upload_detail_search():
             asyncio.run(knowledge_base.delete_doc(doc_id))
 
 
-def test_dashboard_ops_config_update():
+def test_dashboard_ops_config_update(monkeypatch):
+    # ADR-038：ops 写入默认 fail-closed；本用例钉的是"开关开时行为与修复前一致"，
+    # 显式打开闸门，断言本身零改动。
+    monkeypatch.setenv("DASHBOARD_OPS_WRITE", "1")
     saved = (
         os.environ.get("LLM_PROVIDER"),
         os.environ.get("LLM_MODEL"),
@@ -148,7 +151,9 @@ def test_dashboard_ops_config_update():
                 os.environ[key] = value
 
 
-def test_dashboard_ops_config_empty_api_key_keeps_runtime_key():
+def test_dashboard_ops_config_empty_api_key_keeps_runtime_key(monkeypatch):
+    # 同上：闸门显式打开，被钉住的仍是"空 api_key 不覆盖运行时 key"这条不变量。
+    monkeypatch.setenv("DASHBOARD_OPS_WRITE", "1")
     saved = (
         os.environ.get("LLM_PROVIDER"),
         os.environ.get("LLM_MODEL"),

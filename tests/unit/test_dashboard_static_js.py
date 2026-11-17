@@ -49,3 +49,10 @@ def test_test_bench_has_timeout_feedback() -> None:
 def test_ops_test_shows_progress_after_wait() -> None:
     js = _dashboard_js()
     assert "仍在等待响应（正在尝试模型）" in js
+
+
+def test_ops_save_shows_gate_hint_on_403() -> None:
+    """ADR-038：ops 写入被闸门拒绝（403）时给出可读提示，不重构面板。"""
+    js = _dashboard_js()
+    assert "ops_write_disabled" in js
+    assert "DASHBOARD_OPS_WRITE" in js

@@ -827,7 +827,14 @@
       document.getElementById('ops-api-key').value = '';
       loadOpsConfig();
     }).catch(function (err) {
-      toast(err.message, 'danger');
+      // ADR-038：服务端默认关掉 ops 写入（DASHBOARD_OPS_WRITE 未显式置真值）时
+      // 返回 403——裸的"请求失败: 403"没法告诉运维该动哪个开关，给出可读提示。
+      var msg = String(err.message || '');
+      if (msg.indexOf('403') !== -1 && msg.indexOf('ops_write_disabled') !== -1) {
+        toast('保存被拒绝：服务端未开启 DASHBOARD_OPS_WRITE 开关（在网关运行环境显式设为 1 后即可保存）', 'danger');
+      } else {
+        toast(msg, 'danger');
+      }
     }).finally(function () {
       setLoading(btn, false);
     });

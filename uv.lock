@@ -1065,12 +1065,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-dev = [
-    { name = "bandit" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
 langgraph = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
@@ -1086,7 +1080,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "bandit", marker = "extra == 'dev'", specifier = ">=1.7" },
     { name = "fastapi", specifier = ">=0.111" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jsonschema", specifier = ">=4.26" },
@@ -1097,15 +1090,12 @@ requires-dist = [
     { name = "opentelemetry-sdk", specifier = ">=1.25" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.7" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.2" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "redis", specifier = ">=5.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "uvicorn", specifier = ">=0.52.3" },
 ]
-provides-extras = ["dev", "langgraph"]
+provides-extras = ["langgraph"]
 
 [package.metadata.requires-dev]
 dev = [
