@@ -1,7 +1,7 @@
 # ADR-039: 异常处理债两笔——BLE001 三步开启与 Result 接口预注册
 
 日期：2026-11-16
-状态：第一步（BLE001 盘点与收敛）已实施，规则的最终开启被范围冲突阻塞（2026-11-17，见文末「第一步实施记录」）
+状态：第一步（BLE001 盘点与收敛）已实施，规则已开启（2026-11-17，见文末「第一步实施记录」）
 关联：ADR-037（输出守卫 fail-closed，已实施）、`app/orchestration/collaboration.py`
 的 `expert_failure_reason` 嗅探层、外部锐评（2026-11-16）第二/三条指控
 
@@ -11,7 +11,8 @@
 其 lint 半边已由 PR #97 部分修复（`E722`/`F821` 开启，3 处未定义名补 import）。
 剩余两笔债，成因同源，故同文记录：
 
-1. **`BLE001` 仍在 ignore 列表**：`app/` 内 112 处 `except Exception`。
+1. **`BLE001` 仍在 ignore 列表**：盘点范围内共 190 处 `except Exception`
+   （`app/` 112、`apps/` 65、`eval/` 6、`evals/` 2、`bench/` 5）。
    其中一部分是**健康的**（重试边界的兜底、审计"不拖垮主流程"的既定设计，
    如 `app/audit/recorder.py`），一部分正是 fail-open 的温床——ADR-037 修的
    三站点就是它们。规则不开，同类问题还会再长出来。
@@ -23,14 +24,14 @@
 
 **1. BLE001 三步开启，作为独立任务立项（不并入其他修复）：**
 
-1. **盘点**：112 处逐一定性为三类——健康兜底（加 `# noqa: BLE001` + 一句
+1. **盘点**：190 处逐一定性为三类——健康兜底（加 `# noqa: BLE001` + 一句
    理由）、该 fail-closed 的（改语义或收窄）、可收窄异常类型的（改 except 子句）；
 2. **收敛**：按类处理，每类一个 commit，全程 `tests/unit` 绿；
 3. **开启**：从 ignore 移除 `BLE001`，`ruff check .` 全绿，与 E722/F821 同批
    的"规则真实生效"判据（`--select BLE001` 零命中）照抄。
 
 触发点：窗口后任意时间，预估一次独立验收链路会话（worktree + verifier）。
-**禁止**在功能性修复的 PR 里顺手挪——112 处的 diff 会淹没功能变更。
+**禁止**在功能性修复的 PR 里顺手挪——近 200 处的 diff 会淹没功能变更。
 
 **2. `Result[Output, Failure]` 接口预注册：**
 
@@ -51,38 +52,38 @@
 
 ## 第一步实施记录（2026-11-17）
 
-**基线。** `app/` 内 `except Exception` 共 **112** 处。注意 ruff 0.16.3 的 BLE001 实测行为：
-处理器里用 `logger.exception` / `exc_info=True` 记录异常、或处理器重新抛出异常时，规则不报。
-因此 `ruff check --select BLE001 app` 在 base 上只报 **54** 处（28 处已有 `# noqa`，其中
-20 处被 noqa 抑制）；加 `--ignore-noqa` 报 **74** 处；与 112 的差额 38 处正是上述豁免。
-契约「分类总数 = base 命中数」的前提与 ruff 实际行为不符，本步以 **112**（全部真实站点）
-为盘点分母。
+**基线。** 真实站点共 **190** 处（`app/` 112 + `apps/` 65 + `eval/` 6 + `evals/` 2 +
+`bench/` 5）。注意 ruff 0.16.3 的 BLE001 实测行为：处理器里用 `logger.exception` /
+`exc_info=True` 记录异常、或处理器重新抛出异常时，规则不报；存量 `# noqa` 也会抑制命中。
+因此 `ruff check --select BLE001 .` 的命中数低于真实站点数，本步以 **190**（全部真实站点）
+为盘点分母，而不是以 lint 命中数为分母。
 
-**逐处定性（合计 112）。**
+**逐处定性（合计 190）。**
 
-- **A 健康兜底：107 处。** 全部保留 `except Exception`，加 `# noqa: BLE001 - <一句理由>`。
-  106 处已落地；`app/routes/dashboard.py:247` 因契约 Forbidden 禁止触碰而**未加**（见「阻塞」）。
+- **A 健康兜底：182 处**（`app/` 107、`apps/` 62、`eval/` 6、`evals/` 2、`bench/` 5）。
+  全部保留 `except Exception`，加 `# noqa: BLE001 - <一句理由>`；理由写入代码，
+  verifier 可按「为什么兜住是安全的」逐条复核。
 - **B 该 fail-closed：1 处**——`app/routes/health.py:142`（`privacy_erase`）。
   旧行为：向量删除失败仍返回 `200 {"status": "ok"}`，错误只塞进 `deleted.vectordb`；
   新行为：记录后原样上抛，由统一错误契约返回 500；更安全：隐私删除失败不再伪装成成功。
   覆盖测试：`tests/unit/test_privacy_erase.py::test_privacy_erase_fails_closed_when_vectordb_delete_fails`。
-- **C 可收窄：4 处**——`app/channels/feishu_event.py:36`（`json.loads` →
-  `JSONDecodeError`/`RecursionError`）、`app/engine.py:268` 与 `:283`（`json.loads` +
-  pydantic → `TypeError`/`ValueError`/`RecursionError`）、`app/memory.py:249`（同上）。
-  四处都是 JSON 解析边界：`ValueError` 已覆盖 `JSONDecodeError`/`UnicodeDecodeError` 与
-  pydantic `ValidationError`，收窄后不会漏。
+- **C 可收窄：7 处。**
+  - app 4 处：`app/channels/feishu_event.py:36`、`app/engine.py:268` 与 `:283`、
+    `app/memory.py:249`，都是 JSON 解析边界（`ValueError` 已覆盖
+    `JSONDecodeError`/`UnicodeDecodeError` 与 pydantic `ValidationError`）。
+  - 非 app 3 处：`apps/code_review_pipeline/agents/code_review_pipeline.py:635`
+    与 `agents/report_agent.py:108`（`json.loads(str)` →
+    `JSONDecodeError`/`RecursionError`）、`routing/github_client.py:213`
+    （`resp.json()` + `.get` → `AttributeError`/`ValueError`/`RecursionError`）。
+  每处收窄后仍保留原有的失败降级行为，没有把异常漏给调用方。
 
-**阻塞（本步的「开启」未完成）。**
+**开启已落地。** 从 `pyproject.toml` 的 `ignore` 移除 `BLE001`；未使用 per-file-ignores /
+extend-ignore。`ruff check --select BLE001 .` 零命中，`ruff check .` 全绿，`tests/unit` 全绿。
 
-1. `pyproject.toml` 的 `ignore` 仍含 `BLE001`。删除它会在 `ruff check .` 下暴露 **42 处**
-   `app/` 之外的命中（`apps/code_review_pipeline/`、`bench/`、`eval/`、`evals/`），全部在
-   本契约 Allowed paths 之外；CI 的 Lint 步骤正是 `ruff check .`。
-2. `app/routes/dashboard.py:247` 是 112 处之一且会被 BLE001 报出，但该文件在 Forbidden 列表。
-
-两项都需要扩大契约范围（把 `apps/`、`bench/`、`eval/`、`evals/` 与 `dashboard.py` 纳入
-Allowed paths）后才可执行「开启」。在此之前保留 `ignore`，`ruff check .` 全绿；
-`ruff check --select BLE001 app` 仍有且仅有 `dashboard.py:247` 一处。按契约 Forbidden，
-未越界修改。
+**交付链路复核。** `apps/` 树 65 处逐处确认，重点核对 `delivery/` 链路本体：失败都被终结为
+`NEEDS_HUMAN`/`FAILED`、转换成 `PushRecoveryRequired`，或只影响派生视图/观测信号；
+没有「失败被吞掉后推送/合并继续」的路径，因此该树 B 类为 0。`storage/review_store.py:965`
+的 `get()` 只读失败返回 `None`，没有生产调用方据此做写决策（仅契约/测试使用），按 A 处理。
 
 **未做：§决策 2（`Result[Output, Failure]` 接口）。** 触发条件不变：下次修改
 `app/orchestration/collaboration.py` 执行接口时一并做，或嗅探层再次实证误判时立项。
