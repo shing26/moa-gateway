@@ -165,7 +165,7 @@ class GitHubChangeAdapter:
                 trace_id=bundle.trace_id,
                 bundle_hash=bundle.bundle_hash,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - PR 已创建但合并登记失败需人工恢复，转换成 PushRecoveryRequired 上抛并保留原因
             raise PushRecoveryRequired(
                 push,
                 "PR was created but merge registration failed: "

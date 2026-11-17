@@ -86,7 +86,7 @@ async def _calculator_handler(expression: str) -> str:
         # 丢到线程里算：这是纯 CPU 工作，直接 await 会占住事件循环（ADR-018 决策 5）。
         result = await asyncio.to_thread(_eval_node, tree.body)
         return f"{expression} = {result}"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 计算器工具：AST 求值可抛除零/类型/内存等任意异常，工具契约要求转成观察文本
         return f"计算失败: {exc}"
 
 
@@ -99,7 +99,7 @@ async def _list_documents_handler() -> str:
 
     try:
         docs = await get_knowledge_base().list_docs()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 列文档工具：知识库后端任意故障都转成观察文本，工具失败不拖垮对话
         return f"获取文档列表失败: {exc}"
     if not docs:
         return "知识库中暂无文档。"

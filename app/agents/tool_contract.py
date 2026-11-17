@@ -105,7 +105,7 @@ def validate_tool_args(tool: AgentTool, args: dict[str, Any]) -> str | None:
     try:
         validator = jsonschema.Draft202012Validator(schema)
         errors = sorted(validator.iter_errors(args), key=lambda e: list(e.path))
-    except Exception as exc:  # noqa: BLE001 — 只可能是我们自己写错的 schema
+    except Exception as exc:  # noqa: BLE001 - schema 校验异常只可能是我们自己写错的 schema，不能把这次调用判成模型的错
         logger.error(
             "tool %s 的 parameters 不是可用 JSON Schema，本次跳过校验: %s", tool.name, exc
         )
@@ -143,7 +143,7 @@ async def call_tool(
 
     try:
         output = await tool.handler(**args)
-    except Exception as exc:  # noqa: BLE001 — 工具失败降级成 observation 是有意设计
+    except Exception as exc:  # noqa: BLE001 - 工具失败降级成 observation 是有意设计
         return ToolCallOutcome("failed", str(exc))
     return ToolCallOutcome("ok", str(output))
 

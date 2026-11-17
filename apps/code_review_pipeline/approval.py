@@ -174,7 +174,7 @@ async def approve_task(
             duration_ms=waited_ms,
         )
         await record_lifecycle(task_id, repo, "posting", operator=operator)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 审批审计写失败时拒绝继续 GitHub 写、把任务标 fail 后原样上抛，宽捕获只用于兜住任意审计后端故障
         logger.exception("approval audit failed; refusing GitHub write task=%s", task_id)
         try:
             store.transition_task(
@@ -185,7 +185,7 @@ async def approve_task(
                 expected_review_run_id=expected_review_run_id,
                 metadata={"reason": "approval_audit_failed"},
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - 审计失败后的补记 fail 状态本身再失败只记录；外层已重新抛出，不掩盖原始错误
             logger.exception("could not mark task failed after audit error task=%s", task_id)
         _release()
         raise
@@ -244,6 +244,6 @@ async def reject_task(
             duration_ms=waited_ms,
         )
         await record_lifecycle(task_id, repo, "rejected", operator=operator, reason=reason)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 拒绝状态已持久化，追加审计失败只记录，不影响已拒绝的语义
         logger.exception("rejection state persisted but audit append failed task=%s", task_id)
     return "rejected"

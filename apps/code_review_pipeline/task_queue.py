@@ -76,7 +76,7 @@ class TaskQueue:
                 self._stream, self._group, id="0", mkstream=True
             )
             return True
-        except Exception as exc:  # BUSYGROUP
+        except Exception as exc:  # noqa: BLE001 - 只吞重复建组的 BUSYGROUP，其余 Redis 错误原样上抛
             if "BUSYGROUP" not in str(exc):
                 raise
             return False

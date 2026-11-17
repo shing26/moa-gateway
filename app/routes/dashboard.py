@@ -244,7 +244,7 @@ async def dashboard_ops_test(body: OpsTestRequest) -> JSONResponse:
             [{"role": "user", "content": (body.message or "ping")[:500]}],
             max_tokens=64,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 连接测试端点把任意失败当作可展示结果（200 + ok:false），不向外抛
         # 连接失败是本探测端点的"正常结果"而非服务器错误：保持 200 +
         # ok:false，前端按"连接失败"渲染（dashboard.js 依赖该形状）。
         return JSONResponse({"ok": False, "error": str(exc)[:500]})

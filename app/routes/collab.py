@@ -127,7 +127,7 @@ async def run_collab(body: CollabRunRequest, request: Request) -> JSONResponse:
             {"error": ErrorCode.VALIDATION_ERROR.value, "message": str(exc)},
             status_code=400,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - 协作端点：ValueError 之外任意异常转 500 统一错误契约
         logger.exception("collab run failed task=%s", task[:80])
         return JSONResponse(
             {"error": ErrorCode.INTERNAL_ERROR.value, "message": "协作执行失败"},
@@ -187,7 +187,7 @@ async def collab_approve(body: CollabApproveRequest) -> JSONResponse:
     )
     try:
         result = await orchestrator.resume(trace_id, decision)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 协作续跑：任意异常转 500，客户端得到明确失败
         logger.exception("collab resume failed trace=%s", trace_id)
         return JSONResponse(
             {"error": ErrorCode.INTERNAL_ERROR.value, "message": "协作续跑失败"},

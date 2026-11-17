@@ -49,7 +49,7 @@ async def lifespan(_: FastAPI):
     try:
         cfg = TraceConfig(otlp_endpoint=settings.otel_exporter_otlp_endpoint)
         setup_tracing(cfg)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 可观测性初始化：可选 tracing 任意失败只告警，网关必须能启动
         logger.warning("opentelemetry tracing init failed")
     init_feishu()
     init_prompts()

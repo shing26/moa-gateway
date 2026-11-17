@@ -92,7 +92,7 @@ class Heartbeat:
     def _write_once(self) -> None:
         try:
             _write_atomic(self._path, datetime.now(UTC).isoformat() + "\n")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 心跳是纯观测信号，写失败只记日志，契约要求绝不中断交付流程
             logger.warning(
                 "heartbeat write failed for %s: %s", self._path, exc
             )

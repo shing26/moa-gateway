@@ -109,7 +109,7 @@ class CodeReviewPipeline:
             return None
         try:
             return await self._workspace_provisioner.prepare(pr)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 工作区供给失败降级为无工作区继续只读审查，不阻断主链也不写 GitHub
             logger.warning("workspace provisioning failed for %s#%s: %s", pr.repo, pr.pr_number, exc)
             return ReviewWorkspace(
                 path=None,
@@ -121,7 +121,7 @@ class CodeReviewPipeline:
             return
         try:
             await self._workspace_provisioner.cleanup(workspace)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 临时工作区清理失败只记录，残留目录不影响审查结果
             logger.warning("workspace cleanup failed: %s", exc)
 
     async def _run_with_workspace(
@@ -163,7 +163,7 @@ class CodeReviewPipeline:
         semantic_envelope = _envelope_from_event(event, diff_payload, agent="semantic_review")
         try:
             rag_result = await retrieve_team_patterns(semantic_envelope, limit=5)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - RAG 检索是可选增强，失败时退回无历史模式，审查主链照常执行
             logger.warning("RAG retrieval failed: %s", exc)
             rag_result = None
 
@@ -391,7 +391,7 @@ class CodeReviewPipeline:
                 if not isinstance(result, ReviewCriticResult):
                     raise TypeError("review critic returned an unexpected result")
                 return result
-            except Exception as exc:  # noqa: BLE001 - surfaced after bounded retry
+            except Exception as exc:  # noqa: BLE001 - 有界重试耗尽后原样抛出，宽捕获只用于累计最后一次错误
                 last_error = exc
                 logger.warning("review critic attempt %d failed: %s", attempt + 1, exc)
         raise RuntimeError(f"review critic failed after 2 attempts: {last_error}") from last_error
@@ -632,7 +632,9 @@ def _build_model_review_input(diff_payload: dict[str, Any], user_text: str) -> s
 def _safe_json(text: str) -> dict[str, Any]:
     try:
         return json.loads(text) if text else {}
-    except Exception:
+    except (json.JSONDecodeError, RecursionError):
+        # text 是 str：json.loads 对 str 只会抛 JSONDecodeError（ValueError 子类），
+        # 深层嵌套可能 RecursionError；收窄后畸形输入仍返回 {"raw": text}。
         return {"raw": text}
 
 
@@ -909,7 +911,7 @@ def _agent_result(agent: str, trace_id: str, raw: Any) -> AgentFindingResult:
             recommendation=str(data.get("recommendation", "comment")),
             need_human_review=bool(data.get("need_human_review", False)),
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 解析 agent 结果失败升级为 need_human_review=True，不静默当作零发现
         logger.warning("parse %s result failed: %s", agent, exc)
         return AgentFindingResult(
             agent=agent,

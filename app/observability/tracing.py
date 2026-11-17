@@ -30,7 +30,7 @@ def setup_tracing(config: TraceConfig | None = None) -> TracerProvider:
             exporter = OTLPSpanExporter(endpoint=cfg.otlp_endpoint, insecure=True)
             provider.add_span_processor(SimpleSpanProcessor(exporter))
             logger.info("otel tracing enabled: %s -> %s", cfg.service_name, cfg.otlp_endpoint)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - OTLP 导出器初始化：可选依赖/端点任意失败退控制台导出，观测不能阻断启动
             logger.warning("otel otlp init failed: %s; falling back to console", exc)
             exporter = ConsoleSpanExporter()
             provider.add_span_processor(SimpleSpanProcessor(exporter))

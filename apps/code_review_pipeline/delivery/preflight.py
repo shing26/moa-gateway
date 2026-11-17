@@ -90,7 +90,7 @@ async def _check_identity(github: Any, target: GitHubRepo) -> PreflightCheck:
 async def _check_push(github: Any, target: GitHubRepo) -> PreflightCheck:
     try:
         info = await github.get_repo(target)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - 仓库读取失败即判 blocked；自检只读、不写任何远端对象
         return PreflightCheck("repo", STATUS_BLOCKED, _short(exc))
     permissions = dict(info.get("permissions") or {})
     permission = str(info.get("permission") or "")
@@ -113,7 +113,7 @@ async def _check_branch(
 ) -> tuple[PreflightCheck, str]:
     try:
         sha = await github.get_branch_sha(target, base_branch)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - 分支 SHA 读取失败即判 blocked；自检只读、不写任何远端对象
         return PreflightCheck("branch", STATUS_BLOCKED, _short(exc)), ""
     if not sha:
         return (
@@ -149,7 +149,7 @@ async def _check_workflows(
         if not tree_sha:
             raise RuntimeError(f"commit {base_sha[:12]} 没有 tree")
         await github.probe_workflow_write(target, base_tree=tree_sha)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - workflow 写探测失败即判 blocked，避免带病进入推送
         return PreflightCheck("workflows", STATUS_BLOCKED, _short(exc))
     return PreflightCheck(
         "workflows",
@@ -187,7 +187,7 @@ def _check_merge_store(merge_store: Any) -> PreflightCheck:
         )
     try:
         merge_store.list_open()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - 合并库不可达即判 blocked；自检本身无副作用
         return PreflightCheck("merge_store", STATUS_BLOCKED, _short(exc))
     return PreflightCheck("merge_store", STATUS_OK, "合并通道数据库可达")
 

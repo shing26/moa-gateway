@@ -27,7 +27,7 @@ def _build_task_llm() -> TaskLLM:
             llm = LiteLLMTaskLLM()
             logger.info("task agent using LiteLLM backend")
             return llm
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - LLM 后端初始化：litellm 的依赖/配置/网络任意故障都退回 Mock，agent 必须可构建
             logger.warning("litellm task llm init failed, falling back to mock: %s", exc)
     return MockTaskLLM()
 

@@ -83,7 +83,7 @@ async def healthz() -> dict[str, object]:
         if pong:
             redis_check = "fallback_memory" if store.is_fallback else "connected"
         await store.close()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - redis 健康探针：任意异常都要转成 checks 字符串，healthz 不能 500
         redis_check = "error: " + str(e)[:50]
     checks["redis"] = redis_check
     # 检索后端必须可见：静默退回内存存储会让"数据其实没落盘"这件事无人知晓。
@@ -139,7 +139,11 @@ async def privacy_erase(user_id: str) -> JSONResponse:
     try:
         count = await _retriever._client.delete_by_metadata({"user_id": user_id})
         deleted["vectordb"] = count
-    except Exception as e:
-        deleted["vectordb"] = str(e)
+    except Exception:
+        # 隐私删除必须 fail-closed（契约 ble001-exception-debt-20261117，B 类）：
+        # 向量删除失败时不能回 status=ok，否则调用方会误以为用户数据已清除。
+        # 记录后原样上抛，由统一错误契约交付 500；宽捕获只用于记录任意后端故障。
+        logger.exception("privacy erase failed user=%s", user_id)
+        raise
     logger.info("privacy erase user=%s deleted=%s", user_id, deleted)
     return JSONResponse({"user_id": user_id, "deleted": deleted, "status": "ok"})

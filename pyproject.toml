@@ -51,7 +51,6 @@ extend-exclude = ["scripts"]
 ignore = [
   "B008",
   "B018",
-  "BLE001",
   "DTZ011",
   "EXE005",
   "F401",

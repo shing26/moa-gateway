@@ -482,6 +482,6 @@ class FeishuReviewNotifier:
 
                 auth_provider = FeishuTokenProvider(FeishuAuthConfig(app_id=app_id, app_secret=app_secret))
                 card_sender = FeishuCardSender(auth_provider)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 飞书卡片发送器初始化失败降级为无卡片模式，审查结果仍可通过 webhook 投递
                 logger.warning("init feishu card sender failed: %s", exc)
         return FeishuReviewNotifier(webhook_url=webhook_url, card_sender=card_sender, default_target=default_target)

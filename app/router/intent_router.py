@@ -82,7 +82,7 @@ class IntentRouter:
             intent = await self.micro_llm.classify(text, timeout_s=self.micro_timeout_ms / 1000)
             if intent and intent != self.default_intent:
                 return intent, "micro_llm"
-        except Exception:
+        except Exception:  # noqa: BLE001 - micro LLM 路由：任意模型/超时异常退回默认意图，路由不能抛
             pass  # nosec B110
         return self.default_intent, "none"
 
@@ -92,7 +92,7 @@ class IntentRouter:
         try:
             intent = await self.router_llm.classify(text, timeout_s=self.router_timeout_ms / 1000)
             return intent or self.default_intent, "router_llm"
-        except Exception:
+        except Exception:  # noqa: BLE001 - router LLM：任意模型/超时异常退回默认意图并保留可见性字段
             # 含 litellm.Timeout：超时 = 没拿到判定 = 降级到默认意图（route_fallback "none"），
             # 与此前 wait_for 超时的对外语义一致（ADR-011 的可见性字段不受影响）。
             return self.default_intent, "none"

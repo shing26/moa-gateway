@@ -25,7 +25,7 @@ class FallbackLLMClient:
             result = await self._primary.chat(messages, **kwargs)
             self._last_client = self._primary
             return result
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 主模型任意故障切备用模型；无备用时原样上抛
             logger.warning("primary llm failed: %s", exc)
             if self._fallback is None:
                 raise
@@ -39,7 +39,7 @@ class FallbackLLMClient:
             result = await self._primary.chat_with_tools(messages, tools, **kwargs)
             self._last_client = self._primary
             return result
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 主模型工具调用任意故障切备用模型；无备用时原样上抛
             logger.warning("primary llm tools failed: %s", exc)
             if self._fallback is None:
                 raise

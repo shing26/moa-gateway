@@ -95,7 +95,7 @@ def _build_classifier(prefix: str, *, fallback_main: bool = False) -> LLMIntentC
             if not config.api_key:
                 config.api_key = os.environ.get("OPENAI_API_KEY", "")
             return LLMIntentClassifier(LLMClient(config))
-        except Exception:
+        except Exception:  # noqa: BLE001 - 可选分类器装配：配置缺失或构造任意失败返回 None，退回规则路由
             return None
     if fallback_main and os.environ.get("LLM_MODEL") and _has_llm_credentials("LLM"):
         return LLMIntentClassifier(LLMClient(LLMConfig.from_env("LLM")))
@@ -190,7 +190,7 @@ def _select_orchestrator(fsm: Any) -> Any:
     try:
         from app.orchestration.dispatch import EngineDispatcher
         from app.orchestration.graph import LangGraphOrchestrator
-    except Exception as exc:  # noqa: BLE001 - missing optional extra must not stop boot
+    except Exception as exc:  # noqa: BLE001 - 缺可选 extra 时启动必须继续，退回 fsm
         logger.warning("ENGINE=langgraph 但 langgraph 不可用，回退 fsm: %s", exc)
         return fsm
     graph = LangGraphOrchestrator.from_deps()

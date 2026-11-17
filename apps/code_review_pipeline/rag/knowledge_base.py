@@ -61,7 +61,7 @@ class KnowledgeBase:
         try:
             self._store.upsert(items, trace_id="knowledge-base", source_type="knowledge")
             return len(items)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 知识库写入失败只记录并返回 0，RAG 是可选增强
             logger.error("failed to upsert embeddings: %s", exc)
             return 0
 
@@ -76,7 +76,7 @@ class KnowledgeBase:
                 }
                 for item in results
             ]
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 知识库列表读取失败返回空列表，不阻断读取方
             logger.error("failed to list docs: %s", exc)
             return []
 

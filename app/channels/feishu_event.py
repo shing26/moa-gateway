@@ -33,7 +33,9 @@ def _extract_text(msg_type: str, raw: Any) -> str:
     if isinstance(raw, str):
         try:
             payload = json.loads(raw)
-        except Exception:
+        except (json.JSONDecodeError, RecursionError):
+            # raw 已确认是 str：json.loads 只会抛 JSONDecodeError（ValueError 子类），
+            # 深层嵌套还可能 RecursionError；收窄后不会漏掉畸形输入，仍当纯文本用。
             # 非 JSON：直接当纯文本用（text 类型偶尔如此）
             return raw.strip() if msg_type == "text" else ""
     else:

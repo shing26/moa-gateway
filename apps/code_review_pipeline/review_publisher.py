@@ -123,7 +123,7 @@ async def publish_review(
 
         try:
             await record_lifecycle(task_id, repo_name, "complete", reason=reason)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 审计是派生证据；GitHub 已接受审查，审计追加失败不能把任务卡在 posting
             # Audit is derived evidence. A failed audit append must not strand a
             # task in posting after GitHub has already accepted the review.
             logger.exception("review complete audit append failed task=%s", task_id)
@@ -141,7 +141,7 @@ async def publish_review(
         if not dry_run and store.get_task_state(identity) == "posting":
             try:
                 await _complete("already_posted_repair")
-            except Exception:
+            except Exception:  # noqa: BLE001 - 补记 complete 失败只在状态仍非 done 时上抛，否则按已完成的幂等结果返回
                 if store.get_task_state(identity) != "done":
                     raise
         return PublishOutcome(status="already_posted", review_id=str(recorded))

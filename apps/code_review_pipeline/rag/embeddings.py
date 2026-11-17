@@ -93,7 +93,7 @@ async def generate_embeddings(
 
         try:
             payload = await _request_embeddings(client, model, texts)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 批量请求失败退回逐条请求，单条再失败由外层统一包装为 EmbeddingError
             logger.warning("embedding batch input rejected, falling back to single inputs: %s", exc)
             results: list[EmbeddingResult] = []
             for text in texts:
@@ -101,7 +101,7 @@ async def generate_embeddings(
                 results.extend(_results_from_payload(payload, [text], model))
             return results
         return _results_from_payload(payload, texts, model)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 任意嵌入故障统一包装成 EmbeddingError 上抛
         raise EmbeddingError(f"embedding request failed: {exc}") from exc
 
 

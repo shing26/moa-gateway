@@ -276,7 +276,7 @@ async def _handle_merge_approval(
     )
     try:
         outcome = await executor.execute(hitl_id, action, operator_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 合并执行：任意失败转 500，审批人得到明确失败
         logger.exception("merge approval execution failed: %s", exc)
         return JSONResponse(
             {"error": "merge_execution_failed", "message": str(exc)},
@@ -295,7 +295,7 @@ async def _handle_merge_approval(
             decision=action,
             duration_ms=duration_ms,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - 人工决策审计：旁路任意失败只记录
         logger.exception("failed to record human decision for %s", hitl_id)
 
     if outcome.merged:

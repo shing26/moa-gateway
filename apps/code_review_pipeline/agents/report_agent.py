@@ -105,7 +105,9 @@ class ReportAgent:
 def _parse_report(raw: str, *, trace_id: str) -> AgentFindingResult:
     try:
         data = json.loads(raw) if raw else {}
-    except Exception:
+    except (json.JSONDecodeError, RecursionError):
+        # raw 是 LLM 原文 str：json.loads 只会抛 JSONDecodeError 或深层嵌套的
+        # RecursionError；收窄后解析失败仍升级为人工复核。
         return AgentFindingResult(
             agent="report",
             trace_id=trace_id,

@@ -56,7 +56,7 @@ async def dashboard_chat(body: ChatRequest, request: Request) -> JSONResponse:
         result = await pipeline.run(
             moa_event, channel="web", target=sid, request=request,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - web 聊天入口：管线任意崩溃转结构化 500，不能向客户端漏栈
         logger.exception("web chat pipeline failed session=%s", sid)
         return JSONResponse(
             {"error": "internal_error", "message": "处理消息时出错了"},

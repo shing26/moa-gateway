@@ -278,7 +278,7 @@ async def _reenter_push_gate(
                 ),
                 failure,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 恢复推送失败直接终结为 FAILED 并保留原异常，不会继续合并
             failure = FailureInfo(
                 FailureCode.PUSH_FAILED,
                 f"{type(exc).__name__}: {exc}",

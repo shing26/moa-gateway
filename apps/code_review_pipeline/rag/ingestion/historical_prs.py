@@ -245,7 +245,7 @@ async def ingest_repo(
     client = GitHubClient(token=token)
     try:
         await client._client.get("/rate_limit")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - GitHub 鉴权失败包装成 RuntimeError 上抛，不继续摄入
         raise RuntimeError(f"github auth failed: {exc}") from exc
 
     now = dt.datetime.now(dt.timezone.utc)
@@ -265,7 +265,7 @@ async def ingest_repo(
         logger.info("[%d/%d] processing PR #%d", idx, len(raw_prs), pr_number)
         try:
             pr = await _load_historical_pr(client, repo_obj, pr_number, modules, min_approvers=min_approvers)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 单个历史 PR 加载失败跳过，离线摄入继续处理后续 PR
             logger.warning("failed to load PR #%d: %s", pr_number, exc)
             continue
         if pr is None:
@@ -277,7 +277,7 @@ async def ingest_repo(
             continue
         try:
             count = await knowledge_base.ingest_documents(docs)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 单个历史 PR 入库失败只跳过该 PR，不影响其余摄入
             logger.error("failed to ingest PR #%d: %s", pr_number, exc)
             continue
         logger.info("ingested %d chunks from PR #%d", count, pr_number)

@@ -282,7 +282,7 @@ class L3ConcurrentWorkers(L2PlannerWorkerCritic):
             return execution, write_set
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 单个子任务失败转成 _failed_worker 证据，其他子任务继续
             return _failed_worker(subtask=subtask, error=str(exc)), None
         finally:
             if isolated is not None:

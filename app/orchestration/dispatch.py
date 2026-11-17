@@ -84,7 +84,7 @@ class EngineDispatcher:
         started = time.monotonic()
         try:
             result = await self._graph.run(event, channel=channel, target=target)
-        except Exception:
+        except Exception:  # noqa: BLE001 - langgraph 引擎：图执行任意失败降级到 FSM，避免整条请求 500
             # A graph that dies on a request would otherwise take the whole
             # endpoint down; the FSM path is the proven one, so fall back once.
             logger.exception(

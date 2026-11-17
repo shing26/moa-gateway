@@ -117,7 +117,7 @@ class ObsidianVaultSync:
             await asyncio.sleep(self._interval)
             try:
                 await self.sync_once()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 同步主循环：单轮任意异常记录到 last_error 后继续，后台同步不能死
                 self.last_error = str(exc)
                 logger.exception("obsidian sync loop error")
 

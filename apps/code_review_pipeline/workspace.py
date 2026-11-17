@@ -107,7 +107,7 @@ class GitHubArchiveWorkspaceProvisioner:
                     error="未检测到可用的测试命令",
                 )
             return ReviewWorkspace(path=path, verify_command=tuple(command))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 工作区供给失败清理临时目录后降级为无工作区，只读审查继续
             shutil.rmtree(path, ignore_errors=True)
             logger.warning("workspace provision failed for %s#%s: %s", pr.repo, pr.pr_number, exc)
             return ReviewWorkspace(

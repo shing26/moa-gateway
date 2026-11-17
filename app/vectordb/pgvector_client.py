@@ -264,11 +264,11 @@ class PgVectorClient:
             self._pool = pool
             if self._auto_migrate:
                 await self._ensure_schema()
-        except Exception as exc:  # noqa: BLE001 - startup must not explode
+        except Exception as exc:  # noqa: BLE001 - 启动不能让 PG 故障炸掉进程：非 strict 模式退化运行
             self._pool = None
             try:
                 await pool.close()
-            except Exception:  # noqa: BLE001, S110 - pool is already broken
+            except Exception:  # noqa: BLE001, S110 - 池已损坏：清理失败的任意异常都可忽略
                 pass
             self._degraded_reason = f"{type(exc).__name__}: {exc}"[:300]
             logger.critical(
@@ -299,7 +299,7 @@ class PgVectorClient:
         for statement in split_statements(schema_sql):
             try:
                 await self._run(statement, None, fetch=False)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 - DDL 执行失败记录后原样上抛，不能漏成静默建表失败
                 logger.error(
                     "vectordb: DDL 执行失败，请由 DBA 手工执行 %s 后重启：%s", _SCHEMA_PATH, exc
                 )
@@ -639,7 +639,7 @@ class PgVectorClient:
             return [None] * len(texts)
         try:
             vectors = await provider.embed_batch(texts)
-        except Exception as exc:  # noqa: BLE001 - provider is best-effort
+        except Exception as exc:  # noqa: BLE001 - embedding provider 是 best-effort：任意失败本次走关键词回退
             logger.warning("vectordb: embedding 调用失败，本次走关键词回退: %s", exc)
             return [None] * len(texts)
 

@@ -228,7 +228,7 @@ def create_verification_workspace(root: Path) -> tuple[Path, Path]:
             ignore=ignore,
             copy_function=copy_file,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - 复制失败清理：任意异常都要先删半成品目录再原样上抛，不是吞异常
         shutil.rmtree(parent, ignore_errors=True)
         raise
     return target, parent

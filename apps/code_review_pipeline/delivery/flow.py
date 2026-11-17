@@ -218,7 +218,7 @@ class DeliveryFlow:
                     max_steps=remaining_steps,
                     max_tokens=remaining_tokens,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - implementer 失败直接终结 run 为 NEEDS_HUMAN/FAILED，不会继续推送
                 target = (
                     DeliveryRunState.NEEDS_HUMAN
                     if run.state is DeliveryRunState.REVISING
@@ -285,7 +285,7 @@ class DeliveryFlow:
                     request=request,
                     policy=self._policy,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 准备阶段失败直接终结为 NEEDS_HUMAN，不会继续推送
                 return await self._finish(
                     run,
                     DeliveryRunState.NEEDS_HUMAN,
@@ -359,7 +359,7 @@ class DeliveryFlow:
                 run_id=run.run_id,
                 bundle=run.bundle,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 推送审批失败直接终结为 NEEDS_HUMAN，不会继续推送
             return await self._finish(
                 run,
                 DeliveryRunState.NEEDS_HUMAN,
@@ -423,7 +423,7 @@ class DeliveryFlow:
                 DeliveryRunState.NEEDS_HUMAN,
                 FailureInfo(FailureCode.INFRA_ERROR, str(exc)),
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 推送失败直接终结为 FAILED 并保留 PUSH_FAILED 原因
             return await self._finish(
                 run,
                 DeliveryRunState.FAILED,

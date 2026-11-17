@@ -450,7 +450,7 @@ async def execute_tool_loop(
                 max_tokens=allowance,
             )
             record_usage()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 工具循环：模型/工具任意异常收口为 status=error 的结构化结果，调用方据此降级
         return ToolLoopResult(
             status="error",
             content="",

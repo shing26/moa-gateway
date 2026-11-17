@@ -285,7 +285,7 @@ class LLMClient:
                     prompt_hash=prompt_hash,
                 )
                 return response, candidate
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 多模型重试边界：任一候选的任意异常都换下一个模型，预算耗尽后原样抛出，异常不丢
                 last_exc = exc
                 logger.warning("litellm request failed model=%s: %s", candidate, exc)
         if last_exc is None:
@@ -377,7 +377,7 @@ class LLMClient:
         litellm_module = _get_litellm()
         try:
             cost_usd = float(litellm_module.completion_cost(completion_response=response))
-        except Exception:
+        except Exception:  # noqa: BLE001 - 成本估算 best-effort：litellm 对未知模型可抛任意异常，失败按 0 计，不能影响响应
             try:
                 cost_usd = float(
                     litellm_module.completion_cost(
@@ -386,7 +386,7 @@ class LLMClient:
                         completion_tokens=completion_tokens,
                     )
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - 按 token 的二次计价同样 best-effort：任意失败也按 0 计，指标不能拖垮请求
                 cost_usd = 0.0
         self.last_metrics = {
             "model_used": model,

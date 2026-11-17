@@ -442,7 +442,7 @@ class MoAPipeline:
         if self.long_term_memory is not None and user_id and recall_allowed:
             try:
                 memory_context = await self.long_term_memory.recall_context(event.text, user_id)
-            except Exception:
+            except Exception:  # noqa: BLE001 - 长期记忆召回旁路：任意失败只告警，不影响回答
                 logger.warning("长期记忆召回失败 user=%s", user_id, exc_info=True)
         global_summary = "\n\n---\n\n".join(
             part for part in (memory_context, retrieval.context) if part
@@ -522,7 +522,7 @@ class MoAPipeline:
                 agent_name=agent_name, intent=intent,
                 channel=channel, target=target, failure=failure,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - agent 执行：任意未预期异常收口为 error 结果，由统一错误契约交付
             if request is not None:
                 await log_request(
                     request, 500, (time.monotonic() - start) * 1000,
@@ -584,7 +584,7 @@ class MoAPipeline:
                 output_verdict, policy_ids = self.guard_service.evaluate_output(
                     raw_output, intent=guard_intent, role=role, hitl_enabled=guard_hitl,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 输出守卫崩溃必须 fail-closed 升级 REVIEW 走 HITL（ADR-037）
                 # 输出守卫自身崩溃时 fail-closed（契约 guard-failclosed-20261116、
                 # ADR-037）：守卫没给出判定就不能当放行——verdict 升级 REVIEW 走
                 # HITL 人工审批。保持宽捕获不向上抛，守卫故障不应炸掉请求主流程，
@@ -703,7 +703,7 @@ class MoAPipeline:
                 )
                 if applied:
                     logger.info("长期记忆更新 user=%s ops=%s", user_id, applied)
-            except Exception:
+            except Exception:  # noqa: BLE001 - 长期记忆写入旁路：任意失败只告警，回答照常交付
                 logger.warning("长期记忆写入失败 user=%s", user_id, exc_info=True)
         if request is not None:
             await log_request(

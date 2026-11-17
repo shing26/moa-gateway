@@ -691,7 +691,7 @@ def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - CI triage CLI：任意失败都要撤销请求并打印人话返回 1，CLI 不能抛栈
         invalidate_ci_triage_request(
             trace_id=args.trace_id,
             head_sha=args.sha,

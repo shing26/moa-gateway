@@ -39,7 +39,7 @@ class RedisStateStore:
             try:
                 await self._client.ping()
                 return self._client
-            except Exception:
+            except Exception:  # noqa: BLE001 - 复查连接：ping 任意失败都重连或降级，存储不能悬空
                 logger.warning("redis ping failed, reconnecting")
                 self._client = await self._try_connect()
                 if self._client:
@@ -64,7 +64,7 @@ class RedisStateStore:
                 await client.ping()
                 logger.info("redis sentinel connected: %s master=%s", self.config.sentinel_hosts, self.config.sentinel_master)
                 return client
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Sentinel 连接：任意连接异常记录后尝试直连 URL
                 logger.warning("redis sentinel connect failed: %s", exc)
 
         # 2. Try single Redis URL.
@@ -78,7 +78,7 @@ class RedisStateStore:
             await client.ping()
             logger.info("redis connected: %s", self.config.url)
             return client
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 直连 URL：任意连接异常返回 None 交给内存兜底
             logger.warning("redis connect failed: %s", exc)
             return None
 

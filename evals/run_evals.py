@@ -522,7 +522,7 @@ async def run_e2e_eval(
                     # 离线路径没判分器：这是"没读数"，与"判分失败"分开计，
                     # 更不能混进 avg_judge_score（那会变成一句假的 0 分）。
                     judge_skipped += 1
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - judge 失败按无读数单独计数并剔除均分，绝不伪造 0 分
                     # judge 失败 ≠ 得 0 分：0 分是"模型输出差"，judge 挂了是"量具没读数"。
                     # 剔除出均分并单独计数——既不能让 provider 一死整个评测崩溃、报告都不写
                     # （2026-09-27 实测：Ollama 进程死亡时 judge 的裸 chat 让
@@ -565,7 +565,7 @@ def git_sha() -> str:
             check=False,
         )
         return output.stdout.strip() or "unknown"
-    except Exception:
+    except Exception:  # noqa: BLE001 - 取 git sha 失败回退 unknown，只影响报告元数据
         return "unknown"
 
 

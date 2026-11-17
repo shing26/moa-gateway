@@ -300,7 +300,7 @@ class PostgresMergeStore:
                                 ),
                             )
                 self._conn.commit()
-        except Exception:
+        except Exception:  # noqa: BLE001 - 事务失败先回滚再原样上抛，宽捕获只覆盖回滚清理
             if self._conn:
                 self._conn.rollback()
             raise
