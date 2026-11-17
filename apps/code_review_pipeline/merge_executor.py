@@ -67,7 +67,7 @@ class MergeExecutor:
             return
         try:
             await self._run_store.sync_from_merge(record, audit=self._audit)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 合并状态已写入 MergeStore，run-store 只是派生视图，回写失败只记录
             logger.exception(
                 "failed to write merge state back for %s", record.task_key
             )
@@ -111,7 +111,7 @@ class MergeExecutor:
         # 合并前检查可合并性（dirty 走失败路径，不尝试合并）
         try:
             pr_info = await self._github.get_pr(repo, pr_number)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 合并前读取 PR 失败即转 FAIL 并返回错误，不执行合并
             logger.warning("get_pr failed for %s: %s", task_key, exc)
             updated = self._store.transition(
                 identity,

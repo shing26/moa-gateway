@@ -63,7 +63,7 @@ class PgVectorStore:
                         ),
                     )
                 self._conn.commit()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - pgvector 写入失败回滚并包装成 VectorStoreInitError 上抛
             if self._conn:
                 self._conn.rollback()
             raise VectorStoreInitError(f"pgvector upsert failed: {exc}") from exc
@@ -85,7 +85,7 @@ class PgVectorStore:
                     (list(vector), list(vector), limit),
                 )
                 return [dict(row) for row in cur.fetchall()]
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 向量检索失败返回空列表，RAG 降级为无上下文
             logger.error("pgvector search failed: %s", exc)
             return []
 
@@ -93,7 +93,7 @@ class PgVectorStore:
         if self._conn is not None:
             try:
                 self._conn.close()
-            except Exception:
+            except Exception:  # noqa: BLE001 - 关闭 pgvector 连接失败不影响进程退出
                 pass
             self._conn = None
 
@@ -154,7 +154,7 @@ class InMemoryVectorStore:
                         "score": 0.0,
                     }
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - sqlite 历史数据加载失败只记录，退化为空的内存存储
             logger.error("failed to load sqlite vector store: %s", exc)
 
     def _upsert_to_sqlite(self, item: dict[str, Any]) -> None:
@@ -180,7 +180,7 @@ class InMemoryVectorStore:
                 ),
             )
             self._conn.commit()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - sqlite 镜像写失败只记录，内存中的向量仍可用于本次检索
             logger.error("sqlite upsert failed: %s", exc)
 
     def upsert(self, items: list[EmbeddingResult], *, trace_id: str, source_type: str) -> None:
@@ -217,7 +217,7 @@ class InMemoryVectorStore:
         if self._conn is not None:
             try:
                 self._conn.close()
-            except Exception:
+            except Exception:  # noqa: BLE001 - 关闭 sqlite 连接失败不影响进程退出
                 pass
             self._conn = None
 
@@ -249,6 +249,6 @@ def build_vector_store() -> VectorStore:
 
     try:
         import psycopg  # noqa: F401
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - psycopg 缺失包装成 VectorStoreInitError 上抛，避免静默回落内存存储
         raise VectorStoreInitError(f"psycopg is required for pgvector store: {exc}") from exc
     return PgVectorStore(dsn=dsn)

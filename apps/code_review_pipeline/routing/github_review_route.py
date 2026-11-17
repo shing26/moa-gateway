@@ -223,7 +223,7 @@ async def github_review_webhook(request: Request) -> JSONResponse:
         if settings.code_review_merge_enabled:
             try:
                 _ensure_merge_record(repo, int(pr_number or 0), head_sha)
-            except Exception:
+            except Exception:  # noqa: BLE001 - 合并记录创建失败只记录；审查仍可入队，后续合并因记录缺失会被拒绝
                 logger.exception("could not create merge record for %s", task_key)
         # 先看状态再落库：已经审过（含任何终态）就是重投，返回 200 且**不再入队**。
         # 不靠"入队前先查"来做幂等——查与写之间有窗口，而真正的幂等判据是消费端的
@@ -233,7 +233,7 @@ async def github_review_webhook(request: Request) -> JSONResponse:
 
         try:
             message_id = await _get_task_queue().enqueue(repo, identity[1], head_sha)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 入队失败返回 503 让投递方重试，不谎报已受理
             logger.exception("could not enqueue review task %s", task_key)
             # 503 而非 202：任务行已经是 queued，但**没有任何东西会去跑它**。说"已
             # 受理"是撒谎。投递方重投是安全的（重投即重新入队，行数不变）。

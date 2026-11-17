@@ -56,7 +56,7 @@ class SemanticReviewAgent:
         # Step 1: retrieve team patterns from vector store.
         try:
             rag_result = await retrieve_team_patterns(envelope, limit=5)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - RAG 检索失败退回空上下文，语义审查照常执行
             logger.warning("RAG retrieval failed: %s", exc)
             rag_result = RetrievalResult(context="", chunks=[], doc_count=0)
 

@@ -15,7 +15,7 @@ from apps.code_review_pipeline.schemas.feedback import (
 
 try:
     from psycopg.types.json import Jsonb
-except Exception:  # pragma: no cover - psycopg 缺失时的降级（见 _missing_deps）
+except Exception:  # noqa: BLE001 - psycopg 缺失时用 Jsonb 降级占位保证模块可 import；Postgres 路径在选型阶段显式报错  # pragma: no cover - psycopg 缺失时的降级（见 _missing_deps）
     # 没有 psycopg 时 build_review_store 早在选型阶段就抛 StorageInitError，这里
     # 只是让模块仍可 import（内存存储路径完全用不到 Jsonb）。
     def Jsonb(value: Any) -> Any:  # type: ignore[misc]
@@ -68,11 +68,11 @@ def _missing_deps() -> list[str]:
     missing = []
     try:
         import psycopg  # noqa: F401
-    except Exception:
+    except Exception:  # noqa: BLE001 - 依赖探测只把导入失败记为缺失项，不阻断选型流程
         missing.append("psycopg")
     try:
         import pydantic  # noqa: F401
-    except Exception:
+    except Exception:  # noqa: BLE001 - 依赖探测只把导入失败记为缺失项，不阻断选型流程
         missing.append("pydantic")
     return missing
 
@@ -145,14 +145,14 @@ def _ensure_schema(dsn: str) -> None:
             with conn.cursor() as cur:
                 cur.execute(schema_sql)
                 conn.commit()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 建表失败包装成 StorageInitError 上抛，不静默使用内存存储
         raise StorageInitError(f"failed to apply review schema: {exc}") from exc
 
 
 def _create_pg_store(dsn: str) -> "PostgresReviewStore":
     try:
         import psycopg  # type: ignore[import-untyped]
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:  # noqa: BLE001 - psycopg 缺失包装成 StorageInitError 上抛，不静默回落内存存储  # pragma: no cover
         raise StorageInitError(f"psycopg is required for Postgres store: {exc}") from exc
     return PostgresReviewStore(dsn=dsn, _psycopg=psycopg)
 
@@ -584,7 +584,7 @@ class PostgresReviewStore:
                     },
                 )
                 self._conn.commit()
-        except Exception:
+        except Exception:  # noqa: BLE001 - 事务失败先回滚再原样上抛，宽捕获只覆盖回滚清理
             if self._conn:
                 self._conn.rollback()
             raise
@@ -713,7 +713,7 @@ class PostgresReviewStore:
                         ),
                     )
             self._conn.commit()
-        except Exception:
+        except Exception:  # noqa: BLE001 - 事务失败先回滚再原样上抛，宽捕获只覆盖回滚清理
             if self._conn:
                 self._conn.rollback()
             raise
@@ -861,7 +861,7 @@ class PostgresReviewStore:
                         )
             self._conn.commit()
             return inserted
-        except Exception:
+        except Exception:  # noqa: BLE001 - 事务失败先回滚再原样上抛，宽捕获只覆盖回滚清理
             if self._conn:
                 self._conn.rollback()
             raise
@@ -962,7 +962,7 @@ class PostgresReviewStore:
                     raw={},
                     review_run_id=review_run_id or "",
                 )
-        except Exception:
+        except Exception:  # noqa: BLE001 - 只读查询失败按无记录返回 None；无生产调用方据此做写决策（仅契约/测试使用）
             return None
 
     def current_trace_id(self, repo: str, pr_number: int) -> str | None:
@@ -1098,7 +1098,7 @@ class PostgresReviewStore:
                 claimed = cur.fetchone() is not None
             self._conn.commit()
             return claimed
-        except Exception:
+        except Exception:  # noqa: BLE001 - 事务失败先回滚再原样上抛，宽捕获只覆盖回滚清理
             if self._conn:
                 self._conn.rollback()
             raise
@@ -1120,7 +1120,7 @@ class PostgresReviewStore:
                     (repo, pr_number, head_sha, owner),
                 )
             self._conn.commit()
-        except Exception:
+        except Exception:  # noqa: BLE001 - 事务失败先回滚再原样上抛，宽捕获只覆盖回滚清理
             if self._conn:
                 self._conn.rollback()
             raise
@@ -1313,7 +1313,7 @@ class PostgresReviewStore:
         if self._conn is not None:
             try:
                 self._conn.close()
-            except Exception:
+            except Exception:  # noqa: BLE001 - 关闭连接失败不影响进程退出
                 pass
             self._conn = None
 
