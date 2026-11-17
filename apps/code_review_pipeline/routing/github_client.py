@@ -210,7 +210,9 @@ def _gh_message(resp: httpx.Response) -> str:
     try:
         body = resp.json()
         text = str(body.get("message") or "")
-    except Exception:
+    except (AttributeError, ValueError, RecursionError):
+        # resp.json() 可能返回非 dict（.get 抛 AttributeError）或抛 JSONDecodeError
+        # （ValueError 子类）/ 深层嵌套 RecursionError；失败仍回退 resp.text。
         text = ""
     return (text or resp.text or "").strip()[:300]
 

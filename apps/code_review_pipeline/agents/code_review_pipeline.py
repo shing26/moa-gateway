@@ -632,7 +632,9 @@ def _build_model_review_input(diff_payload: dict[str, Any], user_text: str) -> s
 def _safe_json(text: str) -> dict[str, Any]:
     try:
         return json.loads(text) if text else {}
-    except Exception:
+    except (json.JSONDecodeError, RecursionError):
+        # text 是 str：json.loads 对 str 只会抛 JSONDecodeError（ValueError 子类），
+        # 深层嵌套可能 RecursionError；收窄后畸形输入仍返回 {"raw": text}。
         return {"raw": text}
 
 
