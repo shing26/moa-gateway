@@ -18,6 +18,9 @@ import os
 from app.config import settings
 from app.deps import delivery_run_store, merge_store
 from apps.code_review_pipeline.delivery.audit import WalDeliveryAudit
+from apps.code_review_pipeline.merge_comment_approval import (
+    build_comment_approval_poller,
+)
 from apps.code_review_pipeline.merge_poller import MergePoller
 from apps.code_review_pipeline.notifications.merge_notifier import MergeNotifier
 from apps.code_review_pipeline.routing.github_provider import build_github_client
@@ -37,11 +40,13 @@ class MergeWorker:
         run_store=None,
         audit=None,
         interval_s: float = 60.0,
+        comment_approval=None,
     ) -> None:
         self._store = store
         self._github = github
         self._notifier = notifier
         self._interval_s = interval_s
+        self._comment_approval = comment_approval
         self._poller = MergePoller(
             store,
             github,
@@ -85,6 +90,12 @@ class MergeWorker:
                 logger.exception(
                     "failed to send CI failure card for %s", record.task_key
                 )
+        # GitHub 原生合并审批（ADR-040）。放在 CI 轮询之后：本轮刚进入
+        # awaiting_approval 的记录也能在同一轮被已有评论批准。poll_once 自己
+        # fail-closed，读失败不会打断 worker 循环。开关关闭时依赖为 None，
+        # 连一次评论 API 都不会调用。
+        if self._comment_approval is not None:
+            await self._comment_approval.poll_once()
 
 
 def build_worker() -> MergeWorker:
@@ -107,13 +118,23 @@ def build_worker() -> MergeWorker:
         default_target=settings.code_review_merge_channel or None,
     )
 
+    github = build_github_client()
+    audit = WalDeliveryAudit()
+
     return MergeWorker(
         store=merge_store,
-        github=build_github_client(),
+        github=github,
         notifier=notifier,
         run_store=delivery_run_store,
-        audit=WalDeliveryAudit(),
+        audit=audit,
         interval_s=float(settings.code_review_merge_poll_interval_s),
+        comment_approval=build_comment_approval_poller(
+            store=merge_store,
+            github=github,
+            settings_obj=settings,
+            run_store=delivery_run_store,
+            audit=audit,
+        ),
     )
 
 
