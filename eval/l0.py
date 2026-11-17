@@ -113,7 +113,7 @@ def check_run(record: dict, case: EvalCase) -> L0Report:
                         passed=False,
                         detail='path not in allowed_paths'
                     ))
-    except Exception:
+    except Exception:  # noqa: BLE001 - changed_paths_match 检查抛错时判负，不中断其余检查
         checks.append(L0Check(
             name='changed_paths_match',
             passed=False,
@@ -143,7 +143,7 @@ def check_run(record: dict, case: EvalCase) -> L0Report:
                     passed=True,
                     detail='exit_code is 0'
                 ))
-    except Exception:
+    except Exception:  # noqa: BLE001 - verify_exit_zero 检查抛错时判负，不中断其余检查
         checks.append(L0Check(
             name='verify_exit_zero',
             passed=False,
@@ -195,7 +195,7 @@ def check_run(record: dict, case: EvalCase) -> L0Report:
                         passed=True,
                         detail='no forbidden paths were touched'
                     ))
-    except Exception:
+    except Exception:  # noqa: BLE001 - forbidden_paths_touched 检查抛错时判负，不中断其余检查
         checks.append(L0Check(
             name='forbidden_paths_touched',
             passed=False,
@@ -265,7 +265,7 @@ def check_run(record: dict, case: EvalCase) -> L0Report:
                                 passed=False,
                                 detail='test file changes not append-only'
                             ))
-    except Exception:
+    except Exception:  # noqa: BLE001 - test_files_append_only 检查抛错时判负，不中断其余检查
         checks.append(L0Check(
             name='test_files_append_only',
             passed=False,
@@ -317,7 +317,7 @@ def check_run(record: dict, case: EvalCase) -> L0Report:
                     passed=False,
                     detail=f'reads={reads}, total={total}'
                 ))
-    except Exception:
+    except Exception:  # noqa: BLE001 - read_ratio 检查抛错时判负，不中断其余检查
         checks.append(L0Check(
             name='read_ratio',
             passed=False,
@@ -364,7 +364,7 @@ def check_run(record: dict, case: EvalCase) -> L0Report:
                     passed=False,
                     detail=f'run_tests_calls={n}, run_unittest_calls={m}'
                 ))
-    except Exception:
+    except Exception:  # noqa: BLE001 - verify_cycles 检查抛错时判负，不中断其余检查
         checks.append(L0Check(
             name='verify_cycles',
             passed=False,
