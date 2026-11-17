@@ -48,6 +48,6 @@ class ReviewAgent:
             pipeline = self._build_pipeline()
             _, result = await pipeline.run(event)
             return format_review_summary(result)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 审查 agent 执行：流水线任意故障转成文本失败结果，execute 协议不允许抛异常
             logger.warning("review agent failed: %s", exc)
             return f"PR 审查执行失败：{exc}"

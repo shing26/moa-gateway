@@ -99,7 +99,7 @@ async def execute_with_retry(
         except asyncio.CancelledError:
             # 取消不是失败：重试会吞掉取消信号，必须原样上抛。
             raise
-        except Exception as exc:  # noqa: BLE001 - 任何基础设施异常都可重试
+        except Exception as exc:  # noqa: BLE001 - 重试边界：任何基础设施异常都可重试
             total = _absorb_metrics(slot, total)
             if on_failure is not None:
                 await on_failure(attempt, exc)

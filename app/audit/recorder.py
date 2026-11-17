@@ -35,7 +35,7 @@ async def record(entry: AuditEntry) -> None:
 
         if es_writer is not None:
             await es_writer.write(entry)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 审计 ES sink 是旁路：写入任意故障只告警，主流程照常（ADR 明确）
         logger.warning("es audit write failed", exc_info=True)
 
 

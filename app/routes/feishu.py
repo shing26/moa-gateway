@@ -213,12 +213,12 @@ async def _process_hitl_card(
         )
         await _safe_send(session_id, body, trace_id)
         outcome = f"hitl_{action}"
-    except Exception:
+    except Exception:  # noqa: BLE001 - 卡片动作处理：任意失败记录并回告用户，回调必须闭环
         outcome = "hitl_error"
         logger.exception("card_action hitl processing failed trace=%s action=%s", trace_id, action)
         try:
             await _safe_send(session_id, "处理审批时出错了，请稍后重试", trace_id)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 错误通知失败：任意异常只记录，不能掩盖原始错误
             logger.exception("card_action error notify also failed trace=%s", trace_id)
     finally:
         logger.info(
@@ -336,7 +336,7 @@ async def _process_review_card_action(
                 "request_approval",
                 expected_review_run_id=record.review_run_id,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - 幂等转换：任意异常先查当前状态，只有已是 waiting_approval 才吞，其余原样上抛
             current = store.get_task_state(identity)
             if current != "waiting_approval":
                 raise
@@ -362,7 +362,7 @@ async def _process_review_card_action(
                 dry_run=settings.code_review_publish_dry_run,
                 expected_review_run_id=record.review_run_id,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - review 写回：任意失败告知用户并停止成功路径，不能假装已写回
             logger.exception("review publish failed trace=%s", trace_id)
             await _safe_send(session_id, f"写回 GitHub 失败：{exc}", trace_id)
             return
@@ -498,7 +498,7 @@ async def feishu_event(request: Request):
     started = time.monotonic()
     try:
         body = await request.json()
-    except Exception:
+    except Exception:  # noqa: BLE001 - 请求体解析：任意解析失败返回 400，回调端点不能 500
         return JSONResponse({"error":"invalid_json"}, status_code=400)
     if isinstance(body, dict) and body.get("encrypt"):
         # 加密模式未实现（见 README 已知边界）。此前这种请求落到 "ignored" 分支被**静默丢弃**
@@ -594,7 +594,7 @@ async def feishu_event(request: Request):
     )
     try:
         result = await pipeline.run(moa_event, channel="feishu", target=sid, request=request)
-    except Exception:
+    except Exception:  # noqa: BLE001 - 管线执行：任意失败转 error 结果并继续走回复路径
         import traceback
         traceback.print_exc()
         logger.exception("pipeline.run failed for trace_id=%s", moa_event.trace_id)
@@ -653,7 +653,7 @@ async def _handle_merge_approval(
     )
     try:
         outcome = await executor.execute(hitl_id, action, operator_id)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 合并执行：任意失败记录并回告用户，审批结果不能静默
         logger.exception("merge approval execution failed: %s", exc)
         await _safe_send(session_id, f"⚠️ 合并执行失败：{exc}", trace_id)
         return JSONResponse(
@@ -674,7 +674,7 @@ async def _handle_merge_approval(
             decision=action,
             duration_ms=duration_ms,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - 人工决策审计：审计旁路任意失败只记录，不影响合并结果
         logger.exception("failed to record human decision for %s", hitl_id)
 
     if outcome.merged:

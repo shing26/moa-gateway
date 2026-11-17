@@ -102,7 +102,7 @@ class TaskWorker:
 
         try:
             outcome = await self._processor(msg)
-        except Exception:
+        except Exception:  # noqa: BLE001 - worker 执行：处理器任意失败记录并落失败态，消息不能悬死
             logger.exception("task failed: %s", identity)
             if self._mark_failed(identity):
                 await self._queue.ack(msg.message_id)
@@ -127,7 +127,7 @@ class TaskWorker:
                 TaskState.DONE.value,
                 TaskState.REJECTED.value,
             }
-        except Exception:
+        except Exception:  # noqa: BLE001 - 标记失败：写失败态任意异常返回 False，留给 XAUTOCLAIM 重试
             logger.exception("could not mark task failed: %s", identity)
             return False
 
@@ -156,7 +156,7 @@ class TaskWorker:
             from apps.code_review_pipeline.task_audit import record_lifecycle
 
             await record_lifecycle(msg.task_key, msg.repo, action, outcome=outcome)
-        except Exception:
+        except Exception:  # noqa: BLE001 - 审计旁路：任意失败只记录，状态机转换已权威
             # The state transition above is authoritative; audit is secondary.
             logger.exception("could not audit outcome %s for %s", outcome, identity)
 
@@ -166,7 +166,7 @@ class TaskWorker:
                 handled = await self.run_once()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception:  # noqa: BLE001 - 主循环：单轮任意失败记录后继续，worker 不能退出
                 logger.exception("worker loop iteration failed")
                 handled = 0
             if not handled:
@@ -260,7 +260,7 @@ async def review_processor(msg: TaskMessage) -> str:
         else:
             counts = count_by_severity(result)
             await notifier.send_summary(build_notification(result, counts))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - 通知：任意失败记录后原样上抛，任务转失败可重投
         # Delivery failure is visible as failed and can be explicitly requeued.
         # Do not enter waiting_approval: no interactive cards reached the user.
         logger.exception("feishu notification failed: %s", exc)

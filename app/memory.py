@@ -88,7 +88,7 @@ class RedisConversationStorage:
         self._last_attempt = time.monotonic()
         try:
             client = self._bridge.call(self._connect_coro())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - redis 连接解析：任意连接异常都退内存存储，会话记忆不能因 Redis 故障不可用
             self._fallback(exc)
             return None
         if client is None:
@@ -110,7 +110,7 @@ class RedisConversationStorage:
             )
         try:
             await client.ping()
-        except Exception:
+        except Exception:  # noqa: BLE001 - redis ping：任何连接异常都视为不可用并返回 None
             if self._client is None:
                 await client.aclose()
             return None
@@ -123,7 +123,7 @@ class RedisConversationStorage:
         if self._client is not None and not self._using_memory and not self._injected:
             try:
                 self._bridge.call(self._client.aclose())
-            except Exception:
+            except Exception:  # noqa: BLE001 - 关闭失效连接：任意异常都忽略，清理失败不应掩盖原故障
                 pass  # nosec B110
             self._client = None
         self._connected = False
@@ -138,7 +138,7 @@ class RedisConversationStorage:
             return
         try:
             self._bridge.call(client.rpush(key, value))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - redis rpush：任意后端异常降级写内存
             self._fallback(exc)
             self._memory.setdefault(key, []).append(value)
 
@@ -148,7 +148,7 @@ class RedisConversationStorage:
             return self._slice(self._memory.get(key, []), start, end)
         try:
             return list(self._bridge.call(client.lrange(key, start, end)))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - redis lrange：任意后端异常降级读内存
             self._fallback(exc)
             return self._slice(self._memory.get(key, []), start, end)
 
@@ -159,7 +159,7 @@ class RedisConversationStorage:
             return
         try:
             self._bridge.call(client.ltrim(key, start, end))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - redis ltrim：任意后端异常降级裁剪内存
             self._fallback(exc)
             self._memory[key] = self._slice(self._memory.get(key, []), start, end)
 
@@ -169,7 +169,7 @@ class RedisConversationStorage:
             return
         try:
             self._bridge.call(client.expire(key, ttl))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - redis expire：任意后端异常降级并标记内存模式
             self._fallback(exc)
 
     def delete(self, key: str) -> None:
@@ -179,7 +179,7 @@ class RedisConversationStorage:
             return
         try:
             self._bridge.call(client.delete(key))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - redis delete：任意后端异常降级删内存
             self._fallback(exc)
             self._memory.pop(key, None)
 
@@ -190,7 +190,7 @@ class RedisConversationStorage:
             return [k for k in self._memory if fnmatch.fnmatchcase(k, pattern)]
         try:
             keys = self._bridge.call(client.keys(pattern))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - redis keys：任意后端异常降级扫描内存
             self._fallback(exc)
             return [k for k in self._memory if fnmatch.fnmatchcase(k, pattern)]
         return list(keys)
@@ -213,7 +213,7 @@ class ConversationMemory:
         if storage is not None:
             try:
                 self._storage = storage() if callable(storage) else storage
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 会话存储工厂：注入的存储构造任意失败退内存，记忆组件必须可构建
                 logger.warning("conversation storage unavailable, using in-memory: %s", exc)
                 self._storage = None
 

@@ -61,7 +61,7 @@ class MergeWorker:
                 await self._run_once()
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception:  # noqa: BLE001 - worker 主循环：单轮任意失败记录后继续下一轮，进程不能退出
                 logger.exception("merge worker loop iteration failed")
             await asyncio.sleep(self._interval_s)
 
@@ -71,7 +71,7 @@ class MergeWorker:
         for record in result.approvals:
             try:
                 await self._notifier.send_approval_card(record)
-            except Exception:
+            except Exception:  # noqa: BLE001 - 审批卡片发送：任意异常记录后继续处理下一条，单卡失败不阻塞批量
                 logger.exception(
                     "failed to send approval card for %s", record.task_key
                 )
@@ -81,7 +81,7 @@ class MergeWorker:
         for record in result.ci_failures:
             try:
                 await self._notifier.send_ci_failure_card(record)
-            except Exception:
+            except Exception:  # noqa: BLE001 - CI 失败卡发送：任意异常记录后继续处理下一条
                 logger.exception(
                     "failed to send CI failure card for %s", record.task_key
                 )

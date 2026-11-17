@@ -83,7 +83,7 @@ async def healthz() -> dict[str, object]:
         if pong:
             redis_check = "fallback_memory" if store.is_fallback else "connected"
         await store.close()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - redis 健康探针：任意异常都要转成 checks 字符串，healthz 不能 500
         redis_check = "error: " + str(e)[:50]
     checks["redis"] = redis_check
     # 检索后端必须可见：静默退回内存存储会让"数据其实没落盘"这件事无人知晓。

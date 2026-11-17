@@ -45,7 +45,7 @@ class LiteLLMTaskLLM:
         try:
             raw = await self._client.chat(prompt)
             return self._parse_decision(raw)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - LLM 调用边界：模型/网络/解析任意故障都降级为带 degraded_reason 的 finish，主流程不能崩
             logger.warning("litellm decide failed: %s", exc)
             # 这里返回的是 finish，但它**不是**模型决定收尾——是基础设施崩了。
             # 不带 degraded_reason 的话，`status=ok` 会把"决策失败: ..."当正常回答
@@ -74,7 +74,7 @@ class LiteLLMTaskLLM:
             if isinstance(parsed, list):
                 return [str(item).strip() for item in parsed if str(item).strip()]
             _notify(on_degrade, "plan 输出不是 JSON 数组")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 规划属 best-effort：模型或网络任意故障退回单子任务，请求不能因规划失败而失败
             logger.warning("litellm plan failed, fallback to single subtask: %s", exc)
             _notify(on_degrade, f"plan 调用失败: {exc}")
         return [task]
@@ -102,7 +102,7 @@ class LiteLLMTaskLLM:
         ]
         try:
             return await self._client.chat(messages)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 汇总属 best-effort：模型调用任意故障退回原始步骤文本，保证仍有交付
             logger.warning("litellm summarize failed: %s", exc)
             _notify(on_degrade, f"summarize 调用失败: {exc}")
             return "\n".join(lines)

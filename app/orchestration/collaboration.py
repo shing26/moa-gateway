@@ -527,7 +527,7 @@ class LiteLLMCollaborationLLM:
         raw = await self._complete(self._PLAN_PROMPT, task)
         try:
             data = self._loads(raw)
-        except Exception as exc:  # noqa: BLE001 - 规划失败降级，不让协作链路崩
+        except Exception as exc:  # noqa: BLE001 - 规划失败降级到 Mock，不让协作链路崩
             logger.warning("collab plan parse failed, falling back to mock: %s", exc)
             return await MockCollaborationLLM().plan(task=task)
         if not isinstance(data, list) or not data:
@@ -544,7 +544,7 @@ class LiteLLMCollaborationLLM:
         raw = await self._complete(self._CRITIQUE_PROMPT, f"任务：{task}\n\n输出：\n{rendered}")
         try:
             data = self._loads(raw)
-        except Exception as exc:  # noqa: BLE001 - 同上，评审失败降级
+        except Exception as exc:  # noqa: BLE001 - 评审解析失败降级到 Mock，不让协作链路崩
             logger.warning("collab critique parse failed, falling back to mock: %s", exc)
             return await MockCollaborationLLM().critique(
                 task=task, plan=plan, outputs=outputs
@@ -1020,7 +1020,7 @@ class CollabOrchestrator:
             )
         try:
             resolved = resolve_in_workspace(self._workspace_root, raw_path)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 工作区解析：任意解析异常统一转成 ValueError 给调用方，路径逃逸不能静默
             raise ValueError(str(exc)) from exc
         if not resolved.is_dir():
             raise ValueError(f"工作区不存在或不是目录: {resolved}")
@@ -1450,7 +1450,7 @@ class CollabOrchestrator:
                 output_verdict, policy_ids = self._guard.evaluate_output(
                     raw_output, intent=guard_intent, role=role, hitl_enabled=hitl_enabled
                 )
-            except Exception as exc:  # noqa: BLE001 - mirrored from the request path
+            except Exception as exc:  # noqa: BLE001 - 与请求路径同语义：输出守卫崩溃一律升级 REVIEW 走 HITL（fail-closed）
                 # 与请求路径（app/pipeline.py）同语义的 fail-closed（契约
                 # guard-failclosed-20261116、ADR-037）：守卫崩溃时升级 REVIEW 走
                 # HITL，宽捕获不向上抛，异常细节进 reason 不吞。

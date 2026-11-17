@@ -390,7 +390,7 @@ class LangGraphOrchestrator:
                 memory_context = await self._long_term_memory.recall_context(
                     state["text"], user_id
                 )
-            except Exception:  # noqa: BLE001 - recall must never break a request
+            except Exception:  # noqa: BLE001 - 长期记忆召回是旁路：任意失败只告警，不能影响本次回答
                 logger.warning("长期记忆召回失败 user=%s", user_id, exc_info=True)
         global_summary = "\n\n---\n\n".join(
             part for part in (memory_context, retrieval.context) if part
@@ -507,7 +507,7 @@ class LangGraphOrchestrator:
                 "guard_action": GuardianAction.REVIEW.value,
                 "guard_reason": "自动处理失败，已转人工处理",
             }
-        except Exception as exc:  # noqa: BLE001 - mirrored from MoAPipeline
+        except Exception as exc:  # noqa: BLE001 - 与 MoAPipeline 同语义：执行失败转 error 结果，由上层统一交付
             logger.exception("langgraph orchestrator: agent execution failed")
             return {
                 "error": str(exc),
@@ -575,7 +575,7 @@ class LangGraphOrchestrator:
                 output_verdict, policy_ids = self._guard.evaluate_output(
                     raw_output, intent=guard_intent, role=role, hitl_enabled=hitl_enabled
                 )
-            except Exception as exc:  # noqa: BLE001 - mirrored from MoAPipeline
+            except Exception as exc:  # noqa: BLE001 - 与请求路径同语义：输出守卫崩溃一律升级 REVIEW（fail-closed）
                 # 与请求路径（app/pipeline.py）同语义的 fail-closed（契约
                 # guard-failclosed-20261116、ADR-037）：守卫崩溃时升级 REVIEW 走
                 # HITL，宽捕获不向上抛，异常细节进 reason 不吞。
@@ -702,7 +702,7 @@ class LangGraphOrchestrator:
                 )
                 if applied:
                     logger.info("长期记忆更新 user=%s ops=%s", user_id, applied)
-            except Exception:  # noqa: BLE001 - write failure must not lose the reply
+            except Exception:  # noqa: BLE001 - 长期记忆写入是旁路：任意失败只告警，已生成的回答必须交付
                 logger.warning("长期记忆写入失败 user=%s", user_id, exc_info=True)
         # 交付即完成：正常路径从 OUTPUT_READY 收口到 COMPLETED；人工批准放行的输出
         # 此刻还在 EXECUTING（SUSPENDED --HUMAN_APPROVED--> EXECUTING），先落

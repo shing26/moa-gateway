@@ -63,7 +63,7 @@ class EsWriter:
                 return await self._fallback_wal(entries)
             logger.info("es bulk wrote %d entries", len(entries))
             return True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - ES 写入 best-effort：网络/序列化任意故障转 WAL 兜底，审计不能反噬主流程
             logger.warning("es write failed, falling back to wal: %s", exc)
             return await self._fallback_wal(entries)
 
@@ -72,7 +72,7 @@ class EsWriter:
             for entry in entries:
                 await self.wal.append(entry)
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001 - WAL 兜底失败时只返回 False 交调用方观测，错误路径不能再炸一次
             return False
 
     def _build_bulk_body(self, entries: list[AuditEntry]) -> bytes:

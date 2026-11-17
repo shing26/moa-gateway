@@ -65,7 +65,7 @@ def create_isolated_workspace(source: Path | str) -> IsolatedWorkspace:
             target,
             ignore=shutil.ignore_patterns(*_SKIP_DIRS),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - 复制失败清理：任意异常先删半成品再原样上抛
         shutil.rmtree(parent, ignore_errors=True)
         raise
     return IsolatedWorkspace(

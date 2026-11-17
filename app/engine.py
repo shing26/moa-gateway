@@ -108,7 +108,7 @@ class RedisHitlStorage:
         self._last_attempt = time.monotonic()
         try:
             client = self._bridge.call(self._connect_coro())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - redis 连接解析：任意连接异常都退内存存储，HITL 不能因 Redis 故障不可用
             self._fallback(exc)
             return None
         if client is None:
@@ -130,7 +130,7 @@ class RedisHitlStorage:
             )
         try:
             await client.ping()
-        except Exception:
+        except Exception:  # noqa: BLE001 - redis ping：任何连接异常都视为不可用并返回 None
             if self._client is None:
                 await client.aclose()
             return None
@@ -143,7 +143,7 @@ class RedisHitlStorage:
         if self._client is not None and not self._using_memory and not self._injected:
             try:
                 self._bridge.call(self._client.aclose())
-            except Exception:
+            except Exception:  # noqa: BLE001 - 关闭失效连接：任意异常都忽略，清理失败不应掩盖原故障
                 pass  # nosec B110
             self._client = None
         self._connected = False
@@ -157,7 +157,7 @@ class RedisHitlStorage:
             return self._memory.get(key)
         try:
             return self._bridge.call(client.get(key))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - redis get：任意后端异常降级到内存副本
             self._fallback(exc)
             return self._memory.get(key)
 
@@ -170,7 +170,7 @@ class RedisHitlStorage:
         try:
             self._bridge.call(client.set(key, value, ex=ttl if ttl is not None else self.ttl))
             self._written.add(key)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - redis set：任意后端异常降级写内存
             self._fallback(exc)
             self._memory[key] = value
             self._written.add(key)
@@ -184,7 +184,7 @@ class RedisHitlStorage:
         try:
             self._bridge.call(client.delete(key))
             self._written.discard(key)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - redis delete：任意后端异常降级删内存
             self._fallback(exc)
             self._memory.pop(key, None)
             self._written.discard(key)
@@ -203,10 +203,10 @@ class RedisHitlStorage:
             return self._memory.pop(key, None)
         try:
             value = self._bridge.call(client.getdel(key))
-        except Exception:
+        except Exception:  # noqa: BLE001 - GETDEL 首次尝试：老版本 Redis 不支持等任意异常都退到 Lua
             try:
                 value = self._bridge.call(client.eval(_POP_LUA, 1, key))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Lua 回退：任意异常再退内存 pop，审批认领必须始终可用
                 self._fallback(exc)
                 self._written.discard(key)
                 return self._memory.pop(key, None)
@@ -231,7 +231,7 @@ class SessionStore:
         if storage is not None:
             try:
                 self._storage = storage() if callable(storage) else storage
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - 存储工厂：注入的存储构造任意失败退内存，引擎必须可构建
                 logger.warning("hitl storage unavailable, using in-memory: %s", exc)
                 self._storage = None
 
@@ -413,7 +413,7 @@ class Engine:
         state_stack = list(metadata.get("state_stack", []))
         try:
             current = next_state(current, event.event)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 状态机转换：记录后原样上抛，非法转换不能被吞
             logger.exception("invalid transition: %s", exc)
             raise
         ctx.state = current

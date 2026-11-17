@@ -43,6 +43,6 @@ class FeishuChannelAdapter(ChannelAdapter):
                     logger.error("feishu send failed status=%s body=%s", resp.status_code, resp.text)
                     return False
                 return True
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 发送通知：任何网络/响应格式异常都转 False 交调用方，通知失败不能影响主流程
             logger.exception("feishu send error: %s", exc)
             return False

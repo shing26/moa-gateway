@@ -170,7 +170,7 @@ class FeishuCardSender:
             body = exc.response.text[:500] if exc.response is not None else ""
             logger.error("feishu card send http error: %s body=%s", exc, body)
             return False
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 发卡通知：任意传输/解析异常转 False，审批卡片失败不拖垮请求
             logger.exception("feishu card send error: %s", exc)
             return False
 
@@ -205,7 +205,7 @@ class FeishuCardSender:
             body = exc.response.text[:500] if exc.response is not None else ""
             logger.error("feishu card update http error: %s body=%s", exc, body)
             return False
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - 更新卡片：任意传输/解析异常转 False，调用方只关心是否更新成功
             logger.exception("feishu card update error: %s", exc)
             return False
 
@@ -219,5 +219,5 @@ def parse_card_callback(body: dict[str, Any]) -> tuple[str, str, str] | None:
         if not session_id or not action:
             return None
         return session_id, trace_id, action
-    except Exception:
+    except Exception:  # noqa: BLE001 - 解析飞书回调：回调结构任意畸形都返回 None 忽略该回调，端点不能因此 500
         return None

@@ -101,7 +101,7 @@ class EmbeddingProvider:
                 self._failures = 0
                 self._last_error = None
                 return vectors
-            except Exception as exc:  # noqa: BLE001 - provider is best-effort
+            except Exception as exc:  # noqa: BLE001 - provider 是 best-effort：批量形状/传输任意失败就停用批量改逐条
                 # A rejected batch shape is not a transient outage, so do not
                 # count it against the circuit breaker; just stop batching.
                 logger.warning("embedding 批量接口不可用，改为逐条调用: %s", exc)
@@ -127,7 +127,7 @@ class EmbeddingProvider:
     async def _post_one(self, text: str) -> list[float] | None:
         try:
             payload = await self._post({"model": self._model, "input": text})
-        except Exception as exc:  # noqa: BLE001 - provider is best-effort
+        except Exception as exc:  # noqa: BLE001 - provider 是 best-effort：单条调用任意失败记失败并返回 None
             self._record_failure(exc)
             return None
         data = payload.get("data") or []
