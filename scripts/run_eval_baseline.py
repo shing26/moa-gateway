@@ -20,6 +20,10 @@ Usage (one case at a time is fine; the report file accumulates):
 
     python scripts/run_eval_baseline.py --only biz-050
     python scripts/run_eval_baseline.py            # every case, fixed order
+    python scripts/run_eval_baseline.py --rounds 3 # protocol multiround-v1
+
+Each row carries ``round_index``; the merge is cumulative — an existing
+``(case_id, round_index)`` is never overwritten, a new round is appended.
 """
 
 from __future__ import annotations
@@ -41,6 +45,10 @@ from eval.schema import EvalCase, load_cases
 
 REPO = "shing26/moa-gateway"
 CLASS_ORDER = ("business", "failure", "boundary", "security")
+
+#: Written into every report. ``--rounds 1`` keeps the old single-run shape plus
+#: ``round_index: 0`` per row; more rounds append instead of overwriting.
+PROTOCOL_VERSION = "multiround-v1"
 
 #: Frozen in issue #95 §2 (v1.4 amendment). ``.env`` stays untouched; these are
 #: process-level overrides. The model is pinned here rather than inherited: the
@@ -201,7 +209,29 @@ def _kill_tree(pid: int) -> None:
         pass
 
 
-def _gate_state_row(case: EvalCase, branch: str) -> dict:
+def row_key(row: dict) -> tuple[str, int]:
+    """The cumulative identity of a report row.
+
+    ``round_index`` is optional so a report written before multiround support
+    is read as round 0 rather than being silently re-run and overwritten.
+    """
+    return (str(row.get("case_id") or ""), int(row.get("round_index", 0) or 0))
+
+
+def merge_rows(rows: list[dict], incoming: list[dict]) -> list[dict]:
+    """Append ``incoming`` rows, never overwriting an existing key (pure)."""
+    merged = list(rows)
+    seen = {row_key(row) for row in merged}
+    for row in incoming:
+        key = row_key(row)
+        if key in seen:
+            continue
+        merged.append(row)
+        seen.add(key)
+    return merged
+
+
+def _gate_state_row(case: EvalCase, branch: str, round_index: int = 0) -> dict:
     """Run one in-process probe and return its verdict row.
 
     No child process and no log: the verdict carries every check's detail, and
@@ -231,6 +261,7 @@ def _gate_state_row(case: EvalCase, branch: str) -> dict:
         "log": "",
         "reason": GATE_STATE_ARM,
         "gate_state": verdict.to_dict(),
+        "round_index": round_index,
     }
 
 
@@ -240,13 +271,14 @@ def run_case(
     stamp: str,
     timeout_s: float,
     log_dir: Path,
+    round_index: int = 0,
 ) -> dict:
     """Run one case; return the report row (never raises on a failed run)."""
     cmd = build_command(case, stamp)
     env = build_env(case, dict(os.environ))
     branch = f"eval/{case.id}-{stamp}"
     if case_arm(case) == "gate_state":
-        return _gate_state_row(case, branch)
+        return _gate_state_row(case, branch, round_index)
     if not case.verify_commands:
         # Corpus invariant: every case is either a probe or declares a verify
         # command. Reaching here means the invariant test is broken, so fail
@@ -327,6 +359,7 @@ def run_case(
         "wall_timeout": timed_out,
         "elapsed_s": round(elapsed, 1),
         "log": log_ref,
+        "round_index": round_index,
     }
     if gate_state.is_live_gate_case(case):
         record = _load_run_record(run_id)
@@ -341,7 +374,7 @@ def run_case(
     return row
 
 
-def prepare_report(report_path: Path, stamp: str) -> dict:
+def prepare_report(report_path: Path, stamp: str, rounds: int = 1) -> dict:
     """Load an existing report or start one; metadata always comes from here.
 
     Only ``rows`` carry over from a previous session. A report written by an
@@ -358,6 +391,8 @@ def prepare_report(report_path: Path, stamp: str) -> dict:
     report.pop("deferred_arm", None)
     report.update({
         "protocol": "issue #95 (v1.5 gate-state)",
+        "protocol_version": PROTOCOL_VERSION,
+        "rounds": rounds,
         "stamp": stamp,
         "model": ENV_OVERRIDES["CHANGE_AGENT_MODEL"],
         "env_overrides": dict(ENV_OVERRIDES),
@@ -373,7 +408,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout-s", type=float, default=5400.0)
     parser.add_argument("--report", default="")
     parser.add_argument("--stamp", default="")
+    parser.add_argument("--rounds", type=int, default=1, help="rounds per case (default 1)")
     args = parser.parse_args(argv)
+    if args.rounds < 1:
+        raise SystemExit("--rounds must be >= 1")
 
     stamp = args.stamp or dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     # One report file for the whole baseline: the two-session plan appends to it.
@@ -388,27 +426,47 @@ def main(argv: list[str] | None = None) -> int:
     if unknown:
         raise SystemExit(f"unknown case ids: {sorted(unknown)}")
 
-    report = prepare_report(report_path, stamp)
+    report = prepare_report(report_path, stamp, rounds=args.rounds)
 
-    for index, case in enumerate(cases, start=1):
-        print(f"[{index}/{len(cases)}] {case.id} ({case.class_}) ...", flush=True)
-        row = run_case(case, stamp=stamp, timeout_s=args.timeout_s, log_dir=log_dir)
-        report["rows"] = [r for r in report["rows"] if r["case_id"] != case.id]
-        report["rows"].append(row)
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic: an interrupted write must not leave a half report that the
-        # next session cannot read back.
-        tmp_path = report_path.with_suffix(report_path.suffix + ".tmp")
-        tmp_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp_path, report_path)
-        gate = row.get("gate_state") or {}
-        print(
-            f"    run_id={row['run_id'] or '-'} state={row['state'] or '-'} "
-            f"exit={row['exit_code']} {row['elapsed_s']}s"
-            + (f" gate_state={gate.get('state')}" if gate else "")
-            + (" TIMEOUT" if row["wall_timeout"] else ""),
-            flush=True,
-        )
+    total = len(cases) * args.rounds
+    index = 0
+    for round_index in range(args.rounds):
+        # Round 0 keeps the historical stamp (and branch/log names) exactly;
+        # later rounds must not collide with it on the branch name.
+        round_stamp = stamp if round_index == 0 else f"{stamp}-r{round_index}"
+        for case in cases:
+            index += 1
+            label = f"[{index}/{total}] {case.id} ({case.class_})"
+            if args.rounds > 1:
+                label += f" round {round_index}"
+            print(f"{label} ...", flush=True)
+            row = run_case(
+                case,
+                stamp=round_stamp,
+                timeout_s=args.timeout_s,
+                log_dir=log_dir,
+                round_index=round_index,
+            )
+            merged = merge_rows(report["rows"], [row])
+            appended = len(merged) > len(report["rows"])
+            report["rows"] = merged
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            # Atomic: an interrupted write must not leave a half report that the
+            # next session cannot read back.
+            tmp_path = report_path.with_suffix(report_path.suffix + ".tmp")
+            tmp_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp_path, report_path)
+            if not appended:
+                print("    already recorded for this round; not overwritten", flush=True)
+                continue
+            gate = row.get("gate_state") or {}
+            print(
+                f"    run_id={row['run_id'] or '-'} state={row['state'] or '-'} "
+                f"exit={row['exit_code']} {row['elapsed_s']}s"
+                + (f" gate_state={gate.get('state')}" if gate else "")
+                + (" TIMEOUT" if row["wall_timeout"] else ""),
+                flush=True,
+            )
 
     print(f"\nreport: {report_path}")
     return 0
