@@ -246,7 +246,10 @@ class ConversationMemory:
         for item in raw:
             try:
                 history.append(json.loads(item))
-            except Exception:
+            except (TypeError, ValueError, RecursionError):
+                # 历史项只经过 json.loads：JSONDecodeError/UnicodeDecodeError 都是
+                # ValueError 子类，非 str/bytes 是 TypeError，深层嵌套是 RecursionError；
+                # 收窄后损坏项跳过的语义不变。
                 continue  # nosec B112
         if history and session_id not in self._store:
             self._store[session_id] = list(history)

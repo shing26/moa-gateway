@@ -265,7 +265,10 @@ class SessionStore:
                 return None
             try:
                 request = HitlRequest(**json.loads(raw))
-            except Exception as exc:
+            except (TypeError, ValueError, RecursionError) as exc:
+                # 载荷只经过 json.loads 与 HitlRequest：JSONDecodeError/UnicodeDecodeError
+                # 与 pydantic ValidationError 都是 ValueError 子类，非 dict 载荷是
+                # TypeError，深层嵌套是 RecursionError；收窄后损坏载荷仍返回 None。
                 logger.warning("hitl payload corrupt hitl_id=%s: %s", hitl_id, exc)
                 return None
         if request is not None:
@@ -280,7 +283,8 @@ class SessionStore:
             return None
         try:
             return HitlRequest(**json.loads(raw))
-        except Exception as exc:
+        except (TypeError, ValueError, RecursionError) as exc:
+            # 同上：损坏载荷只可能由 json/pydantic 解析抛这三个类型，收窄不漏。
             logger.warning("hitl payload corrupt hitl_id=%s: %s", hitl_id, exc)
             return None
 
