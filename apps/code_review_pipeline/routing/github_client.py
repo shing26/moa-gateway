@@ -365,6 +365,33 @@ class GitHubClient:
                 return out
             page += 1
 
+    async def list_issue_comments(
+        self, repo: GitHubRepo, pr_number: int
+    ) -> list[dict[str, Any]]:
+        """列出 PR 的对话评论（issue comments）。
+
+        PR 的普通对话评论属于 issue 端点，**不是** ``/pulls/{n}/reviews`` 或
+        ``/pulls/{n}/comments``；人类在 PR 页面下方输入框里发的就是这一类。
+        与 ``list_reviews`` 同样必须翻页：默认每页 30 条，只看第一页会让
+        "第 31 条之后的 APPROVE"永远不被看见，而且只在老 PR 上出现。
+
+        **只返回原始数据，不做身份判定**：是否算数由
+        ``merge_comment_approval.comment_approval`` 决定。
+        """
+        out: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            resp = await self._client.get(
+                f"/repos/{repo.owner}/{repo.name}/issues/{pr_number}/comments",
+                params={"per_page": 100, "page": page},
+            )
+            resp.raise_for_status()
+            batch = list(resp.json())
+            out.extend(batch)
+            if len(batch) < 100:
+                return out
+            page += 1
+
     async def create_review(
         self,
         repo: GitHubRepo,

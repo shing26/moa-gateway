@@ -337,6 +337,22 @@ class Settings:
             os.getenv("CODE_REVIEW_MERGE_POLL_INTERVAL_S"), 60,
             name="CODE_REVIEW_MERGE_POLL_INTERVAL_S",
         )
+        # ── GitHub 原生合并审批（ADR-040）────────────────────────────────
+        # 默认关：白名单 login 在 PR 上评论 ``APPROVE <bundle_hash>`` 就触发真实
+        # 合并，是新增的外部写入口，必须显式打开。未开时 worker 不读评论、不调
+        # 任何额外 API。
+        self.github_comment_approval_enabled: bool = _parse_bool(
+            os.getenv("GITHUB_COMMENT_APPROVAL_ENABLED"), False
+        )
+        # 允许批准合并的 GitHub 登录名（逗号分隔，比较时大小写不敏感）。
+        # **空 = 通道未配置，一条都不批**（fail-closed）。这是与
+        # ``HITL_APPROVER_IDS`` 相互独立的一套身份命名空间：飞书 open_id 不会
+        # 因为同名而被这里接受，反之亦然。
+        self.github_approver_logins: tuple[str, ...] = tuple(
+            item.strip()
+            for item in os.getenv("GITHUB_APPROVER_LOGINS", "").split(",")
+            if item.strip()
+        )
 
         # ── 鉴权与端口（原 main.py / __main__.py 的旁路 env 读取，收编统一校验）──
         self.webhook_auth_token: str = os.getenv("WEBHOOK_AUTH_TOKEN", "")
