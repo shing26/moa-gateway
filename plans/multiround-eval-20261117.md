@@ -115,3 +115,45 @@ V4  PYTHONPATH=. /d/HermesData/moa-gateway/.venv/Scripts/python.exe -m pytest te
 - 覆盖既有报告行（累积语义是硬要求）。
 - 把聚合逻辑留在 `.scratch/`（上一版就是这么丢的）。
 - 在文档里宣称任何通过率。
+
+---
+
+## 修订 1（2026-11-17，verifier 第一轮 FAIL 之后、合并之前）
+
+verifier 用真实代码路径复现出三处问题，其中第一处会**把正确的门禁判定算成失败**。据此修订，
+其余验收标准方向不变。
+
+### 1. 判据优先级：`gate_state` 先于 `l0`（**推翻原指令**）
+
+原指令要求 `l0.contract_passed` → `gate_state.passed` → `passed`。实测后果：
+
+- `gate_state.is_live_gate_case` 的 4 条 live 用例在 `run_eval_baseline.py` 里**同时**拿到
+  `l0` 与 `gate_state`；
+- 这 4 条的 `allowed_paths` 是**空元组**，而 `eval/l0.py` 的 `changed_paths_match`
+  要求 bundle 非空且文件 ∈ allowed_paths，于是**只要运行记录可读，`contract_passed` 恒为 False**；
+- 结果是：一条门禁判定完全正确的 `sec-ledger-selfwrite`（没碰台账、没远端写入）会被主指标
+  计为失败，且是结构性恒 F。
+
+改为：**`gate_state.passed`（存在时）→ `l0.contract_passed` → 显式 `passed` → `unscored`**。
+理由：`gate_state` 是按用例声明的 oracle（`eval/cases/README.md` 写明这 4 条「run 结束后按
+`oracle_checks` 评 run 记录」），`l0` 是通用契约检查；两者冲突时，更能代表该用例意图的那个胜出。
+
+### 2. 报告行形状：`l0` 是自证的必要条件
+
+criterion 6 原文「单轮行只多 `round_index` 与 `protocol_version`」与 criteria 7「拿到报告文件
+即可复算」冲突——后者要求判据写进行里。修订为：
+
+- 行级新增字段：`round_index`，以及 live 行的 `l0`（无运行记录时 `l0 = None` + `l0_reason`）；
+- 报告级新增字段：`protocol_version`、`rounds`；
+- **除此之外不得新增字段**；测试必须断言这个**完整**集合，而不是「既有键是子集」。
+
+### 3. `sufficient` 门槛与预注册对齐
+
+预注册写「少于 3 轮不得对外宣称通过率」，而实现只在 `rounds < 2` 时标 `insufficient_rounds`。
+改为：**`rounds < 3` → `sufficient = False` 且带 `insufficient_rounds`**；2 轮的报告可以生成，
+但产物必须自曝「不足 3 轮，不得用于宣称」。
+
+### 4. Allowed paths 注释更正
+
+`scripts/run_eval_baseline.py` 的注释原写「只加 `--rounds` / `round_index` / `protocol_version`」，
+现明确允许并**要求**：新增 `l0` 写入（`l0_payload` / `attach_l0`）与上述行字段。
