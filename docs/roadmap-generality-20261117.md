@@ -71,6 +71,10 @@ issue #95 第 2–4 步：24 条策展用例、协议注册、多轮分布 + 置
 **交付判据**：仓库内可复现的报告产物——n≥3 轮、逐例结果向量、区间；
 第三个人 clone 下来能重跑出同样的结论形状。
 
+**状态**：多轮评测仪器与预注册已交付（`eval/aggregate.py`、`scripts/eval_report.py`、
+`run_eval_baseline.py --rounds`、`eval-multiround-preregistration.md`）；3 轮实跑待所有者
+批准后补。
+
 ### D. 通用性层 —— 跨仓
 
 现状：`delivery run/preflight/ci-triage` 都有 `--repo`（`app/cli.py:826,860,874`），
@@ -83,6 +87,8 @@ issue #95 第 2–4 步：24 条策展用例、协议注册、多轮分布 + 置
 **交付判据**：在自己的第二个真实仓库上跑 1–2 单，把仓库档案（verify command、
 allowed paths、分支保护假设）固化成一份**配置契约**（而非环境变量），
 PR 里附上该仓库自己的 CI 绿灯。不需要「别人」。
+
+**状态**：配置契约已交付（per-repo 仓库档案，PR #107）；第二个真实仓库实跑 1–2 单待补。
 
 ### E. 部署层 —— 私有化 runbook
 
