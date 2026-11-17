@@ -1,0 +1,4 @@
+# 交付给 shing26/moa-gateway 时使用的仓库档案（ADR-041）。
+# 档案属于部署方，不属于被交付仓库；不要在这里写 token、密钥或 PAT。
+verify_command = ".venv/Scripts/python.exe -m pytest tests/unit -q"
+base_branch = "main"

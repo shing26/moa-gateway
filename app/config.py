@@ -305,6 +305,13 @@ class Settings:
             os.getenv("DELIVERY_RUN_RECORD_DIR", "data/delivery-runs")
             or "data/delivery-runs"
         ).strip()
+        # 仓库档案目录（ADR-041）：`<owner>/<repo>.toml` 承载该仓库的
+        # verify_command / base_branch。档案**属于部署方**，不读被交付仓库的检出。
+        # 相对路径按本仓库根解析；档案存在即优先于 CHANGE_AGENT_* 环境变量，
+        # 档案损坏时 fail-closed（不回退环境变量）。
+        self.delivery_repo_profile_dir: str = (
+            os.getenv("DELIVERY_REPO_PROFILE_DIR", "config/repos") or "config/repos"
+        ).strip() or "config/repos"
         # CI triage is read-only evidence collection. These limits bound local
         # artifacts and downloaded logs; none of them enable GitHub writes.
         self.ci_triage_output_dir: str = (

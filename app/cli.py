@@ -357,13 +357,33 @@ class TerminalPushApprovalPort:
         )
 
 
+def _delivery_repo_profile_root() -> Path:
+    """档案目录。相对路径按**部署仓库根**解析，而不是当前工作目录。
+
+    档案属于部署方（ADR-041）：不能从被交付仓库的检出里读，否则每个仓库都得
+    先被交付一次才能配置。
+    """
+    from app.config import settings
+
+    configured = Path(settings.delivery_repo_profile_dir)
+    if configured.is_absolute():
+        return configured
+    return Path(__file__).resolve().parents[1] / configured
+
+
+def _resolved_base_branch(args: argparse.Namespace, resolved: Any) -> tuple[str, str]:
+    """返回 (base_branch, 来源)。显式参数 > 仓库档案 > 环境变量。"""
+    if getattr(args, "_base_branch_explicit", False):
+        return args.base_branch, "argument --base-branch"
+    if resolved.profile_path is not None:
+        return resolved.base_branch, resolved.base_source
+    return resolved.base_branch, "env CHANGE_AGENT_BASE_BRANCH"
+
+
 def cmd_delivery_run(args: argparse.Namespace) -> int:
     from app.agents.provider import LLMClient, LLMConfig
     from app.config import settings
-    from apps.code_review_pipeline.change.pipeline import (
-        ChangePipeline,
-        verify_command_from_env,
-    )
+    from apps.code_review_pipeline.change.pipeline import ChangePipeline
     from apps.code_review_pipeline.delivery.adapters.github import (
         GitHubChangeAdapter,
     )
@@ -380,6 +400,10 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
     from apps.code_review_pipeline.delivery.models import (
         DeliveryPolicy,
         DeliveryRequest,
+    )
+    from apps.code_review_pipeline.delivery.repo_profile import (
+        RepoProfileError,
+        resolve_delivery_config,
     )
     from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
     from apps.code_review_pipeline.delivery.workspace import (
@@ -408,10 +432,26 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
     if not settings.change_agent_model.strip():
         print("CHANGE_AGENT_MODEL 未配置", file=sys.stderr)
         return 2
-    verify_command = verify_command_from_env(settings.change_agent_verify_command)
+    try:
+        resolved = resolve_delivery_config(
+            args.repo,
+            _delivery_repo_profile_root(),
+            env_verify_command=settings.change_agent_verify_command,
+            env_base_branch=settings.change_agent_base_branch,
+        )
+    except RepoProfileError as exc:
+        # 坏档案 fail-closed：绝不回退环境变量（见 plans/repo-profile-20261117.md）。
+        print(f"仓库档案不可用: {exc}", file=sys.stderr)
+        return 2
+    verify_command = resolved.verify_command
     if not verify_command:
         print("CHANGE_AGENT_VERIFY_COMMAND 未配置", file=sys.stderr)
         return 2
+    base_branch, _ = _resolved_base_branch(args, resolved)
+    print(
+        f"verify command: {' '.join(verify_command)} "
+        f"(source: {resolved.verify_source})"
+    )
     if not settings.github_token:
         print("GITHUB_TOKEN 未配置", file=sys.stderr)
         return 2
@@ -468,7 +508,7 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
             trace_id=args.trace_id,
             repo=args.repo,
             base_sha=args.base_sha,
-            base_branch=args.base_branch,
+            base_branch=base_branch,
             branch=args.branch,
             goal=args.goal,
             title=args.title,
@@ -493,7 +533,7 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
                         workspace=workspace,
                         verify_command=verify_command,
                         model_name=settings.change_agent_model,
-                        base_branch=args.base_branch,
+                        base_branch=base_branch,
                         push_enabled=True,
                         verify_timeout_s=settings.change_agent_verify_timeout_s,
                     )
@@ -572,9 +612,25 @@ def cmd_delivery_preflight(args: argparse.Namespace) -> int:
 
     from app.config import settings
     from apps.code_review_pipeline.delivery.preflight import run_preflight
+    from apps.code_review_pipeline.delivery.repo_profile import (
+        RepoProfileError,
+        resolve_delivery_config,
+    )
     from apps.code_review_pipeline.merge_store import build_merge_store
     from apps.code_review_pipeline.routing.github_provider import build_github_client
 
+    try:
+        resolved = resolve_delivery_config(
+            args.repo,
+            _delivery_repo_profile_root(),
+            env_verify_command=settings.change_agent_verify_command,
+            env_base_branch=settings.change_agent_base_branch,
+        )
+    except RepoProfileError as exc:
+        print(f"仓库档案不可用: {exc}", file=sys.stderr)
+        return 2
+    base_branch, base_source = _resolved_base_branch(args, resolved)
+    print(f"base branch : {base_branch} (source: {base_source})")
     if not settings.github_token:
         print("GITHUB_TOKEN 未配置", file=sys.stderr)
         return 2
@@ -591,7 +647,7 @@ def cmd_delivery_preflight(args: argparse.Namespace) -> int:
             return await run_preflight(
                 args.repo,
                 github=github,
-                base_branch=args.base_branch,
+                base_branch=base_branch,
                 merge_store=merge_store,
                 probe_workflows=args.probe_workflows,
             )
@@ -858,7 +914,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="开工前自检：身份、仓库写权限、base 分支、合并通道、workflow 写权限",
     )
     delivery_preflight.add_argument("--repo", required=True)
-    delivery_preflight.add_argument("--base-branch", default="main")
+    # 默认交给 _apply_delivery_defaults / 仓库档案决定；显式给出时优先。
+    delivery_preflight.add_argument("--base-branch", default=None)
     delivery_preflight.add_argument(
         "--probe-workflows",
         action="store_true",
@@ -932,7 +989,12 @@ def _apply_delivery_defaults(args: argparse.Namespace) -> None:
         return
     from app.config import settings
 
-    if getattr(args, "base_branch", None) is None:
+    # 记住 base_branch 是否由**用户显式给出**（仓库档案优先于环境变量，
+    # 但显式 `--base-branch` 优先于档案）。这里仍像以前一样把环境变量填进
+    # args.base_branch，保持既有测试与调用方的可见行为不变。
+    explicit = getattr(args, "base_branch", None) is not None
+    args._base_branch_explicit = explicit
+    if not explicit:
         args.base_branch = settings.change_agent_base_branch
     if getattr(args, "command", "") == "ci-triage":
         sha_prefix = args.sha
