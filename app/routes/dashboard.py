@@ -20,6 +20,7 @@ from app.command_mode import MODES
 from app.config import settings
 from app.deps import _flag_client, _retriever, command_mode, knowledge_base, memory, obsidian_sync
 from app.feature_flags import DEFAULT_FLAGS
+from app.middleware.auth import insecure_mode_enabled
 from app.rendering.dashboard_html import (
     chat_page,
     knowledge_detail,
@@ -196,6 +197,20 @@ async def dashboard_ops_config() -> JSONResponse:
 
 @router.post("/dashboard/api/ops/config")
 async def dashboard_ops_config_update(body: OpsConfigUpdate) -> JSONResponse:
+    # ADR-038：本端点能热改进程级 os.environ（含 LLM_API_KEY），虽然在 Basic auth
+    # 之后、不是匿名洞，但"任何已认证用户都能无痕改写全局 LLM 凭证"与治理口径相悖。
+    # 与 GATEWAY_ALLOW_INSECURE 同款惯例：**可配置逃生口 + 默认关**，而不是删端点
+    # 打断已有 ops 面板 UX。真值语义复用 insecure_mode_enabled（1/true/yes/on，
+    # 大小写不敏感，未设置/其他一律拒绝），保证两个开关的 fail-closed 姿势完全一致。
+    if not insecure_mode_enabled(os.environ.get("DASHBOARD_OPS_WRITE")):
+        return JSONResponse({
+            "ok": False,
+            "error": "ops_write_disabled",
+            "reason": (
+                "ops 写入被拒绝：环境变量 DASHBOARD_OPS_WRITE 未显式开启"
+                "（设为 1/true/yes/on 后才允许热改 LLM 配置）"
+            ),
+        }, status_code=403)
     if body.provider is not None:
         os.environ["LLM_PROVIDER"] = body.provider.strip().lower() or "direct"
     if body.model is not None:
