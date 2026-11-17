@@ -83,7 +83,9 @@ extend-ignore。`ruff check --select BLE001 .` 零命中，`ruff check .` 全绿
 **交付链路复核。** `apps/` 树 65 处逐处确认，重点核对 `delivery/` 链路本体：失败都被终结为
 `NEEDS_HUMAN`/`FAILED`、转换成 `PushRecoveryRequired`，或只影响派生视图/观测信号；
 没有「失败被吞掉后推送/合并继续」的路径，因此该树 B 类为 0。`storage/review_store.py:965`
-的 `get()` 只读失败返回 `None`，没有生产调用方据此做写决策（仅契约/测试使用），按 A 处理。
+的 `get()` 只读失败返回 `None`；生产调用方是飞书卡片回调（`app/routes/feishu.py:263`，
+生产构建 `PostgresReviewStore`），None 时调用方回「审查记录不存在或已过期」并 return，
+后续 `review_publish`/`review_reject`/反馈写操作全部中止，属于安全的中止路径，按 A 处理。
 
 **未做：§决策 2（`Result[Output, Failure]` 接口）。** 触发条件不变：下次修改
 `app/orchestration/collaboration.py` 执行接口时一并做，或嗅探层再次实证误判时立项。

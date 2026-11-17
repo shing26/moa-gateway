@@ -962,7 +962,7 @@ class PostgresReviewStore:
                     raw={},
                     review_run_id=review_run_id or "",
                 )
-        except Exception:  # noqa: BLE001 - 只读查询失败按无记录返回 None；无生产调用方据此做写决策（仅契约/测试使用）
+        except Exception:  # noqa: BLE001 - 飞书卡片回调（app/routes/feishu.py:263，生产为 PostgresReviewStore）据此查记录：读失败返回 None 时调用方回“记录不存在或已过期”并 return，后续 review_publish/review_reject/反馈写操作全部中止，兜住即安全中止
             return None
 
     def current_trace_id(self, repo: str, pr_number: int) -> str | None:
