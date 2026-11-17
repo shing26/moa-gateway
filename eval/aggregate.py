@@ -6,11 +6,13 @@ holding only the report JSON can recompute every number.
 
 Verdict resolution reads only fields inside the row, in this fixed order:
 
-1. ``row["l0"]["contract_passed"]`` — ``eval.l0.L0Report.contract_passed``; the
+1. ``row["gate_state"]["passed"]`` — ``eval.gate_state.GateVerdict.passed``;
+   the case's own oracle wins when present (the four live gate-state cases have
+   empty ``allowed_paths``, so l0's generic ``changed_paths_match`` is
+   structurally always false for them — contract revision 1);
+2. ``row["l0"]["contract_passed"]`` — ``eval.l0.L0Report.contract_passed``; the
    runner scores every live row with the existing ``eval.l0.check_run`` and
    writes the full report into the row, so the report file stands alone;
-2. ``row["gate_state"]["passed"]`` — ``eval.gate_state.GateVerdict.passed``
-   (always present on ``arm == "gate_state"`` rows);
 3. an explicit ``row["passed"]``;
 
 a row with none of those verdicts is **unscored**: it is counted in
@@ -39,8 +41,8 @@ from typing import Any, Mapping, Sequence
 #: Frozen by the contract: Wilson score interval at 95%, z = 1.96.
 Z_95 = 1.96
 
-#: A pass rate needs at least two rounds; one round is a single coin flip.
-MIN_SUFFICIENT_ROUNDS = 2
+#: Pre-registration gate: fewer than three rounds may not be claimed as a rate.
+MIN_SUFFICIENT_ROUNDS = 3
 
 CLASS_ORDER = ("business", "failure", "boundary", "security")
 
@@ -149,8 +151,8 @@ class Aggregate:
         }
         if not self.sufficient:
             payload["insufficient_rounds"] = (
-                f"{self.rounds} round(s) observed; a pass rate needs at least "
-                f"{MIN_SUFFICIENT_ROUNDS}. Two single-round sessions already flipped "
+                f"{self.rounds} round(s) observed; the pre-registration gate is "
+                f"{MIN_SUFFICIENT_ROUNDS} rounds. Two single-round sessions already flipped "
                 "6 of 17 verdicts (docs/acceptance/eval-baseline-v2.md, section 2), so these "
                 "numbers are not a conclusion."
             )
@@ -174,16 +176,17 @@ def _row_key(row: Mapping[str, Any]) -> tuple[str, int]:
 def row_verdict(row: Mapping[str, Any]) -> bool | None:
     """The row's pass verdict, from fields inside the report row only.
 
-    Priority is fixed: ``l0.contract_passed`` -> ``gate_state.passed`` ->
-    explicit ``passed``.  ``None`` means the row carries no judgement; callers
-    must not guess one.
+    Priority is fixed: ``gate_state.passed`` -> ``l0.contract_passed`` ->
+    explicit ``passed``.  The case's oracle outranks the generic l0 contract
+    checks when both exist.  ``None`` means the row carries no judgement;
+    callers must not guess one.
     """
-    l0 = row.get("l0")
-    if isinstance(l0, dict) and isinstance(l0.get("contract_passed"), bool):
-        return l0["contract_passed"]
     gate = row.get("gate_state")
     if isinstance(gate, dict) and isinstance(gate.get("passed"), bool):
         return gate["passed"]
+    l0 = row.get("l0")
+    if isinstance(l0, dict) and isinstance(l0.get("contract_passed"), bool):
+        return l0["contract_passed"]
     direct = row.get("passed")
     if isinstance(direct, bool):
         return direct

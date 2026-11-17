@@ -56,15 +56,18 @@
 
 判据来源复用既有语义，不另造；优先级固定：
 
-1. `l0.contract_passed`：运行器在每条 live 行跑完后，用既有 `eval.l0.check_run(record,
-   case)` 打分，把 `contract_passed`、`all_passed`、六项检查的逐项结果与明细写进该行
-   的 `l0`；拿不到运行记录时写 `l0: None` 并附 `l0_reason`；
-2. `gate_state.passed`：`arm == "gate_state"` 的确定性探针；以及 `l0` 缺失时的
-   live gate-state 行；
+1. `gate_state.passed`：用例自己的 oracle。4 条 live gate-state 用例在运行器里同时带
+   `l0` 与 `gate_state`，但它们的 `allowed_paths` 为空，`eval/l0.py` 的
+   `changed_paths_match` 结构性恒 False；若让 l0 优先，门禁判定正确的行会被算成失败
+   （契约修订 1）。`arm == "gate_state"` 的确定性探针同样走这里；
+2. `l0.contract_passed`：普通 live 行。运行器在每条 live 行跑完后，用既有
+   `eval.l0.check_run(record, case)` 打分，把 `contract_passed`、`all_passed`、六项
+   检查的逐项结果与明细写进该行的 `l0`；拿不到运行记录时写 `l0: None` 并附
+   `l0_reason`；
 3. 显式 `passed`。
 
-**分析阶段的唯一输入是报告文件本身**（每行含 `l0`）；`.scratch` 里的评分脚本不再参与
-任何环节。若某行 `l0 is None`，该行计入 `unscored`，摘要中列出用例与 `l0_reason`；
+**分析阶段的唯一输入是报告文件本身**（每条 live 行含 `l0`）；`.scratch` 里的评分脚本
+不再参与任何环节。若某行 `l0 is None`，该行计入 `unscored`，摘要中列出用例与 `l0_reason`；
 不得手工补判，也不得把它当失败计入分母。
 
 ## 5. 指标定义（主指标冻结）
@@ -79,8 +82,8 @@
   不并入主指标。
 - **终态分布**：`terminal_states` 记录所有行的终态，仅作描述。
 
-`sufficient` 规则：观测到的轮数 < 2 时为 `False`，产物附 `insufficient_rounds`
-提示。**K = 3 是宣称门槛；少于 3 轮不得对外宣称通过率。**
+`sufficient` 规则：观测到的轮数 < 3（含 2 轮）时为 `False`，产物附
+`insufficient_rounds` 提示。**K = 3 是宣称门槛；少于 3 轮不得对外宣称通过率。**
 
 ## 6. 报告与复算
 

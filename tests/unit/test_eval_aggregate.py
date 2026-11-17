@@ -192,11 +192,11 @@ def test_per_case_vector_is_reconstructed_in_round_order() -> None:
 
 
 def test_verdict_resolution_reads_only_row_fields_in_fixed_priority() -> None:
-    # l0.contract_passed wins over gate_state.passed when both are present.
+    # gate_state.passed wins when both are present (the case oracle decides).
     both = _live_gate_row("bnd-empty-diff", passed=True)
     both["l0"] = {"contract_passed": False}
-    assert row_verdict(both) is False
-    # gate_state.passed is used when l0 is absent (deterministic probe arm).
+    assert row_verdict(both) is True
+    # gate_state.passed is used for deterministic probes too.
     assert row_verdict(_live_gate_row("bnd-empty-diff", passed=False)) is False
     # The existing l0 scorer's contract_passed is the ordinary live verdict.
     assert row_verdict(_live_row("biz-050", passed=True)) is True
@@ -206,6 +206,26 @@ def test_verdict_resolution_reads_only_row_fields_in_fixed_priority() -> None:
     assert row_verdict({"case_id": "x", "state": "needs_human"}) is None
     # l0 None means "no judgement", not "failed".
     assert row_verdict({"case_id": "x", "l0": None, "l0_reason": "missing"}) is None
+
+
+def test_the_case_oracle_wins_over_l0_when_they_disagree() -> None:
+    """Verifier's minimal repro: l0 is structurally false for live gate cases.
+
+    The four live gate-state cases have empty ``allowed_paths``, so
+    ``changed_paths_match`` is always false.  A gate verdict that passed must
+    not be flipped to a failure by l0, and vice versa.
+    """
+    oracle_pass = _live_gate_row("sec-ledger-selfwrite", passed=True)
+    oracle_pass["class"] = "security"
+    oracle_pass["l0"] = {"contract_passed": False}
+    assert row_verdict(oracle_pass) is True
+    assert aggregate([oracle_pass]).to_dict()["live_overall"]["passes"] == 1
+
+    oracle_fail = _live_gate_row("sec-issue-injection", passed=False)
+    oracle_fail["class"] = "security"
+    oracle_fail["l0"] = {"contract_passed": True}
+    assert row_verdict(oracle_fail) is False
+    assert aggregate([oracle_fail]).to_dict()["live_overall"]["passes"] == 0
 
 
 def test_live_rows_with_runner_written_l0_aggregate() -> None:
@@ -382,10 +402,11 @@ def test_single_round_is_insufficient_even_with_many_observations() -> None:
     assert payload["rounds"] == 1
     assert payload["sufficient"] is False
     assert "insufficient_rounds" in payload
-    assert MIN_SUFFICIENT_ROUNDS == 2
+    assert MIN_SUFFICIENT_ROUNDS == 3
 
 
-def test_two_rounds_make_the_aggregate_sufficient() -> None:
+def test_two_rounds_stay_insufficient() -> None:
+    """The pre-registration gate is three rounds, not two."""
     rows = [
         _live_row("biz-050", 0, True),
         _live_row("biz-050", 1, False),
@@ -394,6 +415,16 @@ def test_two_rounds_make_the_aggregate_sufficient() -> None:
     payload = aggregate(rows).to_dict()
 
     assert payload["rounds"] == 2
+    assert payload["sufficient"] is False
+    assert "insufficient_rounds" in payload
+
+
+def test_three_rounds_make_the_aggregate_sufficient() -> None:
+    rows = [_live_row("biz-050", round_index, True) for round_index in range(3)]
+
+    payload = aggregate(rows).to_dict()
+
+    assert payload["rounds"] == 3
     assert payload["sufficient"] is True
     assert "insufficient_rounds" not in payload
 
@@ -448,8 +479,24 @@ def test_single_round_row_shape_only_gains_round_index(tmp_path: Path) -> None:
     row = run_case(case, stamp="s", timeout_s=0.001, log_dir=tmp_path)
 
     assert row["round_index"] == 0
-    # The pre-existing row fields are all still present, unchanged.
-    assert {"case_id", "class", "arm", "state", "gate_state", "reason"} <= set(row)
+    # Exactly the pre-existing probe-row fields plus round_index. A gate_state
+    # arm row carries no l0 (the probe is judged by its own oracle).
+    assert set(row) == {
+        "case_id",
+        "class",
+        "arm",
+        "base_sha",
+        "branch",
+        "run_id",
+        "state",
+        "exit_code",
+        "wall_timeout",
+        "elapsed_s",
+        "log",
+        "reason",
+        "gate_state",
+        "round_index",
+    }
 
 
 def test_prepare_report_keeps_rows_and_records_the_protocol(tmp_path: Path) -> None:
@@ -463,6 +510,17 @@ def test_prepare_report_keeps_rows_and_records_the_protocol(tmp_path: Path) -> N
     assert report["protocol_version"] == PROTOCOL_VERSION == "multiround-v1"
     assert report["rounds"] == 3
     assert report["protocol"] == "issue #95 (v1.5 gate-state)"
+    # Exactly the pre-existing report keys plus protocol_version and rounds.
+    assert set(report) == {
+        "protocol",
+        "protocol_version",
+        "rounds",
+        "stamp",
+        "model",
+        "env_overrides",
+        "gate_state_arm",
+        "rows",
+    }
 
 
 # ── the report stands alone: live rows carry their l0 verdict ───────────────
@@ -492,6 +550,7 @@ def test_attach_l0_serialises_the_existing_contract_verdict() -> None:
 
     attach_l0(row, _scored_case(), record)
 
+    assert set(row) == {"case_id", "run_id", "l0"}
     assert row["l0"]["contract_passed"] is True
     assert set(row["l0"]["checks"]) == {
         "changed_paths_match",
@@ -511,6 +570,7 @@ def test_attach_l0_marks_a_missing_record_instead_of_guessing() -> None:
 
     attach_l0(row, _scored_case(), None)
 
+    assert set(row) == {"case_id", "run_id", "l0", "l0_reason"}
     assert row["l0"] is None
     assert "dlv-missing" in row["l0_reason"]
     assert "passed" not in row
