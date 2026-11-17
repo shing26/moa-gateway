@@ -63,6 +63,7 @@ apps/code_review_pipeline/routing/github_client.py    (只加 list_issue_comment
 apps/code_review_pipeline/merge_comment_approval.py   (新文件：判定 + 轮询器)
 tests/unit/**                                    (只新增)
 docs/adr/adr-040-github-comment-approval.md      (新 ADR，记录身份模型与未做的推送闸门)
+.env.template                                    (只加这两个变量及其注释，见修订 1)
 plans/github-approval-20261117.md                (本文件)
 ```
 
@@ -108,3 +109,23 @@ V1 的测试文件名以实际创建为准，需在 PR 里写清楚。
 - 改合并状态机、改飞书/webhook 路由、把推送审批也接到评论上。
 - 在日志或审计里写入评论正文或 token。
 - 为通过测试而放宽判定（反例测试必须真实覆盖五条规则）。
+
+---
+
+## 修订 1（2026-11-17，实现完成后、verifier 之前）
+
+实现方指出 `.env.template` 不在 Allowed paths，两个新开关只能从 ADR 发现——这与「第二
+个人能自己配起来」的目标直接冲突。据此扩展：
+
+1. `.env.template` 加入 Allowed paths，**只允许**追加这两个变量及注释：
+   `GITHUB_COMMENT_APPROVAL_ENABLED`（默认 `False`，写明开启后白名单 login 可在 PR 上
+   评论 `APPROVE <bundle_hash>` 批准合并）与 `GITHUB_APPROVER_LOGINS`（逗号分隔，写明
+   **为空时一条都不批**、与 `HITL_APPROVER_IDS` 不互通）。不得改动模板中其他任何行。
+
+2. 契约里 `delivery/adapters/github.py:166` 的路径省略了 `apps/code_review_pipeline/`
+   前缀，实际文件是 `apps/code_review_pipeline/delivery/adapters/github.py:166`，行内容
+   与描述一致。此处只更正路径表述，不改变任何要求。
+
+3. `tests/unit/test_merge_worker.py` 在冻结基线上不存在，V2 引用了它；实现方按
+   `tests/unit/**` 允许范围新建了该文件（轮询顺序测试）。这不违反「只新增」的要求，
+   V2 命令保持不变。
