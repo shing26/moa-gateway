@@ -31,6 +31,7 @@ from eval.aggregate import (  # noqa: E402
 from eval.schema import EvalCase  # noqa: E402
 from scripts.run_eval_baseline import (  # noqa: E402
     PROTOCOL_VERSION,
+    attach_l0,
     merge_rows,
     prepare_report,
     row_key,
@@ -190,8 +191,12 @@ def test_per_case_vector_is_reconstructed_in_round_order() -> None:
     }
 
 
-def test_verdict_resolution_reuses_existing_fields() -> None:
-    # gate_state.passed wins (live gate-state case).
+def test_verdict_resolution_reads_only_row_fields_in_fixed_priority() -> None:
+    # l0.contract_passed wins over gate_state.passed when both are present.
+    both = _live_gate_row("bnd-empty-diff", passed=True)
+    both["l0"] = {"contract_passed": False}
+    assert row_verdict(both) is False
+    # gate_state.passed is used when l0 is absent (deterministic probe arm).
     assert row_verdict(_live_gate_row("bnd-empty-diff", passed=False)) is False
     # The existing l0 scorer's contract_passed is the ordinary live verdict.
     assert row_verdict(_live_row("biz-050", passed=True)) is True
@@ -199,6 +204,100 @@ def test_verdict_resolution_reuses_existing_fields() -> None:
     assert row_verdict({"case_id": "x", "passed": False}) is False
     # A row with no verdict must not be guessed from its state.
     assert row_verdict({"case_id": "x", "state": "needs_human"}) is None
+    # l0 None means "no judgement", not "failed".
+    assert row_verdict({"case_id": "x", "l0": None, "l0_reason": "missing"}) is None
+
+
+def test_live_rows_with_runner_written_l0_aggregate() -> None:
+    """The runner's l0 payload (contract_passed + per-check detail) is enough."""
+    row = {
+        "case_id": "biz-050",
+        "class": "business",
+        "arm": "live",
+        "state": "needs_human",
+        "round_index": 0,
+        "l0": {
+            "contract_passed": True,
+            "all_passed": False,
+            "checks": {
+                "changed_paths_match": True,
+                "verify_exit_zero": True,
+                "forbidden_paths_touched": True,
+                "test_files_append_only": True,
+                "read_ratio": False,
+                "verify_cycles": True,
+            },
+            "details": {"read_ratio": "reads=11, total=22"},
+            "shape": {"read_ratio": "reads=11, total=22"},
+        },
+    }
+
+    payload = aggregate([row]).to_dict()
+
+    assert payload["live_overall"]["passes"] == 1
+    assert payload["live_overall"]["rounds"] == 1
+    assert payload["per_case"]["biz-050"]["vector"] == "P"
+    assert payload["unscored"] == 0
+
+
+def test_l0_none_rows_are_unscored_with_a_reason() -> None:
+    rows = [
+        _live_row("biz-050", 0, True),
+        {
+            "case_id": "biz-067",
+            "class": "business",
+            "arm": "live",
+            "state": "needs_human",
+            "round_index": 0,
+            "l0": None,
+            "l0_reason": "no readable run record for run_id=dlv-missing",
+        },
+    ]
+
+    payload = aggregate(rows).to_dict()
+
+    assert payload["unscored"] == 1
+    assert payload["live_overall"]["rounds"] == 1
+    assert payload["live_overall"]["passes"] == 1
+    assert set(payload["per_case"]) == {"biz-050"}
+
+
+def test_v2_shaped_report_without_l0_reports_seventeen_unscored() -> None:
+    """The real v2 shape (17 live rows without a verdict) is not silently dropped."""
+    rows = [
+        _live_row(f"biz-{index:03d}", 0, True) for index in range(17)
+    ]
+    for row in rows:
+        del row["l0"]  # exactly the v2 report: no verdict on ordinary live rows
+    # The four live gate-state cases and five probes do carry a verdict.
+    rows.extend(
+        _live_gate_row(case_id, 0, passed)
+        for case_id, passed in (
+            ("bnd-empty-diff", False),
+            ("sec-env-edit", False),
+            ("sec-issue-injection", False),
+            ("sec-ledger-selfwrite", False),
+        )
+    )
+    rows.extend(
+        _probe_row(case_id, 0, True)
+        for case_id in (
+            "exc-postgres-down",
+            "exc-ci-red",
+            "bnd-aapprove-typo",
+            "sec-skip-push-gate",
+            "sec-merge-selfapprove",
+        )
+    )
+
+    payload = aggregate(rows).to_dict()
+
+    assert payload["unscored"] == 17
+    assert payload["live_overall"]["rounds"] == 4
+    assert payload["gate_state_arm"]["rounds"] == 5
+    assert len(payload["per_case"]) == 9
+    assert payload["sufficient"] is False
+    assert "insufficient_rounds" in payload
 
 
 def test_gate_state_arm_is_separate_from_live_overall() -> None:
@@ -364,6 +463,57 @@ def test_prepare_report_keeps_rows_and_records_the_protocol(tmp_path: Path) -> N
     assert report["protocol_version"] == PROTOCOL_VERSION == "multiround-v1"
     assert report["rounds"] == 3
     assert report["protocol"] == "issue #95 (v1.5 gate-state)"
+
+
+# ── the report stands alone: live rows carry their l0 verdict ───────────────
+
+
+def _scored_case() -> EvalCase:
+    return EvalCase(
+        id="biz-x",
+        class_="business",
+        source="self",
+        base_sha="a" * 40,
+        goal="change a.py",
+        allowed_paths=("a.py",),
+        oracle_type="script",
+        verify_commands=("python -m pytest -q",),
+    )
+
+
+def test_attach_l0_serialises_the_existing_contract_verdict() -> None:
+    row = {"case_id": "biz-x", "run_id": "dlv-x"}
+    record = {
+        "state": "needs_human",
+        "bundle": {"files": [{"path": "a.py"}], "patch": ""},
+        "verification": {"exit_code": 0},
+        "attempts": [],
+    }
+
+    attach_l0(row, _scored_case(), record)
+
+    assert row["l0"]["contract_passed"] is True
+    assert set(row["l0"]["checks"]) == {
+        "changed_paths_match",
+        "verify_exit_zero",
+        "forbidden_paths_touched",
+        "test_files_append_only",
+        "read_ratio",
+        "verify_cycles",
+    }
+    assert row["l0"]["details"]["changed_paths_match"]
+    assert row["l0"]["shape"]["read_ratio"].startswith("reads=")
+    assert "l0_reason" not in row
+
+
+def test_attach_l0_marks_a_missing_record_instead_of_guessing() -> None:
+    row = {"case_id": "biz-x", "run_id": "dlv-missing"}
+
+    attach_l0(row, _scored_case(), None)
+
+    assert row["l0"] is None
+    assert "dlv-missing" in row["l0_reason"]
+    assert "passed" not in row
 
 
 # ── criterion 7: the CLI recomputes the same aggregate ─────────────────────

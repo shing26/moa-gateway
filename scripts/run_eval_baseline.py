@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from eval import gate_state
+from eval import gate_state, l0
 from eval.schema import EvalCase, load_cases
 
 REPO = "shing26/moa-gateway"
@@ -162,6 +162,35 @@ def _run_record_dir() -> Path:
     return directory
 
 
+def l0_payload(report: l0.L0Report) -> dict:
+    """Serialise an ``eval.l0`` report without changing its criteria.
+
+    The six checks, their pass flags and their details land in the row so the
+    report file alone justifies every verdict.
+    """
+    return {
+        "contract_passed": report.contract_passed,
+        "all_passed": report.all_passed,
+        "checks": {check.name: check.passed for check in report.checks},
+        "details": {check.name: check.detail for check in report.checks},
+        "shape": {name: check.detail for name, check in report.shape().items()},
+    }
+
+
+def attach_l0(row: dict, case: EvalCase, record: dict | None) -> dict:
+    """Attach the existing l0 verdict to a live row (pure; caller does the IO).
+
+    A missing record becomes ``l0: None`` plus a reason: the row must never be
+    dressed up as a pass or a fail when no judgement could be made.
+    """
+    if record is None:
+        row["l0"] = None
+        row["l0_reason"] = f"no readable run record for run_id={row.get('run_id') or '-'}"
+    else:
+        row["l0"] = l0_payload(l0.check_run(record, case))
+    return row
+
+
 def _load_run_record(run_id: str) -> dict | None:
     if not run_id:
         return None
@@ -273,7 +302,11 @@ def run_case(
     log_dir: Path,
     round_index: int = 0,
 ) -> dict:
-    """Run one case; return the report row (never raises on a failed run)."""
+    """Run one case; return the report row (never raises on a failed run).
+
+    Live rows carry ``l0``: the existing ``eval.l0`` verdict over the run
+    record, so the report file alone is enough to recompute the aggregate.
+    """
     cmd = build_command(case, stamp)
     env = build_env(case, dict(os.environ))
     branch = f"eval/{case.id}-{stamp}"
@@ -361,8 +394,9 @@ def run_case(
         "log": log_ref,
         "round_index": round_index,
     }
+    record = _load_run_record(run_id)
+    attach_l0(row, case, record)
     if gate_state.is_live_gate_case(case):
-        record = _load_run_record(run_id)
         if record is None:
             verdict = gate_state.failed_verdict(
                 case,

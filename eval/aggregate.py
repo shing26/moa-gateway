@@ -4,17 +4,20 @@
 clock.  The same rows always produce the same :class:`Aggregate`; a third party
 holding only the report JSON can recompute every number.
 
-Verdict resolution reuses the existing semantics and never re-scores a run:
+Verdict resolution reads only fields inside the row, in this fixed order:
 
-* ``arm == "gate_state"`` rows are judged by ``row["gate_state"]["passed"]``
-  (``eval.gate_state.GateVerdict.passed``);
-* ``arm == "live"`` rows use the same ``gate_state.passed`` when the row is a
-  live gate-state case, otherwise the existing scorer's ``l0.contract_passed``
-  (``eval.l0.L0Report.contract_passed``), otherwise an explicit ``row["passed"]``;
-* a row with none of those verdicts is **unscored**: it is counted in
-  ``terminal_states`` (and ``unscored``) but never in a numerator or denominator.
-  The runner's report rows for ordinary live cases carry no verdict — scoring
-  needs the run record — so the aggregator must not invent one from ``state``.
+1. ``row["l0"]["contract_passed"]`` — ``eval.l0.L0Report.contract_passed``; the
+   runner scores every live row with the existing ``eval.l0.check_run`` and
+   writes the full report into the row, so the report file stands alone;
+2. ``row["gate_state"]["passed"]`` — ``eval.gate_state.GateVerdict.passed``
+   (always present on ``arm == "gate_state"`` rows);
+3. an explicit ``row["passed"]``;
+
+a row with none of those verdicts is **unscored**: it is counted in
+``terminal_states`` (and ``unscored``) but never in a numerator or denominator.
+A row whose ``l0`` is ``None`` carries ``l0_reason`` and is not guessed from
+``state``.  The aggregator never scores a run itself and never reads anything
+outside its argument.
 
 Exclusions are by terminal state: ``infra_error`` -> ``excluded["infra"]`` and
 ``not_run_by_design`` -> ``excluded["not_run_by_design"]``.  They never enter a
@@ -169,16 +172,18 @@ def _row_key(row: Mapping[str, Any]) -> tuple[str, int]:
 
 
 def row_verdict(row: Mapping[str, Any]) -> bool | None:
-    """The row's pass verdict, from the fields existing tooling already writes.
+    """The row's pass verdict, from fields inside the report row only.
 
-    ``None`` means the row carries no judgement; callers must not guess one.
+    Priority is fixed: ``l0.contract_passed`` -> ``gate_state.passed`` ->
+    explicit ``passed``.  ``None`` means the row carries no judgement; callers
+    must not guess one.
     """
-    gate = row.get("gate_state")
-    if isinstance(gate, dict) and isinstance(gate.get("passed"), bool):
-        return gate["passed"]
     l0 = row.get("l0")
     if isinstance(l0, dict) and isinstance(l0.get("contract_passed"), bool):
         return l0["contract_passed"]
+    gate = row.get("gate_state")
+    if isinstance(gate, dict) and isinstance(gate.get("passed"), bool):
+        return gate["passed"]
     direct = row.get("passed")
     if isinstance(direct, bool):
         return direct

@@ -50,20 +50,22 @@
   重跑不得改变轮次定义、不得借机挑选用例或时段。
 - `not_run_by_design`：语料层面明确不设计的路径。当前 26 条全部可测，此桶预期为 0；
   若出现，只计数、不进率。
-- `unscored`：行上没有任何判据字段（`gate_state.passed` / `l0.contract_passed` /
-  显式 `passed`）。聚合器把它单独计数，**不猜 pass 也不猜 fail**。
+- `unscored`：行上没有任何判据字段（`l0.contract_passed` / `gate_state.passed` /
+  显式 `passed`），或 `l0 is None` 且无其它判据。聚合器把它单独计数并在摘要里列出
+  原因，**不猜 pass 也不猜 fail**。
 
-判据来源复用既有语义，不另造：
+判据来源复用既有语义，不另造；优先级固定：
 
-- `arm == "gate_state"`：`eval/gate_state.py` 的 `GateVerdict.passed`；
-- `arm == "live"` 的普通用例：`eval/l0.py` 的 `L0Report.contract_passed`
-  （`check_run` 对运行记录打分）；
-- `arm == "live"` 的 live gate-state 用例：该行的 `gate_state.passed`。
+1. `l0.contract_passed`：运行器在每条 live 行跑完后，用既有 `eval.l0.check_run(record,
+   case)` 打分，把 `contract_passed`、`all_passed`、六项检查的逐项结果与明细写进该行
+   的 `l0`；拿不到运行记录时写 `l0: None` 并附 `l0_reason`；
+2. `gate_state.passed`：`arm == "gate_state"` 的确定性探针；以及 `l0` 缺失时的
+   live gate-state 行；
+3. 显式 `passed`。
 
-**开跑前/分析前的必要步骤**：运行器写出的普通 live 行不含 l0 判据（打分需要运行记录，
-而 `eval_report.py` 按契约不读 `data/`）。因此分析前必须用既有 `eval.l0.check_run(record,
-case)` 对每条 live 行打分，把 `l0.contract_passed` 写回该行，再跑聚合器。未写回的行走
-`unscored`，不得手工补判。
+**分析阶段的唯一输入是报告文件本身**（每行含 `l0`）；`.scratch` 里的评分脚本不再参与
+任何环节。若某行 `l0 is None`，该行计入 `unscored`，摘要中列出用例与 `l0_reason`；
+不得手工补判，也不得把它当失败计入分母。
 
 ## 5. 指标定义（主指标冻结）
 
@@ -89,8 +91,9 @@ case)` 对每条 live 行打分，把 `l0.contract_passed` 写回该行，再跑
 ```
 
 报告合取语义：同一 `(case_id, round_index)` **不覆盖**；新轮次追加。报告内记录
-`protocol_version`、`rounds`，每行记录 `round_index`。`eval_report.py` 只读报告文件，
-不读数据库、`data/` 或模型端点。
+`protocol_version`、`rounds`，每行记录 `round_index`，每条 live 行记录 `l0`（判据与
+逐项检查明细）。`eval_report.py` 只读报告文件，不读数据库、`data/` 或模型端点；
+第三方只凭这一个文件即可复算全部聚合数字。
 
 ## 7. 成本与批准门槛
 

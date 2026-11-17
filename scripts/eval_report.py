@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from eval.aggregate import Aggregate, aggregate
+from eval.aggregate import Aggregate, aggregate, row_verdict
 
 
 def _rate(value: float | None) -> str:
@@ -70,9 +70,17 @@ def render(report: dict, result: Aggregate) -> str:
     )
     if result.unscored:
         lines.append(
-            f"unscored rows (no verdict in the row): {result.unscored} "
-            "- not counted as pass or fail"
+            f"WARNING: {result.unscored} row(s) carry no verdict and are excluded "
+            "from every rate (not counted as pass, not counted as fail):"
         )
+        for row in report.get("rows") or []:
+            if str(row.get("state") or "") in {"infra_error", "not_run_by_design"}:
+                continue
+            if row_verdict(row) is None:
+                reason = row.get("l0_reason") or "no l0 / gate_state verdict in the row"
+                lines.append(
+                    f"  {row.get('case_id')} round={row.get('round_index', 0)}: {reason}"
+                )
     if result.duplicates:
         lines.append(f"duplicate (case_id, round_index) rows ignored: {result.duplicates}")
     lines.append("")
