@@ -130,3 +130,24 @@ V4  PYTHONPATH=. /d/HermesData/moa-gateway/.venv/Scripts/python.exe -m pytest te
 - 改 `ChangeApproval` 既有字段的位置顺序或必填性。
 - 在文档里宣称「自审批已不可能」——终端自称身份永远不可验证，insecure 逃生口
   仍在；文档只能说「未验证身份有审计标记、自审批默认被拒」。
+
+---
+
+## 修订 1（2026-11-19，实现方声明偏差的裁决）
+
+实现完成于 `c4988fc`，声明四处偏差，裁决如下：
+
+1. **分支基于本地 `origin/main` = `6b5fc1a`**（上游 OOM 两次 fetch 失败）。
+   裁决：接受——协调方已独立 fetch 确认 remote main 仍为 `6b5fc1a`，无遗漏提交。
+2. **契约设计第 4 条「终端 `cmd approve` 传 `channel="terminal"`」未落地**：该调用
+   经 `approval.py::approve_task`（不在 Allowed paths，且与飞书共用），硬编码会把
+   飞书审批误标为终端。裁决：接受——正确性的理由成立（误标比缺省更糟）；判据 6
+   的可测形态（终端推送审批标记完整落地、`cmd approve` 行为 `identity_verified=False`
+   诚实默认）已满足。
+3. **`eval/gate_state.py` 越出 Allowed paths**：两个 L2 gate 探针无参构造
+   `TerminalPushApprovalPort()`，端口加参后必然 TypeError；修复为注入拒绝路径上
+   不可触达的身份桩。裁决：有条件接受——属签名变更的机械后果；**verifier 必须亲自
+   确认**该 diff 仅限构造点注入、探针判定逻辑与断言零改动。
+4. **`change/pipeline.py::_record_approval` 不转发身份字段到 `record_human_decision`**：
+   契约明文「其余调用方不动」，且第 3 条要求的形态（flow 审计 detail）已完整落地。
+   裁决：接受。
