@@ -30,7 +30,7 @@
 | | 现状事实 | 缺口 |
 |---|---|---|
 | A1 远程审批 | `app/routes/feishu.py`、`app/routes/webhook.py` 已有审批路由与 `HITL_APPROVER_IDS` 白名单（`app/config.py:114`、`app/middleware/auth.py:36`） | 回调地址 `https://laptop-todom8hg.tailcdb1fe.ts.net` → `127.0.0.1:8083`，**8083 无监听**；仓库无 GitHub webhook；`.env` 无 `DELIVERY_WEBHOOK_ENABLED`。与 nexus-vibe 的地址共用是搁置原因，需确认是否解除 |
-| A2 多操作者身份 | 终端审批（`app/cli.py:340`）**只读一个自由输入的 `approver` 名字**，不校验白名单、不校验是否等于推送者；白名单只在 Feishu/webhook 路由生效 | 审批人身份与操作者身份未分离；终端路径可自我审批（同一人 push 同一人 APPROVE）；HITL 白名单在两条通道上语义不一致 |
+| A2 多操作者身份 | **已交付（2026-11-19）**：合并评论通道（PR #106）作者只认 API `user.login` + 白名单 + ≠ PR 作者 + fail-closed；终端推送通道接入同一套三态闸门（白名单成员且 ≠ token 主人才放行；空白名单仅显式 insecure 放行；否则拒绝），`get_authenticated_login()` 失败映射 `INFRA_ERROR`；人工决策审计带 `channel` / `identity_verified` 标记，交付审计的 `approved` 行带 `approver` / `channel` / `identity_verified` / `operator_login` / `gate`。终端自称身份永远不可验证（审计标记 `identity_verified=False`），自审批默认被拒（显式 insecure 逃生口仍在） | 剩余缺口：A1 远程审批（审批仍发生在推送者的机器上，第三个人不能在终端外批） |
 
 **关键判断：A2 真于 A1。** A1 是「在哪个渠道审批」，A2 是「审批能不能算数」。
 A2 不依赖公网地址、不需要外部确认，**现在就能做**；做完之后 A1 只是把
