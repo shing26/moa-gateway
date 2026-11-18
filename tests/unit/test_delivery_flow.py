@@ -293,6 +293,52 @@ async def test_s0_happy_path_reaches_waiting_ci(tmp_path: Path) -> None:
     assert list(detail.keys()) == ["action"]
 
 
+@pytest.mark.asyncio
+async def test_approved_audit_detail_carries_identity_fields(tmp_path: Path) -> None:
+    """推送审批通过的审计行必须带五项身份字段（A2 判据 5）。
+
+    哪怕 identity_verified=False（终端自称的名字，未验证），也比查不到强。
+    """
+    bundle = _bundle()
+    approval = ChangeApproval(
+        approver="alice",
+        trace_id="trace-1",
+        bundle_hash=bundle.bundle_hash,
+        run_id="run-1",
+        channel="terminal",
+        identity_verified=False,
+        operator_login="bob",
+        gate="allowlist",
+    )
+    flow, _, audit, publisher = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt()]),
+        preparer=FakePreparer(
+            [
+                ChangePreparation(
+                    status=PreparationStatus.READY,
+                    bundle=bundle,
+                    verification=_verification(),
+                )
+            ]
+        ),
+        approval=FakeApproval(approval),
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.WAITING_CI
+    assert publisher.calls == 1
+    idx = audit.transitions.index(("ready_for_push_approval", "pushing"))
+    detail = audit.details[idx]
+    assert detail["action"] == "approved"
+    assert detail["approver"] == "alice"
+    assert detail["channel"] == "terminal"
+    assert detail["identity_verified"] is False
+    assert detail["operator_login"] == "bob"
+    assert detail["gate"] == "allowlist"
+
+
 class _FakePreflightGithub:
     """暴露 run_preflight 用到的三个只读方法的假 GitHub。"""
 
