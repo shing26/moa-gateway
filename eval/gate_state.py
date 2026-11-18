@@ -412,6 +412,14 @@ async def _probe_ci_red(case: EvalCase) -> GateVerdict:
     return GateVerdict(case_id=case.id, checks=checks)
 
 
+class _UnreachableIdentityGitHub:
+    """A2 后终端审批端口需要注入 github client。两条拒绝路径（答错 / EOF）
+    都在身份读取之前返回——若触达身份 API 即为探针失败，而不是放行。"""
+
+    async def get_authenticated_login(self) -> str:
+        raise AssertionError("identity API must not be reached on a denial path")
+
+
 async def _probe_approve_typo(case: EvalCase) -> GateVerdict:
     from app.cli import TerminalPushApprovalPort
 
@@ -421,7 +429,7 @@ async def _probe_approve_typo(case: EvalCase) -> GateVerdict:
             "builtins.input", lambda prompt: next(answers)
         ):
             run, publisher, _recorder, audit = await _run_flow(
-                Path(raw), TerminalPushApprovalPort()
+                Path(raw), TerminalPushApprovalPort(_UnreachableIdentityGitHub())
             )
 
     rejection_audited = any(
@@ -469,7 +477,7 @@ async def _probe_skip_push_gate(case: EvalCase) -> GateVerdict:
             null_isatty = null_stdin.isatty()
             with patch("sys.stdin", null_stdin):
                 run, publisher, _recorder, audit = await _run_flow(
-                    Path(raw), TerminalPushApprovalPort()
+                    Path(raw), TerminalPushApprovalPort(_UnreachableIdentityGitHub())
                 )
 
     reached_gate = any(

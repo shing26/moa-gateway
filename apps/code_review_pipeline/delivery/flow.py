@@ -402,7 +402,20 @@ class DeliveryFlow:
                 ),
             )
 
-        run = await self._move(run, DeliveryRunState.PUSHING, "approved")
+        # 自此之后，交付审计里每一条「谁批准了推送」都带身份字段——哪怕是
+        # identity_verified=False（终端自称的名字），也比查不到强（A2）。
+        run = await self._move(
+            run,
+            DeliveryRunState.PUSHING,
+            "approved",
+            extra={
+                "approver": approval.approver,
+                "channel": approval.channel,
+                "identity_verified": approval.identity_verified,
+                "operator_login": approval.operator_login,
+                "gate": approval.gate,
+            },
+        )
         try:
             push = await self._publisher.publish(
                 workspace=self._workspace,

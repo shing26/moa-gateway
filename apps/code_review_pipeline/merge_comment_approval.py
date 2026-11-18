@@ -257,7 +257,8 @@ class MergeCommentApprovalPoller:
                 continue
 
             try:
-                # 审计只写身份与 bundle 证据，**不写评论正文**。
+                # 审计只写身份与 bundle 证据，**不写评论正文**。评论作者来自
+                # GitHub API 的 ``user.login``，是已验证身份（A2）。
                 await self._record_decision(
                     task_id=current.task_key,
                     repo=current.repo,
@@ -266,6 +267,8 @@ class MergeCommentApprovalPoller:
                     run_id=current.run_id,
                     trace_id=current.trace_id,
                     bundle_hash=current.bundle_hash,
+                    channel="github_comment",
+                    identity_verified=True,
                 )
             except Exception:  # noqa: BLE001 - 审计是旁路：审批已执行，审计写失败只记录，不改变合并结果
                 logger.exception(

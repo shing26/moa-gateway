@@ -136,6 +136,38 @@ async def test_human_decision_records_delivery_reconciliation_metadata(
     assert entry.extra["bundle_hash"] == "bundle-1"
 
 
+@pytest.mark.asyncio
+async def test_human_decision_defaults_to_unverified_identity(
+    collector: _Collector,
+) -> None:
+    """A2 回归：既有调用方不传新参数时，detail 多出的两个键是诚实默认——
+    channel 为空（未声明）、identity_verified=False（未验证），行为不变。"""
+    await record_human_decision(TASK_ID, REPO, operator="alice", decision="approve")
+
+    entry = collector.entries[0]
+    assert entry.extra["channel"] == ""
+    assert entry.extra["identity_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_human_decision_records_channel_and_identity_verification(
+    collector: _Collector,
+) -> None:
+    """A2：通道与身份标记随决策落库（github_comment 通道是已验证身份）。"""
+    await record_human_decision(
+        TASK_ID,
+        REPO,
+        operator="github:alice",
+        decision="approve",
+        channel="github_comment",
+        identity_verified=True,
+    )
+
+    entry = collector.entries[0]
+    assert entry.extra["channel"] == "github_comment"
+    assert entry.extra["identity_verified"] is True
+
+
 class FakeStore:
     def __init__(self) -> None:
         self.posted_review_id: str | None = None

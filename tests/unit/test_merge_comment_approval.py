@@ -392,6 +392,9 @@ async def test_execution_path_is_isomorphic_and_audited() -> None:
     assert audit["bundle_hash"] == BUNDLE_HASH
     assert audit["run_id"] == record.run_id
     assert audit["trace_id"] == record.trace_id
+    # A2：评论作者来自 GitHub API user.login，是已验证身份；通道如实标记。
+    assert audit["channel"] == "github_comment"
+    assert audit["identity_verified"] is True
     # 审计里不得出现评论正文。
     assert EXPECTED_BODY not in repr(audit)
 

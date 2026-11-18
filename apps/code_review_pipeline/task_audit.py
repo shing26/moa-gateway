@@ -114,8 +114,16 @@ async def record_human_decision(
     run_id: str = "",
     trace_id: str = "",
     bundle_hash: str = "",
+    identity_verified: bool = False,
+    channel: str = "",
 ) -> None:
-    """人工批准/拒绝写一行——这是"谁让这条 agent 结论生效"的唯一记录。"""
+    """人工批准/拒绝写一行——这是"谁让这条 agent 结论生效"的唯一记录。
+
+    ``channel`` 记录决策来自哪条通道（如 ``github_comment``）；``identity_verified``
+    表示操作者身份是否经平台 API 验证（评论作者来自 GitHub ``user.login`` 这类
+    已认证来源为 True；终端里自称的名字为 False）。两个参数都是诚实默认：调用方
+    不传 = 未声明通道、未验证身份，而不是冒充已验证。
+    """
     await record(
         _entry(
             task_id,
@@ -131,6 +139,8 @@ async def record_human_decision(
                 "run_id": run_id,
                 "trace_id": trace_id,
                 "bundle_hash": bundle_hash,
+                "identity_verified": identity_verified,
+                "channel": channel,
             },
         )
     )

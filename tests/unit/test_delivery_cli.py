@@ -271,7 +271,7 @@ def test_terminal_approval_denies_non_tty(
     )
 
     approval = asyncio.run(
-        TerminalPushApprovalPort().request(run_id="run-1", bundle=bundle)
+        TerminalPushApprovalPort(github=None).request(run_id="run-1", bundle=bundle)
     )
 
     assert approval is None
@@ -283,9 +283,17 @@ def test_terminal_approval_binds_run_id(monkeypatch: pytest.MonkeyPatch) -> None
         def isatty(self) -> bool:
             return True
 
-    answers = iter(["alice", "APPROVE"])
+    class StubGitHub:
+        async def get_authenticated_login(self) -> str:
+            return "bob"
+
+    from app.config import settings
+
     monkeypatch.setattr("app.cli.sys.stdin", InteractiveStdin())
+    answers = iter(["alice", "APPROVE"])
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    monkeypatch.setattr(settings, "github_approver_logins", ("alice",))
+    monkeypatch.delenv("GATEWAY_ALLOW_INSECURE", raising=False)
     bundle = SimpleNamespace(
         branch="moa/fix-1",
         bundle_hash="bundle-1",
@@ -295,13 +303,19 @@ def test_terminal_approval_binds_run_id(monkeypatch: pytest.MonkeyPatch) -> None
     )
 
     approval = asyncio.run(
-        TerminalPushApprovalPort().request(run_id="run-1", bundle=bundle)
+        TerminalPushApprovalPort(github=StubGitHub()).request(
+            run_id="run-1", bundle=bundle
+        )
     )
 
     assert approval is not None
     assert approval.run_id == "run-1"
     assert approval.trace_id == "trace-1"
     assert approval.bundle_hash == "bundle-1"
+    assert approval.channel == "terminal"
+    assert approval.identity_verified is False
+    assert approval.operator_login == "bob"
+    assert approval.gate == "allowlist"
 
 
 def test_cmd_delivery_run_wires_delivery_runtime(
@@ -746,7 +760,7 @@ def test_terminal_approval_denies_without_stdin(
     monkeypatch.setattr("app.cli.sys.stdin", None)
 
     approval = asyncio.run(
-        TerminalPushApprovalPort().request(run_id="run-1", bundle=_approval_bundle())
+        TerminalPushApprovalPort(github=None).request(run_id="run-1", bundle=_approval_bundle())
     )
 
     assert approval is None
@@ -775,7 +789,7 @@ def test_terminal_approval_denies_on_eof_at_prompt(
     monkeypatch.setattr("builtins.input", eof)
 
     approval = asyncio.run(
-        TerminalPushApprovalPort().request(run_id="run-1", bundle=_approval_bundle())
+        TerminalPushApprovalPort(github=None).request(run_id="run-1", bundle=_approval_bundle())
     )
 
     assert approval is None
@@ -810,7 +824,7 @@ def test_terminal_approval_denies_on_eof_at_second_prompt(
     monkeypatch.setattr("builtins.input", answer)
 
     approval = asyncio.run(
-        TerminalPushApprovalPort().request(run_id="run-1", bundle=_approval_bundle())
+        TerminalPushApprovalPort(github=None).request(run_id="run-1", bundle=_approval_bundle())
     )
 
     assert approval is None
@@ -841,7 +855,7 @@ def test_terminal_approval_denies_under_a_real_devnull_child() -> None:
         " verify_exit_code=0, trace_id='t')\n"
         "print('ISATTY', sys.stdin.isatty())\n"
         "approval = asyncio.run("
-        "TerminalPushApprovalPort().request(run_id='r', bundle=bundle))\n"
+        "TerminalPushApprovalPort(github=None).request(run_id='r', bundle=bundle))\n"
         "print('RESULT', approval is None)\n"
     )
     proc = subprocess.run(  # fixed argv, no shell
@@ -883,7 +897,7 @@ def test_terminal_approval_denies_when_isatty_raises(
     monkeypatch.setattr("app.cli.sys.stdin", ClosedStdin())
 
     approval = asyncio.run(
-        TerminalPushApprovalPort().request(run_id="run-1", bundle=_approval_bundle())
+        TerminalPushApprovalPort(github=None).request(run_id="run-1", bundle=_approval_bundle())
     )
 
     assert approval is None
@@ -906,7 +920,7 @@ def test_terminal_approval_denies_when_isatty_raises_oserror(
     monkeypatch.setattr("app.cli.sys.stdin", BrokenStdin())
 
     approval = asyncio.run(
-        TerminalPushApprovalPort().request(run_id="run-1", bundle=_approval_bundle())
+        TerminalPushApprovalPort(github=None).request(run_id="run-1", bundle=_approval_bundle())
     )
 
     assert approval is None
@@ -935,7 +949,7 @@ def test_terminal_approval_denies_under_a_closed_stdin_child() -> None:
         "bundle = SimpleNamespace(branch='b', bundle_hash='h', patch_hash='p',"
         " verify_exit_code=0, trace_id='t')\n"
         "approval = asyncio.run("
-        "TerminalPushApprovalPort().request(run_id='r', bundle=bundle))\n"
+        "TerminalPushApprovalPort(github=None).request(run_id='r', bundle=bundle))\n"
         "print('RESULT', approval is None)\n"
     )
     proc = subprocess.run(  # fixed argv, no shell
