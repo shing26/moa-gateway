@@ -76,6 +76,15 @@ class ChangeApproval:
     bundle_hash: str
     decision: str = "approve"
     run_id: str = ""
+    # 身份元数据（A2 收尾）。approver 在终端里仍是自称的名字——
+    # identity_verified=False 就是在审计里如实标记「这是自称，未验证」；
+    # operator_login 是从 GitHub API 读到的 token 主人（已验证的推送者身份），
+    # 读不到为空；gate 记录放行走的是哪道闸：
+    # "allowlist" | "insecure" | "insecure_self_approval"。
+    channel: str = "terminal"
+    identity_verified: bool = False
+    operator_login: str = ""
+    gate: str = ""
 
 
 @dataclass(frozen=True)
