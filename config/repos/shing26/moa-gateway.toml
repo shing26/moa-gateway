@@ -1,4 +1,9 @@
 # 交付给 shing26/moa-gateway 时使用的仓库档案（ADR-041）。
 # 档案属于部署方，不属于被交付仓库；不要在这里写 token、密钥或 PAT。
-verify_command = ".venv/Scripts/python.exe -m pytest tests/unit -q"
+#
+# 解释器必须写成裸名 `python`，不能写 `.venv/Scripts/python.exe`：交付 workspace
+# 是新克隆的归档，验证副本还会再复制一次且不含 `.venv`（app/agents/command_runner.py
+# 的 build_verify_env 注释）。`python` 由 harness 解析成**启动 agent 的**venv 解释器；
+# 写相对路径或本机绝对路径都会在任何一次真实交付里直接失败。
+verify_command = "python -m pytest tests/unit -q"
 base_branch = "main"
