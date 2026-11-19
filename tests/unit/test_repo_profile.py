@@ -478,7 +478,7 @@ def test_delivery_preflight_passes_profile_base_branch_to_the_check(
     captured: dict[str, str] = {}
 
     async def fake_run_preflight(
-        repo, *, github, base_branch, merge_store, probe_workflows
+        repo, *, github, base_branch, merge_store, probe_workflows, verify_command=None
     ):
         captured["base_branch"] = base_branch
         return SimpleNamespace(ok=True, checks=[])

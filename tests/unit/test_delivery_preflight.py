@@ -194,3 +194,46 @@ async def test_bad_repo_never_touches_the_network(fake_store) -> None:
     assert report.ok is False
     assert report.checks[0].name == "repo"
     assert "owner/name" in report.checks[0].detail
+
+
+@pytest.mark.asyncio
+async def test_verify_bad_relative_path_blocks(fake_store) -> None:
+    report = await run_preflight(
+        REPO,
+        github=_client(_ok_handler()),
+        merge_store=fake_store(),
+        verify_command=(".venv/Scripts/python.exe", "-m", "pytest"),
+    )
+
+    verify = next(check for check in report.checks if check.name == "verify")
+    assert verify.status == STATUS_BLOCKED
+    assert ".venv/Scripts/python.exe" in verify.detail
+    assert report.ok is False
+
+
+@pytest.mark.asyncio
+async def test_verify_bare_python_ok(fake_store) -> None:
+    report = await run_preflight(
+        REPO,
+        github=_client(_ok_handler()),
+        merge_store=fake_store(),
+        verify_command=("python", "-m", "pytest"),
+    )
+
+    verify = next(check for check in report.checks if check.name == "verify")
+    assert verify.status == STATUS_OK
+    assert report.ok is True
+
+
+@pytest.mark.asyncio
+async def test_verify_command_none_no_verify_item(fake_store) -> None:
+    report = await run_preflight(
+        REPO,
+        github=_client(_ok_handler()),
+        merge_store=fake_store(),
+        verify_command=None,
+    )
+
+    names = {check.name for check in report.checks}
+    assert "verify" not in names
+    assert report.ok is True
