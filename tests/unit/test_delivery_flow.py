@@ -907,3 +907,209 @@ async def test_merge_registration_failure_preserves_push_for_recovery(
     assert run.push == push
     assert recorder.runs[-1].push == push
     assert publisher.calls == 1
+
+
+# ── A1 flow 级绑定（修正案 1 P0 回归） ──────────────────────────────────
+
+
+class _SharedHitlStorage:
+    """Redis 替身：``using_memory=False`` 表示跨进程可用（内存字典实现）。"""
+
+    using_memory = False
+
+    def __init__(self) -> None:
+        self.data: dict[str, str] = {}
+
+    def key(self, hitl_id: str) -> str:
+        return f"moa:hitl:{hitl_id}"
+
+    def get(self, key: str) -> str | None:
+        return self.data.get(key)
+
+    def set(self, key: str, value: str, ttl: int | None = None) -> None:
+        self.data[key] = value
+
+    def pop(self, key: str) -> str | None:
+        return self.data.pop(key, None)
+
+    def delete(self, key: str) -> None:
+        self.data.pop(key, None)
+
+    def clear(self) -> None:
+        self.data.clear()
+
+
+class _PushApprovalCardSink:
+    def __init__(self) -> None:
+        self.cards: list[object] = []
+
+    async def send_card(self, card: object) -> bool:
+        self.cards.append(card)
+        return True
+
+
+class _PortGithub:
+    async def get_authenticated_login(self) -> str:
+        return "alice"
+
+
+class _PortRunLookup:
+    def load(self, run_id: str) -> object:
+        from types import SimpleNamespace
+
+        if run_id != "run-1":
+            raise FileNotFoundError(run_id)
+        return SimpleNamespace(request=SimpleNamespace(repo="owner/name"))
+
+
+class _HitlBoundApproval:
+    """复现修正案 1 之前的缺陷：批准对象把 ``hitl_id`` 当成 ``trace_id``。"""
+
+    def __init__(self, approval: ChangeApproval) -> None:
+        self._approval = approval
+
+    async def request(self, *, run_id: str, bundle: ChangeBundle) -> ChangeApproval:
+        assert run_id == "run-1"
+        assert bundle.trace_id == "trace-1"
+        return self._approval
+
+
+class _RecordingApprovalPort:
+    """转发给真实端口，同时记录它返回的批准对象（A9 断言用）。"""
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+        self.approvals: list[object] = []
+
+    async def request(self, *, run_id: str, bundle: ChangeBundle) -> object:
+        approval = await self._inner.request(run_id=run_id, bundle=bundle)  # type: ignore[attr-defined]
+        self.approvals.append(approval)
+        return approval
+
+
+@pytest.mark.asyncio
+async def test_feishu_port_approval_binds_to_bundle_trace_id_and_pushes(
+    tmp_path: Path,
+) -> None:
+    """flow 级 A9：真实飞书端口返回的批准对象必须能进 PUSHING 并触发发布。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from app.engine import SessionStore
+    from apps.code_review_pipeline.delivery.feishu_approval import (
+        FeishuPushApprovalPort,
+        write_decision,
+    )
+
+    bundle = _bundle()
+    store = SessionStore(storage=_SharedHitlStorage())
+    sender = _PushApprovalCardSink()
+    port = FeishuPushApprovalPort(
+        card_sender=sender,
+        session_store=store,
+        run_store=_PortRunLookup(),
+        github=_PortGithub(),
+        settings_obj=SimpleNamespace(
+            feishu_push_approval_enabled=True,
+            feishu_push_approval_timeout_s=5,
+            feishu_operator_open_id="ou_operator",
+            delivery_approval_chat_id="oc_chat",
+            feishu_app_id="cli_test",
+            feishu_app_secret="secret",
+            hitl_approver_ids=("ou_approver",),
+            gateway_allow_insecure="0",
+        ),
+        id_factory=lambda: "hitl-1",
+        poll_interval_s=0.01,
+    )
+    recorder = _RecordingApprovalPort(port)
+    flow, _, audit, publisher = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt()]),
+        preparer=FakePreparer(
+            [
+                ChangePreparation(
+                    status=PreparationStatus.READY,
+                    bundle=bundle,
+                    verification=_verification(),
+                )
+            ]
+        ),
+        approval=recorder,
+    )
+
+    task = asyncio.create_task(flow.run(_request()))
+    for _ in range(500):
+        if sender.cards:
+            break
+        await asyncio.sleep(0)
+    assert sender.cards, "飞书审批卡未发出，flow 没有停在 READY_FOR_PUSH_APPROVAL"
+    # 卡片按钮回传的 trace_id 必须是 pending 记录的 key（hitl_id），
+    # 否则回调 pop_hitl 认领不到，远程批准永远落空。
+    assert sender.cards[0].trace_id == "hitl-1"
+    assert write_decision(
+        store,
+        "hitl-1",
+        {
+            "decision": "approve",
+            "approver": "ou_approver",
+            "channel": "feishu",
+            "identity_verified": True,
+            "gate": "allowlist",
+            "bundle_hash": bundle.bundle_hash,
+        },
+        ttl_s=60,
+    )
+    run = await task
+
+    assert recorder.approvals, "飞书端口没有返回批准对象"
+    approval = recorder.approvals[-1]
+    assert approval is not None
+    assert approval.trace_id == bundle.trace_id, (
+        f"trace_id={approval.trace_id!r} != {bundle.trace_id!r}"
+    )
+    assert approval.bundle_hash == bundle.bundle_hash, (
+        f"bundle_hash={approval.bundle_hash!r} != {bundle.bundle_hash!r}"
+    )
+    assert run.state is DeliveryRunState.WAITING_CI, run.failure
+    assert ("ready_for_push_approval", "pushing") in audit.transitions
+    assert publisher.calls == 1
+    idx = audit.transitions.index(("ready_for_push_approval", "pushing"))
+    assert audit.details[idx]["channel"] == "feishu"
+    assert audit.details[idx]["approver"] == "ou_approver"
+
+
+@pytest.mark.asyncio
+async def test_flow_refuses_approval_bound_to_hitl_id(tmp_path: Path) -> None:
+    """``trace_id=hitl_id`` 是修正案 1 修掉的 P0；它必须停在 PUSHING 之前。"""
+    bundle = _bundle()
+    flow, _, audit, publisher = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt()]),
+        preparer=FakePreparer(
+            [
+                ChangePreparation(
+                    status=PreparationStatus.READY,
+                    bundle=bundle,
+                    verification=_verification(),
+                )
+            ]
+        ),
+        approval=_HitlBoundApproval(
+            ChangeApproval(
+                approver="ou_approver",
+                trace_id="hitl-1",
+                bundle_hash=bundle.bundle_hash,
+                run_id="run-1",
+                channel="feishu",
+            )
+        ),
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.NEEDS_HUMAN
+    assert run.failure is not None
+    assert run.failure.code is FailureCode.APPROVAL_REJECTED
+    assert "pushing" not in [current for _, current in audit.transitions]
+    assert publisher.calls == 0

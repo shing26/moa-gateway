@@ -615,3 +615,23 @@ def test_delivery_settings_default_profile_dir(
 
     monkeypatch.delenv("DELIVERY_REPO_PROFILE_DIR", raising=False)
     assert Settings().delivery_repo_profile_dir == "config/repos"
+
+
+# ── 随仓库发布的档案：验证命令不得绑定解释器路径 ──────────────────────────
+
+
+def test_shipped_profile_verifies_with_a_bare_interpreter() -> None:
+    """解释器必须交给 harness 解析，不能写相对或本机绝对路径。
+
+    交付 workspace 是新克隆的归档，验证副本还会再复制一次且不含 ``.venv``。
+    ``build_verify_env``（app/agents/command_runner.py）把**启动 agent 的** venv
+    放到子进程 PATH 头部，``resolve_program`` 再按裸名解析。档案里写
+    ``.venv/Scripts/python.exe`` 会在任何一次真实交付的验证步骤直接
+    ``FileNotFoundError``——这个回归值过一次真实交付才发现，代价是整单。
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    profile = load_repo_profile("shing26/moa-gateway", repo_root / "config" / "repos")
+
+    assert profile.verify_command, "随仓库发布的档案必须给出验证命令"
+    assert "/" not in profile.verify_command[0]
+    assert "\\" not in profile.verify_command[0]

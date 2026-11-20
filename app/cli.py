@@ -409,6 +409,46 @@ class TerminalPushApprovalPort:
         )
 
 
+def _build_push_approval_port(github: Any) -> Any:
+    """按配置选择推送审批通道（A1）：默认终端，显式开启才走飞书。"""
+    from app.config import settings
+
+    if not settings.feishu_push_approval_enabled:
+        return TerminalPushApprovalPort(github=github)
+
+    from app.channels.feishu_auth import FeishuAuthConfig, FeishuTokenProvider
+    from app.channels.feishu_cards import FeishuCardSender
+    from app.engine import RedisHitlStorage, SessionStore
+    from apps.code_review_pipeline.delivery.feishu_approval import (
+        FeishuPushApprovalPort,
+    )
+    from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
+
+    print(
+        "push approval: feishu "
+        f"(timeout={settings.feishu_push_approval_timeout_s}s)",
+        file=sys.stderr,
+    )
+    auth = FeishuTokenProvider(
+        FeishuAuthConfig(
+            app_id=settings.feishu_app_id,
+            app_secret=settings.feishu_app_secret,
+        )
+    )
+    return FeishuPushApprovalPort(
+        card_sender=FeishuCardSender(auth),
+        session_store=SessionStore(
+            storage=RedisHitlStorage(
+                url=settings.redis_url,
+                enable_fallback=settings.redis_enable_fallback,
+            )
+        ),
+        run_store=DeliveryRunStore(settings.delivery_run_record_dir),
+        github=github,
+        settings_obj=settings,
+    )
+
+
 def _delivery_repo_profile_root() -> Path:
     """档案目录。相对路径按**部署仓库根**解析，而不是当前工作目录。
 
@@ -602,7 +642,7 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
                             command_timeout_s=settings.change_agent_verify_timeout_s,
                         ),
                         preparer=adapter,
-                        approval=TerminalPushApprovalPort(github=github),
+                        approval=_build_push_approval_port(github),
                         publisher=adapter,
                         recorder=DeliveryRunStore(
                             settings.delivery_run_record_dir
@@ -854,7 +894,7 @@ def cmd_delivery_resume(args: argparse.Namespace) -> int:
                 github=github,
                 merge_store=merge_store,
                 settings=settings,
-                approval_port=TerminalPushApprovalPort(github=github),
+                approval_port=_build_push_approval_port(github),
             )
         finally:
             close = getattr(merge_store, "close", None)

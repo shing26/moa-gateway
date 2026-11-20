@@ -418,3 +418,76 @@ def test_same_pr_redelivery_is_idempotent() -> None:
 def _task_key_of(pr_number: int, head_sha: str) -> str:
     from apps.code_review_pipeline.routing.github_review_route import build_task_key
     return build_task_key("shing26/moa-gateway", pr_number, head_sha)
+
+
+# ── provider-verified 豁免：review webhook 无 Gateway token（2026-11-20）──
+
+_UNUSED_GATEWAY_TOKEN = "unused-gateway-token"  # nosec B105
+
+
+def _isolated_review_client():
+    """独立 app + 真实 review 路由 + fail-closed 中间件，不预置请求头。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.middleware.auth import AuthMiddleware
+    from apps.code_review_pipeline.routing.github_review_route import github_review_router
+
+    inner = FastAPI()
+    inner.include_router(github_review_router)
+    inner.add_middleware(
+        AuthMiddleware,
+        token=_UNUSED_GATEWAY_TOKEN,
+        allow_insecure=False,
+    )
+    return TestClient(inner)
+
+
+def test_review_webhook_signed_request_passes_without_gateway_token() -> None:
+    """A1（review 路由）：有效 HMAC、无 X-Gateway-Token → 202 accepted。"""
+    client = _isolated_review_client()
+    response = _post_signed(client, {
+        "action": "opened",
+        "number": 101,
+        "pull_request": {"number": 101, "head": {"sha": "feedc0de"}},
+        "repository": {"full_name": "shing26/moa-gateway"},
+    })
+    assert response.status_code == 202
+    assert response.json().get("status") == "accepted"
+
+
+def test_review_webhook_signature_rejection_without_gateway_token() -> None:
+    """A2（review 路由）：缺失/错误签名在无 Gateway token 时仍 401，不泄漏原因。"""
+    client = _isolated_review_client()
+    payload = {
+        "action": "opened",
+        "number": 102,
+        "pull_request": {"number": 102, "head": {"sha": "badc0de"}},
+        "repository": {"full_name": "shing26/moa-gateway"},
+    }
+    missing = client.post("/webhook/github/review", json=payload)
+    assert missing.status_code == 401
+    assert missing.json() == {"error": "unauthorized"}
+    assert "signature" not in missing.text.lower()
+
+    wrong = _post_signed(client, payload, secret="wrong-secret")
+    assert wrong.status_code == 401
+    assert wrong.json() == missing.json()
+    assert "signature" not in wrong.text.lower()
+
+
+def test_review_webhook_missing_secret_fails_closed_without_gateway_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A3（review 路由）：secret 为空且 insecure=0 → 401。"""
+    monkeypatch.setattr(settings, "github_webhook_secret", "")
+    monkeypatch.setattr(settings, "gateway_allow_insecure", "")
+    client = _isolated_review_client()
+    response = _post_signed(client, {
+        "action": "opened",
+        "number": 103,
+        "pull_request": {"number": 103, "head": {"sha": "deadc0de"}},
+        "repository": {"full_name": "shing26/moa-gateway"},
+    })
+    assert response.status_code == 401
+    assert response.json() == {"error": "unauthorized"}

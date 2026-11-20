@@ -173,6 +173,9 @@ class AsyncWal:
     _sizes: deque[int] = field(default_factory=deque)
     # 链头：上一条已写入记录的 entry_hash。None = 还没从磁盘恢复过（懒加载）。
     _last_hash: str | None = None
+    # ``_last_hash`` 所属的日期（日志文件按日切分，跨日必须重新恢复链头——
+    # 每个日文件是一条独立链，首行 prev_hash 必须为空，见 ADR-019）。
+    _chain_date: date | None = None
     # 缓冲满溢被挤掉的条数。此前 `deque(maxlen=…)` 是**静默**丢最旧，没有任何计数——
     # 审计说"丢了多少"必须答得出来（ADR-019 决策 4）。
     _dropped: int = 0
@@ -207,9 +210,13 @@ class AsyncWal:
 
     async def append(self, entry: AuditEntry) -> None:
         with self._lock:
-            path = self._log_path()
-            if self._last_hash is None:
+            today = date.today()
+            path = self._log_path(today)
+            # 跨日（或首次写入）时从**当日文件**里本写者的最后一条恢复链头；
+            # 不能沿用昨日链头，否则新一天首行 prev_hash 非空，校验器会判为断裂。
+            if self._chain_date != today or self._last_hash is None:
                 self._last_hash = self._resume_chain(path)
+                self._chain_date = today
             line, entry_hash = self._render_line(entry, self._last_hash)
             incoming = len(line.encode())
             self._evict_if_needed(incoming)
