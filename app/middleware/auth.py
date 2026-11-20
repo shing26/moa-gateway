@@ -13,6 +13,16 @@ from starlette.middleware.base import BaseHTTPMiddleware
 _ALLOWED = ("/health", "/healthz", "/docs", "/openapi.json")
 _LARK_VERIFIED_PATHS = ("/feishu/event", "/webhook/callback")
 _WEBHOOK_PREFIX = "/webhook"
+# `/webhook/github/` 是 **provider-verified path**：GitHub 不会发送自定义的
+# `X-Gateway-Token`，它用 `X-Hub-Signature-256` 对**原始请求体**做 HMAC。两个
+# GitHub 路由（delivery / review）各自在路由内 fail-closed 校验该签名——secret
+# 未配置且未显式 insecure 时直接 401。因此中间件不再叠加一道该通道无法满足的
+# token 门。
+#
+# **只豁免这个带尾斜杠的精确前缀**：`/webhook/github`（无尾斜杠）与
+# `/webhook/githubx/...` 仍走通用 `/webhook` token 校验。不要把它扩成
+# `/webhook/*`——聊天渠道、callback 等路径没有 GitHub 签名可依赖。
+_PROVIDER_VERIFIED_PREFIXES = ("/webhook/github/",)
 _DASHBOARD_PREFIX = "/dashboard"
 _DASHBOARD_STATIC = "/dashboard/static"
 # 这两组路由既不在 _WEBHOOK_PREFIX 也不在 _DASHBOARD_PREFIX 里，此前因此**完全
@@ -83,6 +93,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     `/feishu/event` 与 `/webhook/callback` 由飞书 `X-Lark-Token` 独立校验，
     不在本次 fail-closed 范围内。
+
+    `/webhook/github/` 是 provider-verified path：由 GitHub 的
+    `X-Hub-Signature-256`（路由内 fail-closed 校验）负责鉴权，中间件不做
+    `X-Gateway-Token` 校验；其余 `/webhook/*` 仍须网关 token。
     """
 
     def __init__(  # nosec B107
@@ -107,6 +121,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 return _unauthorized()
             return await call_next(request)
         if self._is_allowed(path):
+            return await call_next(request)
+        if path.startswith(_PROVIDER_VERIFIED_PREFIXES):
             return await call_next(request)
         if path.startswith(_WEBHOOK_PREFIX):
             if not self._token:

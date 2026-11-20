@@ -222,3 +222,106 @@ def test_missing_identity_fields_return_400(monkeypatch: pytest.MonkeyPatch) -> 
     )
     assert response.status_code == 400
     assert store.list_open() == []
+
+
+# ── provider-verified 豁免：无 X-Gateway-Token 的签名投递（2026-11-20）──
+
+_GATEWAY_TOKEN = "unused-gateway-token"  # nosec B105
+
+
+def _isolated_client():
+    """独立 app + 真实路由 + fail-closed 中间件，且不预置任何请求头。"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.middleware.auth import AuthMiddleware
+    from app.routes.github_delivery import router as delivery_router
+
+    inner = FastAPI()
+    inner.include_router(delivery_router)
+    inner.add_middleware(
+        AuthMiddleware,
+        token=_GATEWAY_TOKEN,
+        allow_insecure=False,
+    )
+    return TestClient(inner)
+
+
+def test_signed_ping_passes_without_gateway_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A1：有效 HMAC、无 X-Gateway-Token、token 非空、insecure=0 → 200 ignored。"""
+    _wire(monkeypatch, MergeStore(), RecordingNotifier())
+    client = _isolated_client()
+    raw = json.dumps(
+        {"zen": "keep it logically awesome", "hook_id": 1},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    response = client.post(
+        "/webhook/github/delivery",
+        content=raw,
+        headers={
+            "Content-Type": "application/json",
+            "X-Hub-Signature-256": sign_payload(raw, _SECRET),
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "ignored"}
+
+
+def test_unsigned_or_bad_signature_rejected_without_gateway_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A2：缺失/错误 HMAC → 401（不是 500），响应体不区分缺头与算错。"""
+    _wire(monkeypatch, MergeStore(), RecordingNotifier())
+    client = _isolated_client()
+    raw = json.dumps({"action": "ping"}, separators=(",", ":")).encode("utf-8")
+
+    missing = client.post(
+        "/webhook/github/delivery",
+        content=raw,
+        headers={"Content-Type": "application/json"},
+    )
+    assert missing.status_code == 401
+    assert missing.json() == {"error": "unauthorized"}
+    assert "signature" not in missing.text.lower()
+
+    wrong = client.post(
+        "/webhook/github/delivery",
+        content=raw,
+        headers={
+            "Content-Type": "application/json",
+            "X-Hub-Signature-256": sign_payload(raw, "wrong-secret"),
+        },
+    )
+    assert wrong.status_code == 401
+    assert wrong.json() == missing.json()
+    assert "signature" not in wrong.text.lower()
+
+
+def test_missing_secret_fails_closed_without_gateway_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A3：GITHUB_WEBHOOK_SECRET 为空且 insecure=0 → 路由 401，豁免不变成开门。"""
+    _wire(monkeypatch, MergeStore(), RecordingNotifier())
+    monkeypatch.setattr(settings, "github_webhook_secret", "")
+    monkeypatch.setattr(settings, "gateway_allow_insecure", "")
+    client = _isolated_client()
+    raw = json.dumps({"action": "ping"}, separators=(",", ":")).encode("utf-8")
+
+    unsigned = client.post(
+        "/webhook/github/delivery",
+        content=raw,
+        headers={"Content-Type": "application/json"},
+    )
+    assert unsigned.status_code == 401
+    assert unsigned.json() == {"error": "unauthorized"}
+
+    signed_with_empty_secret = client.post(
+        "/webhook/github/delivery",
+        content=raw,
+        headers={
+            "Content-Type": "application/json",
+            "X-Hub-Signature-256": sign_payload(raw, ""),
+        },
+    )
+    assert signed_with_empty_secret.status_code == 401
+    assert signed_with_empty_secret.json() == {"error": "unauthorized"}
