@@ -105,3 +105,34 @@ V4  PYTHONPATH=. .venv/Scripts/python.exe -m ruff check .
 2. 触发 GitHub webhook redelivery（或等待下一次 `pull_request`/`check_suite` 事件），
    确认 `last_response.code == 200`；
 3. 保留 `GATEWAY_ALLOW_INSECURE=0` 与 `WEBHOOK_AUTH_TOKEN` 非空。
+
+## 签收记录（2026-11-20）
+
+**所有者书面签收**：用户消息「签收 PR #114」。
+
+**合并**：PR #114 → `main`，merge commit
+`8df06a2d50f52304f715035e83577e416f9ebc9d`，2026-11-20T09:38:37Z。
+
+**验收证据**
+
+- 实现 HEAD：`b33ba97556da25640fd983fa868fbebbd68fb9fc`；`git status --short` 空。
+- V1 23 passed；V2 30 passed；V3 裸跑 2249 passed / 6 skipped；V4 ruff clean。
+- 独立 Verifier：A1–A7 + A6a 全 PASS，无 P0/P1。
+- GitHub CI：`test` / `integration` 绿，`docker` skipped。
+
+**运维验证（合并后）**
+
+- 8083 重启后 `/healthz` 200；funnel 外部 200。
+- 本地无 `X-Gateway-Token` 的有效签名 ping → 200 `{"status":"ignored"}`。
+- GitHub 重投 ping → `last_response = {code: 200, message: "OK"}`；
+  历史 4 条 401 为修复前投递，保留不改写。
+
+**人审四问**
+
+1. **是否在冻结契约范围内？** 是。8 个文件全部在修正案 1 的 Allowed paths；
+   签名校验、审批门、两个 GitHub 路由、dashboard / 飞书回调零改动。
+2. **证据是否绑定 HEAD 且可复跑？** 是。HEAD + 干净状态 + V1–V4；
+   Verifier 独立重跑，不采信实现方自评。
+3. **是否有未声明行为变化？** 无。修正案 1 已显式记录 `app/cli.py` 状态行
+   stdout → stderr 与 A6a。
+4. **残余是否如实记录并接受？** 是。无 P0/P1；历史 401 投递不回写。
