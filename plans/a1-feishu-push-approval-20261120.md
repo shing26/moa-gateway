@@ -213,3 +213,34 @@ V1 文件名以实现实际创建为准，PR 里写清。真实飞书端到端�
 - 阻塞等待期间 CLI 进程被占用（最长 timeout）；进程被杀 → run 停在
   `READY_FOR_PUSH_APPROVAL`，pending 记录按 TTL 失效，需重新 `delivery resume`。
 - 强模型通过率、探索/写入预算分离属于 B 阶段，不在本契约。
+
+## 签收记录（2026-11-20）
+
+**所有者书面签收**：用户消息「签收 PR #112」。
+
+**合并**：PR #112 → `main`，merge commit
+`3177080854f387c91fcdf04d208abec117607481`，2026-11-20T05:54:39Z。
+
+**验收证据**
+
+- 实现 HEAD：`5a63d79edb0f6b680148e13d7b569796e97963d8`；`git status --short` 空。
+- 独立 Verifier 在实现 HEAD 上亲跑：V1 22 passed；V2 42 passed；V3 37 passed /
+  16 skipped（缺 `CODE_REVIEW_DATABASE_URL`，按设计自跳过）；V4 ruff clean；
+  V5 2239 passed / 6 skipped；A1–A12 全 PASS，无 P0/P1。
+- GitHub CI：`test` SUCCESS、`integration` SUCCESS、`docker` SKIPPED。
+
+**人审四问**
+
+1. **是否在冻结契约范围内？** 是。13 个变更文件全部落在修正案 1 的 Allowed paths；
+   `flow.py` / `pipeline.py` / 状态机 / 合并闸门 / 终端端口 / 聊天 HITL / PR 审查通道零改动。
+2. **证据是否绑定 HEAD 且可复跑？** 是。HEAD SHA + 干净状态 + V1–V5 命令与计数；
+   Verifier 独立重跑，不采信实现方自评。
+3. **是否有未声明的行为变化？** 无。修正案 1 已显式记录 `trace_id` 绑定、
+   `audit.py` 补 `bundle_hash`、`delivery resume` 端口、路线图决策记录四处范围调整。
+4. **残余是否如实记录并接受？** 是。P2 三项（`audit.py` 分支无直接单测、超时后卡片不更新、
+   白名单拒绝消息在缺 `chat_id` 时可能送不达）不阻断，已在 PR 与本节留痕。
+
+**后续（不在本次签收范围）**
+
+- 部署：funnel → moa-gateway、飞书与 GitHub webhook、`FEISHU_PUSH_APPROVAL_ENABLED=1`。
+- 阶段门槛：第二身份在飞书批准一次推送 → PR → CI → 合并；台账入下一行。
