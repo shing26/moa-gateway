@@ -88,3 +88,38 @@ Verifier 需亲自重跑该探针，不采信实现方贴的输出。
   在跨过本日文件前仍会 `degraded`（次日新文件起恢复正常）。
 - 修复需重启 8083 才生效。
 - 09-29 的历史断裂不可修，继续如实保留。
+
+## 8. 签收记录（2026-11-20）
+
+**所有者书面签收**：用户消息「签收 PR #116」。
+
+**合并**：PR #116 → `main`，merge commit
+`ad449c1374670d89d9166114eae4f7b3056a10c9`，2026-11-20T12:05:41Z。
+
+**验收证据**
+
+- 实现 HEAD：`ee2f77547c9423531fff378234ab5084b7b4654c`；`git status --short` 空。
+- V1 52 passed；V2 2252 passed / 6 skipped；V3 全量 2289 passed / 23 skipped；
+  V4 ruff clean。
+- 独立 Verifier 自写跨日探针 16 checks / 0 failed；A1–A7 全 PASS，无 P0/P1。
+- diff 仅 `app/audit/wal.py`（9+/2-）与 `tests/unit/test_audit_chain.py`（107+/0-）；
+  测试删除行数为 0，既有断言未被弱化。
+- GitHub CI：`test` / `integration` 绿，`docker` skipped。
+
+**运维验证（合并后）**
+
+- 8083 重启：旧 pid 12396 → 新 pid 12692；`/healthz` 返回 200。
+- `audit_chain` 仍为 `degraded: 审计链断裂 audit-2026-11-20.jsonl:1`——
+  这是契约 §7 第 1 条明写的已知限制（当日文件第 1 行在修复前已写坏，历史不改写），
+  次日新文件起应恢复 `ok`。
+
+**人审四问**
+
+1. **是否在冻结契约范围内？** 是。`app/` 仅 `app/audit/wal.py`；测试为纯追加；
+   契约文件外无改动。
+2. **证据是否绑定 HEAD 且可复跑？** 是。V1–V4 与跨日探针由 Verifier 独立重跑，
+   不采信实现方自评。
+3. **是否有未声明行为变化？** 无。`chain_report` / `verify_chain` / `verify_audit_dir`
+   与 `/healthz` 零改动；跨日链头改从当日文件恢复，是契约 A1/A3 的明写要求。
+4. **残余是否如实记录并接受？** 是。今日文件已坏、需重启生效、09-29 历史断裂
+   三条限制保留在 §7，未用“豁免”或改历史的方式消红。
