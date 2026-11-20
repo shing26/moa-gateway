@@ -579,6 +579,8 @@ async def test_tool_loop_repeat_marker_on_identical_read(tmp_path: Path) -> None
     assert tool_messages, "expected tool messages"
     first_msg = tool_messages[0]  # this is the second call (repeat #2)
     assert "#2" in first_msg, f"expected repeat #2 in {first_msg!r}"
+    # With suppression on (default), the body must not be re-sent within the window.
+    assert "hello" not in first_msg, f"expected stub without body, got {first_msg!r}"
     # slot loop_repeat_marks should be 2 (second and third calls are marked)
     assert slot.get("loop_repeat_marks", 0) == 2, (
         f"expected loop_repeat_marks == 2, got {slot.get('loop_repeat_marks')}"
@@ -680,6 +682,286 @@ async def test_tool_loop_no_repeat_marker_when_disabled(tmp_path: Path) -> None:
     assert slot.get("loop_repeat_marks", 0) == 0, (
         f"expected loop_repeat_marks == 0 when disabled, got {slot.get('loop_repeat_marks')}"
     )
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_suppress_repeated_read_within_window(tmp_path: Path) -> None:
+    """S1: a second identical read within the context window gets only the
+    repeat stub; Run Record keeps the full observation."""
+    body = "SECRET-BODY-LINE\n" * 30
+    (tmp_path / "x.txt").write_text(body, encoding="utf-8")
+
+    llm = FakeLLM(
+        [
+            [_call("1", "read_file", {"path": "x.txt"})],
+            [_call("2", "read_file", {"path": "x.txt"})],
+            "finished",
+        ]
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+
+    slot: dict[str, object] = {}
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=10,
+        max_tokens=100,
+        memory_policy=MemoryPolicy(),
+        slot=slot,
+    )
+
+    assert result.status == "completed"
+    tool_messages = [
+        str(m.get("content", ""))
+        for m in llm.requests[-1]["messages"]
+        if m.get("role") == "tool"
+    ]
+    second_msg = tool_messages[-1]
+    assert second_msg.startswith("[repeat #2 of this exact call"), second_msg
+    assert "already in your context" in second_msg, second_msg
+    assert "SECRET-BODY-LINE" not in second_msg, second_msg
+    # Run Record keeps the full observations.
+    assert "SECRET-BODY-LINE" in result.steps[0].observation
+    assert "SECRET-BODY-LINE" in result.steps[1].observation
+    assert slot.get("loop_repeat_marks", 0) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_no_suppress_repeated_read_outside_window(
+    tmp_path: Path,
+) -> None:
+    """S2: once the original has been folded by compact_messages (turn distance
+    >= max_full_turns), the repeat still carries the full body."""
+    body = "SECRET-BODY-LINE\n" * 30
+    (tmp_path / "x.txt").write_text(body, encoding="utf-8")
+
+    llm = FakeLLM(
+        [
+            [_call("1", "read_file", {"path": "x.txt"})],
+            [_call("2", "read_file", {"path": "x.txt"})],
+            [_call("3", "read_file", {"path": "x.txt"})],
+            "finished",
+        ]
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+
+    slot: dict[str, object] = {}
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=10,
+        max_tokens=100,
+        memory_policy=MemoryPolicy(max_full_turns=2, max_observation_tokens=2000),
+        slot=slot,
+    )
+
+    assert result.status == "completed"
+    tool_messages = [
+        str(m.get("content", ""))
+        for m in llm.requests[-1]["messages"]
+        if m.get("role") == "tool"
+    ]
+    # With max_full_turns=2 the last request keeps turns 2 and 3 only.
+    second_msg, third_msg = tool_messages[0], tool_messages[1]
+    assert second_msg.startswith("[repeat #2 of this exact call"), second_msg
+    assert "SECRET-BODY-LINE" not in second_msg, second_msg
+    assert "#3" in third_msg, third_msg
+    assert "SECRET-BODY-LINE" in third_msg, third_msg
+    assert slot.get("loop_repeat_marks", 0) == 2
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_suppress_repeated_search_within_window(
+    tmp_path: Path,
+) -> None:
+    """S3: a repeated identical search within the window gets only the stub."""
+    (tmp_path / "x.txt").write_text("needle here\n", encoding="utf-8")
+
+    llm = FakeLLM(
+        [
+            [_call("1", "search", {"pattern": "needle"})],
+            [_call("2", "search", {"pattern": "needle"})],
+            "finished",
+        ]
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("search",),
+    )
+
+    slot: dict[str, object] = {}
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "search"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=10,
+        max_tokens=100,
+        memory_policy=MemoryPolicy(),
+        slot=slot,
+    )
+
+    assert result.status == "completed"
+    tool_messages = [
+        str(m.get("content", ""))
+        for m in llm.requests[-1]["messages"]
+        if m.get("role") == "tool"
+    ]
+    second_msg = tool_messages[-1]
+    assert second_msg.startswith("[repeat #2 of this exact call"), second_msg
+    assert "needle here" not in second_msg, second_msg
+    assert "needle here" in result.steps[0].observation
+    assert slot.get("loop_repeat_marks", 0) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_no_suppress_failed_repeat(tmp_path: Path) -> None:
+    """S4: a repeated read that fails must still deliver the error body."""
+    llm = FakeLLM(
+        [
+            [_call("1", "read_file", {"path": "missing.txt"})],
+            [_call("2", "read_file", {"path": "missing.txt"})],
+            "finished",
+        ]
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+
+    slot: dict[str, object] = {}
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=10,
+        max_tokens=100,
+        memory_policy=MemoryPolicy(),
+        slot=slot,
+    )
+
+    assert result.status == "completed"
+    tool_messages = [
+        str(m.get("content", ""))
+        for m in llm.requests[-1]["messages"]
+        if m.get("role") == "tool"
+    ]
+    second_msg = tool_messages[-1]
+    assert '"error"' in second_msg, f"expected error JSON delivered, got {second_msg!r}"
+    assert result.steps[1].outcome == "failed"
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_no_suppress_when_switch_off(tmp_path: Path) -> None:
+    """S5: with suppress_repeated_reads=False the repeat keeps marker + body."""
+    body = "SECRET-BODY-LINE\n" * 30
+    (tmp_path / "x.txt").write_text(body, encoding="utf-8")
+
+    llm = FakeLLM(
+        [
+            [_call("1", "read_file", {"path": "x.txt"})],
+            [_call("2", "read_file", {"path": "x.txt"})],
+            "finished",
+        ]
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+
+    slot: dict[str, object] = {}
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=10,
+        max_tokens=100,
+        memory_policy=MemoryPolicy(suppress_repeated_reads=False),
+        slot=slot,
+    )
+
+    assert result.status == "completed"
+    tool_messages = [
+        str(m.get("content", ""))
+        for m in llm.requests[-1]["messages"]
+        if m.get("role") == "tool"
+    ]
+    second_msg = tool_messages[-1]
+    assert "#2" in second_msg, second_msg
+    assert "SECRET-BODY-LINE" in second_msg, second_msg
+    assert slot.get("loop_repeat_marks", 0) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_loop_suppress_third_and_fourth_repeats(tmp_path: Path) -> None:
+    """S6: the 3rd and 4th identical reads within the window are suppressed
+    too, with #3 and #4 markers."""
+    body = "SECRET-BODY-LINE\n" * 30
+    (tmp_path / "x.txt").write_text(body, encoding="utf-8")
+
+    llm = FakeLLM(
+        [
+            [_call("1", "read_file", {"path": "x.txt"})],
+            [_call("2", "read_file", {"path": "x.txt"})],
+            [_call("3", "read_file", {"path": "x.txt"})],
+            [_call("4", "read_file", {"path": "x.txt"})],
+            "finished",
+        ]
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+
+    slot: dict[str, object] = {}
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=10,
+        max_tokens=100,
+        memory_policy=MemoryPolicy(),
+        slot=slot,
+    )
+
+    assert result.status == "completed"
+    tool_messages = [
+        str(m.get("content", ""))
+        for m in llm.requests[-1]["messages"]
+        if m.get("role") == "tool"
+    ]
+    assert len(tool_messages) == 4
+    for msg, marker in zip(tool_messages[1:], ("#2", "#3", "#4")):
+        assert msg.startswith(f"[repeat {marker} of this exact call"), msg
+        assert "SECRET-BODY-LINE" not in msg, msg
+    for step in result.steps[:4]:
+        assert "SECRET-BODY-LINE" in step.observation
+    assert slot.get("loop_repeat_marks", 0) == 3
 
 
 @pytest.mark.asyncio

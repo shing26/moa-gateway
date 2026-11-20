@@ -226,6 +226,11 @@ async def execute_tool_loop(
     executed_tool_calls = 0
     # Repeat tracking: key -> count
     repeat_counts: dict[tuple, int] = {}
+    # Repeat tracking: key -> 轮号（该 key 的正文最近一次真正送达模型的轮，
+    # 被抑制的重复不刷新——正文没有再次进入上下文）。
+    repeat_last_turn: dict[tuple, int] = {}
+    # 轮号：一次 chat_with_tools 响应及其全部 tool 消息为一轮。
+    turn_no = 0
     # Slot counters
     slot.setdefault("loop_repeat_marks", 0)
     slot.setdefault("loop_budget_nudges", 0)
@@ -258,6 +263,7 @@ async def execute_tool_loop(
             max_tokens=request_tokens(),
         )
         record_usage()
+        turn_no += 1
         while True:
             if max_tokens > 0 and usage.total_tokens > max_tokens:
                 return ToolLoopResult(
@@ -400,10 +406,27 @@ async def execute_tool_loop(
                         if key is not None:
                             count = repeat_counts.get(key, 0) + 1
                             repeat_counts[key] = count
+                            suppressed = False
                             if count >= 2:
                                 repeat_line = f"[repeat #{count} of this exact call - the content is already in your context; do not read it again]"
-                                model_observation = repeat_line + "\n" + model_observation
                                 slot["loop_repeat_marks"] = int(slot.get("loop_repeat_marks", 0)) + 1
+                                last_turn = repeat_last_turn.get(key)
+                                if (
+                                    policy.suppress_repeated_reads
+                                    and outcome_kind == "ok"
+                                    and last_turn is not None
+                                    and turn_no - last_turn
+                                    <= policy.max_full_turns - 1
+                                ):
+                                    # 原文仍在窗口内：只回重复标记，不回灌正文。
+                                    suppressed = True
+                                    model_observation = repeat_line
+                                else:
+                                    model_observation = (
+                                        repeat_line + "\n" + model_observation
+                                    )
+                            if outcome_kind == "ok" and not suppressed:
+                                repeat_last_turn[key] = turn_no
                     except (json.JSONDecodeError, TypeError):
                         # skip marker if arguments failed to parse as JSON
                         pass
@@ -450,6 +473,7 @@ async def execute_tool_loop(
                 max_tokens=allowance,
             )
             record_usage()
+            turn_no += 1
     except Exception as exc:  # noqa: BLE001 - 工具循环：模型/工具任意异常收口为 status=error 的结构化结果，调用方据此降级
         return ToolLoopResult(
             status="error",

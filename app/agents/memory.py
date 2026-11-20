@@ -35,6 +35,8 @@ class MemoryPolicy:
     budget_nudge_ratio: float = 0.75
     #: 開關：是否在 model_observation 中标记重复读取。
     mark_repeated_reads: bool = True
+    #: 是否把仍在上下文窗口内的重复读取观察替换为重复标记 stub（不含正文）。
+    suppress_repeated_reads: bool = True
 
 
 def _fit_head(text: str, budget: int) -> str:
