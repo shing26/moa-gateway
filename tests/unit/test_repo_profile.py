@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -77,6 +78,52 @@ class _FakeGitHub:
 class _FakeMergeStore:
     async def close(self) -> None:
         return None
+
+
+class _FakePreflightGitHub:
+    """``run_preflight`` 只读路径所需的最小假 GitHub。"""
+
+    async def get_authenticated_login(self) -> str:
+        return "shing26"
+
+    async def get_repo(self, target) -> dict:
+        return {"permission": "admin", "permissions": {"push": True}}
+
+    async def get_branch_sha(self, target, base_branch) -> str:
+        return "a" * 40
+
+    async def aclose(self) -> None:
+        return None
+
+
+class _FakePreflightMergeStore:
+    def list_open(self):
+        return []
+
+    async def close(self) -> None:
+        return None
+
+
+def _install_preflight_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.config import settings
+    from apps.code_review_pipeline import merge_store as merge_store_module
+    from apps.code_review_pipeline.routing import github_provider
+
+    monkeypatch.setattr(settings, "delivery_repo_profile_dir", str(tmp_path / "repos"))
+    monkeypatch.setattr(settings, "change_agent_verify_command", "")
+    monkeypatch.setattr(settings, "change_agent_base_branch", "")
+    monkeypatch.setattr(settings, "github_token", "token")
+    monkeypatch.setattr(
+        github_provider, "build_github_client", lambda: _FakePreflightGitHub()
+    )
+    monkeypatch.setattr(
+        merge_store_module, "PostgresMergeStore", _FakePreflightMergeStore
+    )
+    monkeypatch.setattr(
+        merge_store_module, "build_merge_store", lambda: _FakePreflightMergeStore()
+    )
 
 
 # ── criterion 1：纯函数解析与校验 ─────────────────────────────────────────
@@ -478,7 +525,7 @@ def test_delivery_preflight_passes_profile_base_branch_to_the_check(
     captured: dict[str, str] = {}
 
     async def fake_run_preflight(
-        repo, *, github, base_branch, merge_store, probe_workflows
+        repo, *, github, base_branch, merge_store, probe_workflows, verify_command=None
     ):
         captured["base_branch"] = base_branch
         return SimpleNamespace(ok=True, checks=[])
@@ -517,6 +564,45 @@ def test_delivery_preflight_fails_closed_on_corrupt_profile(
     captured = capsys.readouterr()
     assert str(path) in captured.err
     assert captured.out == ""
+
+
+def test_delivery_preflight_json_reports_the_verify_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _install_preflight_runtime(tmp_path, monkeypatch)
+    args = _preflight_args("--json")
+    _apply_delivery_defaults(args)
+
+    assert cmd_delivery_preflight(args) == 1
+    out = capsys.readouterr().out
+    payload = json.loads(out[out.index("{") :])
+
+    verify = next(
+        check for check in payload["checks"] if check["name"] == "verify"
+    )
+    assert verify["status"] == "blocked"
+    assert "detail" in verify
+    assert "未配置" in verify["detail"]
+    assert payload["ok"] is False
+
+
+def test_delivery_preflight_text_output_keeps_the_check_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _install_preflight_runtime(tmp_path, monkeypatch)
+    args = _preflight_args()
+    _apply_delivery_defaults(args)
+
+    assert cmd_delivery_preflight(args) == 1
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert lines[0].startswith("base branch : main")
+    rows = [line.split()[1] for line in lines[1:]]
+    assert rows == ["token", "push", "branch", "workflows", "merge_store", "verify"]
+    assert lines[-1].startswith("blocked  verify       verify 命令未配置/为空")
 
 
 # ── criterion 6：没有档案时的既有语义 ────────────────────────────────────

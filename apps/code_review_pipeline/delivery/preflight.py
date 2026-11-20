@@ -18,9 +18,14 @@ Workflows 写权限。诊断落在最贵的一步之后，代价是两次完整�
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Sequence
 
+from app.agents.command_runner import build_verify_env, resolve_program
 from apps.code_review_pipeline.routing.github_client import GitHubRepo
 
 STATUS_OK = "ok"
@@ -32,6 +37,9 @@ STATUS_BLOCKED = "blocked"
 _WRITE_PERMISSIONS = frozenset({"admin", "maintain", "write"})
 
 _DETAIL_LIMIT = 300
+
+#: 探测子进程的启动超时。超时与文案共用同一常量，避免两处漂移。
+_VERIFY_PROBE_TIMEOUT_SECONDS = 30
 
 
 def _short(exc: BaseException) -> str:
@@ -192,6 +200,67 @@ def _check_merge_store(merge_store: Any) -> PreflightCheck:
     return PreflightCheck("merge_store", STATUS_OK, "合并通道数据库可达")
 
 
+async def _check_verify(
+    verify_command: Sequence[str],
+) -> PreflightCheck:
+    """探测 verify 命令能否在空白工作区里启动。
+
+    不联网、不克隆仓库、不写仓库文件：只用一个临时空目录做 workspace，
+    复用 ``build_verify_env`` + ``resolve_program`` 既有约定，真实启动一次
+    子进程确认 argv[0] 能跑起来。
+    """
+    if not verify_command:
+        return PreflightCheck(
+            "verify",
+            STATUS_BLOCKED,
+            "verify 命令未配置/为空：请在仓库档案或 "
+            "CHANGE_AGENT_VERIFY_COMMAND 中配置",
+        )
+    workspace = Path(tempfile.mkdtemp(prefix="preflight-verify-"))
+    try:
+        env = build_verify_env(workspace)
+        argv = resolve_program(list(verify_command), env)
+        probe = [argv[0], "-c", "import sys; print(sys.version)"]
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                probe,
+                cwd=workspace,
+                env=env,
+                timeout=_VERIFY_PROBE_TIMEOUT_SECONDS,
+                shell=False,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.TimeoutExpired:
+            return PreflightCheck(
+                "verify",
+                STATUS_BLOCKED,
+                f"探测 {argv[0]!r} 启动超时（>{_VERIFY_PROBE_TIMEOUT_SECONDS} 秒），"
+                "无法确认解释器可用",
+            )
+        except OSError as exc:
+            return PreflightCheck(
+                "verify",
+                STATUS_BLOCKED,
+                f"无法启动 {argv[0]!r}: {_short(exc)}",
+            )
+        if result.returncode != 0:
+            return PreflightCheck(
+                "verify",
+                STATUS_BLOCKED,
+                f"{argv[0]!r} 退出码 {result.returncode}: "
+                f"{(result.stderr or result.stdout or '').strip() or _short(Exception('nonzero exit'))}",
+            )
+        return PreflightCheck(
+            "verify",
+            STATUS_OK,
+            f"解释器 {argv[0]} 可启动",
+        )
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
 async def run_preflight(
     repo: str,
     *,
@@ -199,6 +268,7 @@ async def run_preflight(
     base_branch: str = "main",
     merge_store: Any = None,
     probe_workflows: bool = False,
+    verify_command: Sequence[str] | None = None,
 ) -> PreflightReport:
     """跑一遍只读自检。身份或仓库不可用时提前返回——后面的检查都会同样失败。"""
     try:
@@ -219,7 +289,11 @@ async def run_preflight(
         github, target, base_sha=base_sha, probe=probe_workflows
     )
     merge = await asyncio.to_thread(_check_merge_store, merge_store)
+    checks = [identity, push, branch, workflows, merge]
+    if verify_command is not None:
+        verify = await _check_verify(verify_command)
+        checks.append(verify)
     return PreflightReport(
         repo=repo,
-        checks=(identity, push, branch, workflows, merge),
+        checks=tuple(checks),
     )

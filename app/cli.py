@@ -742,6 +742,7 @@ def cmd_delivery_preflight(args: argparse.Namespace) -> int:
                 base_branch=base_branch,
                 merge_store=merge_store,
                 probe_workflows=args.probe_workflows,
+                verify_command=resolved.verify_command,
             )
         finally:
             close = getattr(github, "aclose", None)

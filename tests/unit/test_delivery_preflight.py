@@ -7,9 +7,12 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import httpx
 import pytest
 
+from apps.code_review_pipeline.delivery import preflight as preflight_module
 from apps.code_review_pipeline.delivery.preflight import (
     STATUS_BLOCKED,
     STATUS_OK,
@@ -194,3 +197,85 @@ async def test_bad_repo_never_touches_the_network(fake_store) -> None:
     assert report.ok is False
     assert report.checks[0].name == "repo"
     assert "owner/name" in report.checks[0].detail
+
+
+@pytest.mark.asyncio
+async def test_verify_bad_relative_path_blocks(fake_store) -> None:
+    report = await run_preflight(
+        REPO,
+        github=_client(_ok_handler()),
+        merge_store=fake_store(),
+        verify_command=(".venv/Scripts/python.exe", "-m", "pytest"),
+    )
+
+    verify = next(check for check in report.checks if check.name == "verify")
+    assert verify.status == STATUS_BLOCKED
+    assert ".venv/Scripts/python.exe" in verify.detail
+    assert report.ok is False
+
+
+@pytest.mark.asyncio
+async def test_verify_bare_python_ok(fake_store) -> None:
+    report = await run_preflight(
+        REPO,
+        github=_client(_ok_handler()),
+        merge_store=fake_store(),
+        verify_command=("python", "-m", "pytest"),
+    )
+
+    verify = next(check for check in report.checks if check.name == "verify")
+    assert verify.status == STATUS_OK
+    assert report.ok is True
+
+
+@pytest.mark.asyncio
+async def test_verify_command_none_no_verify_item(fake_store) -> None:
+    report = await run_preflight(
+        REPO,
+        github=_client(_ok_handler()),
+        merge_store=fake_store(),
+        verify_command=None,
+    )
+
+    names = {check.name for check in report.checks}
+    assert "verify" not in names
+    assert report.ok is True
+
+
+@pytest.mark.asyncio
+async def test_verify_timeout_blocks_instead_of_raising(
+    fake_store, monkeypatch
+) -> None:
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout", 30))
+
+    monkeypatch.setattr(preflight_module.subprocess, "run", fake_run)
+
+    report = await run_preflight(
+        REPO,
+        github=_client(_ok_handler()),
+        merge_store=fake_store(),
+        verify_command=("python", "-m", "pytest"),
+    )
+
+    verify = next(check for check in report.checks if check.name == "verify")
+    assert verify.status == STATUS_BLOCKED
+    assert "超时" in verify.detail
+    assert "30" in verify.detail
+    assert report.ok is False
+
+
+@pytest.mark.asyncio
+async def test_verify_empty_command_blocks_instead_of_raising(fake_store) -> None:
+    report = await run_preflight(
+        REPO,
+        github=_client(_ok_handler()),
+        merge_store=fake_store(),
+        verify_command=(),
+    )
+
+    verify = next(check for check in report.checks if check.name == "verify")
+    assert verify.status == STATUS_BLOCKED
+    assert "未配置" in verify.detail
+    assert "为空" in verify.detail
+    assert report.ok is False
