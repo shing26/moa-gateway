@@ -38,6 +38,9 @@ _WRITE_PERMISSIONS = frozenset({"admin", "maintain", "write"})
 
 _DETAIL_LIMIT = 300
 
+#: 探测子进程的启动超时。超时与文案共用同一常量，避免两处漂移。
+_VERIFY_PROBE_TIMEOUT_SECONDS = 30
+
 
 def _short(exc: BaseException) -> str:
     text = str(exc).strip() or exc.__class__.__name__
@@ -206,6 +209,13 @@ async def _check_verify(
     复用 ``build_verify_env`` + ``resolve_program`` 既有约定，真实启动一次
     子进程确认 argv[0] 能跑起来。
     """
+    if not verify_command:
+        return PreflightCheck(
+            "verify",
+            STATUS_BLOCKED,
+            "verify 命令未配置/为空：请在仓库档案或 "
+            "CHANGE_AGENT_VERIFY_COMMAND 中配置",
+        )
     workspace = Path(tempfile.mkdtemp(prefix="preflight-verify-"))
     try:
         env = build_verify_env(workspace)
@@ -217,10 +227,17 @@ async def _check_verify(
                 probe,
                 cwd=workspace,
                 env=env,
-                timeout=30,
+                timeout=_VERIFY_PROBE_TIMEOUT_SECONDS,
                 shell=False,
                 capture_output=True,
                 text=True,
+            )
+        except subprocess.TimeoutExpired:
+            return PreflightCheck(
+                "verify",
+                STATUS_BLOCKED,
+                f"探测 {argv[0]!r} 启动超时（>{_VERIFY_PROBE_TIMEOUT_SECONDS} 秒），"
+                "无法确认解释器可用",
             )
         except OSError as exc:
             return PreflightCheck(
