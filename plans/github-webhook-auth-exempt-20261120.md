@@ -57,6 +57,7 @@ app/cli.py                                              (修正案 1：仅状态
 tests/unit/test_auth.py                                 (只追加回归测试)
 tests/unit/test_github_delivery_webhook.py              (只追加路由级回归)
 tests/unit/test_github_webhook_e2e.py                   (只追加端到端回归)
+tests/unit/test_delivery_cli.py                         (修正案 1 A6a：只追加 stdout/stderr 测试)
 docs/adr/adr-043-github-webhook-auth-exemption.md       (新 ADR：为什么豁免、边界与 fail-closed 姿态)
 plans/github-webhook-auth-exempt-20261120.md            (本文件)
 ```
