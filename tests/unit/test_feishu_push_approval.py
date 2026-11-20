@@ -1,0 +1,551 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from app.engine import HitlRequest, SessionStore
+from apps.code_review_pipeline.delivery.feishu_approval import (
+    PUSH_APPROVAL_KIND,
+    FeishuPushApprovalPort,
+    PushApprovalCard,
+    PushApprovalUnavailable,
+    decision_key,
+    read_decision,
+    write_decision,
+)
+
+
+class FakeStorage:
+    """最小 Redis 替身：方法与 RedisHitlStorage 的调用面一致。"""
+
+    def __init__(self, *, using_memory: bool = False) -> None:
+        self.using_memory = using_memory
+        self.data: dict[str, str] = {}
+
+    def key(self, hitl_id: str) -> str:
+        return f"moa:hitl:{hitl_id}"
+
+    def get(self, key: str) -> str | None:
+        return self.data.get(key)
+
+    def set(self, key: str, value: str, ttl: int | None = None) -> None:
+        self.data[key] = value
+
+    def pop(self, key: str) -> str | None:
+        return self.data.pop(key, None)
+
+    def delete(self, key: str) -> None:
+        self.data.pop(key, None)
+
+    def clear(self) -> None:
+        self.data.clear()
+
+
+class FakeCardSender:
+    def __init__(self, *, ok: bool = True) -> None:
+        self.ok = ok
+        self.cards: list[Any] = []
+
+    async def send_card(self, card: Any) -> bool:
+        self.cards.append(card)
+        return self.ok
+
+
+class FakeGitHub:
+    def __init__(self, login: Any = "alice") -> None:
+        self.login = login
+
+    async def get_authenticated_login(self) -> str:
+        if isinstance(self.login, Exception):
+            raise self.login
+        return str(self.login)
+
+
+class FakeRunStore:
+    def __init__(self, run: Any) -> None:
+        self.run = run
+
+    def load(self, run_id: str) -> Any:
+        if self.run is None or self.run.run_id != run_id:
+            raise FileNotFoundError(run_id)
+        return self.run
+
+
+def _settings(**overrides: Any) -> SimpleNamespace:
+    base = {
+        "feishu_push_approval_enabled": True,
+        "feishu_push_approval_timeout_s": 5,
+        "feishu_operator_open_id": "ou_operator",
+        "delivery_approval_chat_id": "oc_chat",
+        "feishu_app_id": "cli_test",
+        "feishu_app_secret": "secret",
+        "hitl_approver_ids": ("ou_approver",),
+        "gateway_allow_insecure": "0",
+        "code_review_merge_channel": "",
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _bundle(*, bundle_hash: str = "b" * 64, patch_hash: str = "p" * 64) -> SimpleNamespace:
+    return SimpleNamespace(
+        branch="moa/a1-test",
+        bundle_hash=bundle_hash,
+        patch_hash=patch_hash,
+        verify_exit_code=0,
+        files=(object(), object(), object()),
+    )
+
+
+def _run(repo: str = "shing26/OpsShield") -> SimpleNamespace:
+    return SimpleNamespace(
+        run_id="run-1",
+        request=SimpleNamespace(repo=repo),
+        bundle=None,
+    )
+
+
+def _port(
+    *,
+    store: SessionStore,
+    sender: FakeCardSender,
+    settings: Any,
+    github: FakeGitHub | None = None,
+    **kwargs: Any,
+) -> FeishuPushApprovalPort:
+    return FeishuPushApprovalPort(
+        card_sender=sender,
+        session_store=store,
+        run_store=FakeRunStore(_run()),
+        github=github or FakeGitHub(),
+        settings_obj=settings,
+        id_factory=lambda: "hitl-1",
+        poll_interval_s=0.001,
+        **kwargs,
+    )
+
+
+async def _wait_for_card(sender: FakeCardSender) -> None:
+    for _ in range(200):
+        if sender.cards:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("card was not sent")
+
+
+def test_request_fails_closed_when_storage_is_in_memory() -> None:
+    sender = FakeCardSender()
+    port = FeishuPushApprovalPort(
+        card_sender=sender,
+        session_store=SessionStore(),  # 无 storage → 进程内存
+        run_store=FakeRunStore(_run()),
+        github=FakeGitHub(),
+        settings_obj=_settings(),
+        id_factory=lambda: "hitl-1",
+    )
+
+    with pytest.raises(PushApprovalUnavailable, match="共享 Redis"):
+        asyncio.run(port.request(run_id="run-1", bundle=_bundle()))
+
+    assert sender.cards == []
+
+
+def test_request_requires_chat_target_and_credentials() -> None:
+    store = SessionStore(storage=FakeStorage())
+    port = _port(
+        store=store,
+        sender=FakeCardSender(),
+        settings=_settings(delivery_approval_chat_id=""),
+    )
+    with pytest.raises(PushApprovalUnavailable, match="DELIVERY_APPROVAL_CHAT_ID"):
+        asyncio.run(port.request(run_id="run-1", bundle=_bundle()))
+
+    port = _port(
+        store=store,
+        sender=FakeCardSender(),
+        settings=_settings(feishu_app_id=""),
+    )
+    with pytest.raises(PushApprovalUnavailable, match="FEISHU_APP_ID"):
+        asyncio.run(port.request(run_id="run-1", bundle=_bundle()))
+
+
+def test_request_refuses_when_operator_identity_cannot_be_verified() -> None:
+    store = SessionStore(storage=FakeStorage())
+    port = _port(
+        store=store,
+        sender=FakeCardSender(),
+        settings=_settings(feishu_operator_open_id="", gateway_allow_insecure="0"),
+    )
+
+    with pytest.raises(PushApprovalUnavailable, match="FEISHU_OPERATOR_OPEN_ID"):
+        asyncio.run(port.request(run_id="run-1", bundle=_bundle()))
+
+
+def test_request_sends_card_and_returns_approval() -> None:
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeCardSender()
+    port = _port(store=store, sender=sender, settings=_settings())
+
+    async def scenario() -> Any:
+        task = asyncio.create_task(port.request(run_id="run-1", bundle=_bundle()))
+        await _wait_for_card(sender)
+        card = sender.cards[0]
+        assert card.run_id == "run-1"
+        assert card.repo == "shing26/OpsShield"
+        assert card.bundle_hash == "b" * 64
+        assert card.patch_hash == "p" * 64
+        assert card.verify_exit_code == 0
+        assert card.file_count == 3
+        payload = json.loads(card.to_message_payload()["content"])
+        body = json.dumps(payload, ensure_ascii=False)
+        assert "批准推送" in body and "拒绝" in body
+        assert "diff --git" not in body and "secret" not in body
+
+        assert write_decision(
+            store,
+            "hitl-1",
+            {
+                "decision": "approve",
+                "approver": "ou_approver",
+                "channel": "feishu",
+                "identity_verified": True,
+                "gate": "allowlist",
+                "bundle_hash": "b" * 64,
+            },
+            ttl_s=60,
+        )
+        return await task
+
+    approval = asyncio.run(scenario())
+    assert approval is not None
+    assert approval.approver == "ou_approver"
+    assert approval.run_id == "run-1"
+    assert approval.bundle_hash == "b" * 64
+    assert approval.channel == "feishu"
+    assert approval.identity_verified is True
+    assert approval.operator_login == "alice"
+    assert approval.gate == "allowlist"
+    assert store.get_hitl("hitl-1") is None
+
+
+def test_request_returns_none_on_reject() -> None:
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeCardSender()
+    port = _port(store=store, sender=sender, settings=_settings())
+
+    async def scenario() -> Any:
+        task = asyncio.create_task(port.request(run_id="run-1", bundle=_bundle()))
+        await _wait_for_card(sender)
+        write_decision(
+            store,
+            "hitl-1",
+            {"decision": "reject", "reason": "rejected_by_human"},
+            ttl_s=60,
+        )
+        return await task
+
+    assert asyncio.run(scenario()) is None
+    assert store.get_hitl("hitl-1") is None
+
+
+def test_request_times_out_and_cleans_pending() -> None:
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeCardSender()
+    clock = SimpleNamespace(now=1000.0)
+
+    def read_clock() -> float:
+        return clock.now
+
+    async def advance(seconds: float) -> None:
+        clock.now += seconds
+
+    port = _port(
+        store=store,
+        sender=sender,
+        settings=_settings(feishu_push_approval_timeout_s=1),
+        clock=read_clock,
+        sleep=advance,
+    )
+    port._poll_interval_s = 0.5
+
+    async def scenario() -> Any:
+        task = asyncio.create_task(port.request(run_id="run-1", bundle=_bundle()))
+        await _wait_for_card(sender)
+        return await task
+
+    assert asyncio.run(scenario()) is None
+    assert store.get_hitl("hitl-1") is None
+
+
+def test_card_send_failure_removes_pending_and_raises() -> None:
+    store = SessionStore(storage=FakeStorage())
+    port = _port(store=store, sender=FakeCardSender(ok=False), settings=_settings())
+
+    with pytest.raises(PushApprovalUnavailable, match="发送失败"):
+        asyncio.run(port.request(run_id="run-1", bundle=_bundle()))
+    assert store.get_hitl("hitl-1") is None
+
+
+def test_approval_with_different_bundle_hash_is_refused() -> None:
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeCardSender()
+    port = _port(store=store, sender=sender, settings=_settings())
+
+    async def scenario() -> Any:
+        task = asyncio.create_task(port.request(run_id="run-1", bundle=_bundle()))
+        await _wait_for_card(sender)
+        write_decision(
+            store,
+            "hitl-1",
+            {"decision": "approve", "approver": "ou_approver", "bundle_hash": "x" * 64},
+            ttl_s=60,
+        )
+        return await task
+
+    assert asyncio.run(scenario()) is None
+
+
+def test_github_identity_failure_propagates() -> None:
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeCardSender()
+    port = _port(
+        store=store,
+        sender=sender,
+        settings=_settings(),
+        github=FakeGitHub(login=RuntimeError("github down")),
+    )
+
+    with pytest.raises(RuntimeError, match="github down"):
+        asyncio.run(port.request(run_id="run-1", bundle=_bundle()))
+    assert sender.cards == []
+
+
+def test_card_payload_has_only_metadata() -> None:
+    card = PushApprovalCard(
+        session_id="delivery:run-1",
+        trace_id="hitl-1",
+        target="oc_chat",
+        run_id="run-1",
+        repo="shing26/OpsShield",
+        branch="moa/a1-test",
+        bundle_hash="b" * 64,
+        patch_hash="p" * 64,
+        verify_exit_code=0,
+        file_count=2,
+        expires_at="2026-11-20T12:00:00+00:00",
+        applicant="alice",
+    )
+    body = json.dumps(card.to_card_payload(), ensure_ascii=False)
+    for expected in ("run-1", "shing26/OpsShield", "moa/a1-test", "b" * 64, "p" * 64):
+        assert expected in body
+    assert "diff --git" not in body
+    assert "BEGIN RSA" not in body
+
+
+def test_hitl_request_without_delivery_payload_still_deserializes() -> None:
+    request = HitlRequest(
+        session_id="s",
+        trace_id="t",
+        agent_output="o",
+        intent="i",
+        agent_name="a",
+        channel="feishu",
+        target="x",
+    )
+    assert request.delivery_payload == {}
+
+
+# ── 回调侧 ───────────────────────────────────────────────────────────────
+
+
+def _callback_env(monkeypatch: pytest.MonkeyPatch, store: SessionStore, **overrides: Any) -> None:
+    import app.routes.feishu as feishu_route
+    from app.config import settings
+
+    run = SimpleNamespace(bundle=SimpleNamespace(bundle_hash="b" * 64))
+
+    class CallbackRunStore:
+        def load(self, run_id: str) -> Any:
+            if run_id != "run-1":
+                raise FileNotFoundError(run_id)
+            return run
+
+    monkeypatch.setattr(feishu_route, "engine", SimpleNamespace(session_store=store))
+    monkeypatch.setattr(feishu_route, "delivery_run_store", CallbackRunStore())
+    monkeypatch.setattr(settings, "hitl_approver_ids", ("ou_approver",))
+    monkeypatch.setattr(settings, "feishu_operator_open_id", "ou_operator")
+    monkeypatch.setattr(settings, "gateway_allow_insecure", "0")
+    monkeypatch.setattr(settings, "feishu_push_approval_timeout_s", 60)
+    for key, value in overrides.items():
+        monkeypatch.setattr(settings, key, value)
+
+
+def _store_push_hitl(
+    store: SessionStore,
+    *,
+    hitl_id: str = "hitl-1",
+    bundle_hash: str = "b" * 64,
+    target: str = "oc_chat",
+) -> None:
+    store.store_hitl(
+        hitl_id,
+        HitlRequest(
+            session_id="delivery:run-1",
+            trace_id=hitl_id,
+            agent_output="推送审批",
+            intent=PUSH_APPROVAL_KIND,
+            agent_name="delivery_push_gate",
+            channel="feishu",
+            target=target,
+            created_at=time.time(),
+            hitl_kind=PUSH_APPROVAL_KIND,
+            delivery_payload={"run_id": "run-1", "bundle_hash": bundle_hash},
+        ),
+    )
+
+
+def _patch_side_effects(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str]]:
+    import app.routes.feishu as feishu_route
+
+    sent: list[tuple[str, str]] = []
+
+    async def fake_send(target: str, text: str, trace_id: str) -> None:
+        sent.append((target, text))
+
+    async def fake_log(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(feishu_route, "_safe_send", fake_send)
+    monkeypatch.setattr(feishu_route, "log_request", fake_log)
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_callback_approve_writes_decision_and_replies_to_card_target(monkeypatch) -> None:
+    import app.routes.feishu as feishu_route
+
+    store = SessionStore(storage=FakeStorage())
+    _callback_env(monkeypatch, store)
+    sent = _patch_side_effects(monkeypatch)
+    _store_push_hitl(store)
+
+    await feishu_route._process_hitl_card("approve", "hitl-1", "delivery:run-1", "ou_approver")
+
+    decision = read_decision(store, "hitl-1")
+    assert decision is not None
+    assert decision["decision"] == "approve"
+    assert decision["approver"] == "ou_approver"
+    assert decision["channel"] == "feishu"
+    assert decision["identity_verified"] is True
+    assert decision["gate"] == "allowlist"
+    assert decision["bundle_hash"] == "b" * 64
+    assert store.get_hitl("hitl-1") is None
+    assert sent and sent[0][0] == "oc_chat"
+
+
+@pytest.mark.asyncio
+async def test_callback_outsider_is_refused_without_consuming(monkeypatch) -> None:
+    import app.routes.feishu as feishu_route
+
+    store = SessionStore(storage=FakeStorage())
+    _callback_env(monkeypatch, store)
+    sent = _patch_side_effects(monkeypatch)
+    _store_push_hitl(store)
+
+    await feishu_route._process_hitl_card("approve", "hitl-1", "delivery:run-1", "ou_outsider")
+
+    assert read_decision(store, "hitl-1") is None
+    assert store.get_hitl("hitl-1") is not None
+    assert sent and "权限" in sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_callback_self_approval_is_rejected(monkeypatch) -> None:
+    import app.routes.feishu as feishu_route
+
+    store = SessionStore(storage=FakeStorage())
+    _callback_env(monkeypatch, store, feishu_operator_open_id="ou_approver")
+    _patch_side_effects(monkeypatch)
+    _store_push_hitl(store)
+
+    await feishu_route._process_hitl_card("approve", "hitl-1", "delivery:run-1", "ou_approver")
+
+    decision = read_decision(store, "hitl-1")
+    assert decision is not None
+    assert decision["decision"] == "reject"
+    assert decision["reason"] == "self_approval"
+
+
+@pytest.mark.asyncio
+async def test_callback_missing_operator_open_id_fails_closed(monkeypatch) -> None:
+    import app.routes.feishu as feishu_route
+
+    store = SessionStore(storage=FakeStorage())
+    _callback_env(monkeypatch, store, feishu_operator_open_id="")
+    _patch_side_effects(monkeypatch)
+    _store_push_hitl(store)
+
+    await feishu_route._process_hitl_card("approve", "hitl-1", "delivery:run-1", "ou_approver")
+
+    decision = read_decision(store, "hitl-1")
+    assert decision is not None
+    assert decision["reason"] == "operator_unverified"
+
+
+@pytest.mark.asyncio
+async def test_callback_bundle_mismatch_is_rejected(monkeypatch) -> None:
+    import app.routes.feishu as feishu_route
+
+    store = SessionStore(storage=FakeStorage())
+    _callback_env(monkeypatch, store)
+    _patch_side_effects(monkeypatch)
+    _store_push_hitl(store, bundle_hash="a" * 64)
+
+    await feishu_route._process_hitl_card("approve", "hitl-1", "delivery:run-1", "ou_approver")
+
+    decision = read_decision(store, "hitl-1")
+    assert decision is not None
+    assert decision["decision"] == "reject"
+    assert decision["reason"] == "bundle_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_callback_double_click_only_applies_once(monkeypatch) -> None:
+    import app.routes.feishu as feishu_route
+
+    store = SessionStore(storage=FakeStorage())
+    _callback_env(monkeypatch, store)
+    sent = _patch_side_effects(monkeypatch)
+    _store_push_hitl(store)
+
+    await feishu_route._process_hitl_card("approve", "hitl-1", "delivery:run-1", "ou_approver")
+    first = read_decision(store, "hitl-1")
+    await feishu_route._process_hitl_card("reject", "hitl-1", "delivery:run-1", "ou_approver")
+
+    assert first is not None and first["decision"] == "approve"
+    assert read_decision(store, "hitl-1") == first
+    assert any("已失效或已被处理" in text for _, text in sent)
+
+
+@pytest.mark.asyncio
+async def test_callback_storage_unavailable_does_not_write(monkeypatch) -> None:
+    import app.routes.feishu as feishu_route
+
+    store = SessionStore(storage=FakeStorage(using_memory=True))
+    _callback_env(monkeypatch, store)
+    sent = _patch_side_effects(monkeypatch)
+    _store_push_hitl(store)
+
+    await feishu_route._process_hitl_card("approve", "hitl-1", "delivery:run-1", "ou_approver")
+
+    assert read_decision(store, "hitl-1") is None
+    assert any("审批存储不可用" in text for _, text in sent)
+
+
+def test_decision_key_is_namespaced() -> None:
+    assert decision_key("abc") == "moa:delivery_push_decision:abc"

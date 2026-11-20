@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from redis.asyncio import Redis
@@ -45,6 +45,9 @@ class HitlRequest:
     # `delivery/定位与减法清单.md` 的边界冲突。定位若变，这三个字段应连同单据模型一起重设。
     applicant: str = ""
     reason: str = ""
+    # 交付链路的审批载荷（A1 推送审批）。聊天 HITL 留空；旧记录缺该字段时
+    # 走默认空字典，反序列化保持兼容。
+    delivery_payload: dict[str, Any] = field(default_factory=dict)
 
 
 # GET+DEL 放在一个 Lua 脚本里做，保证原子（脚本执行期间不会被其它命令插入）。
@@ -243,6 +246,9 @@ class SessionStore:
             payload = asdict(request)
             if not payload.get("created_at"):
                 payload.pop("created_at", None)
+            if not payload.get("delivery_payload"):
+                # 聊天 HITL 的线上载荷保持逐字不变；只有交付审批才落这个字段。
+                payload.pop("delivery_payload", None)
             self._storage.set(self._storage.key(hitl_id), json.dumps(payload))
         logger.info(
             "hitl stored hitl_id=%s session=%s intent=%s",

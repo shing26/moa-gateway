@@ -11,6 +11,7 @@ import pytest
 from app.cli import (
     TerminalPushApprovalPort,
     _apply_delivery_defaults,
+    _build_push_approval_port,
     build_parser,
     cmd_delivery_ci_triage,
     cmd_delivery_run,
@@ -44,6 +45,31 @@ def _ci_triage_argv() -> list[str]:
         "--sha",
         "a" * 40,
     ]
+
+
+def test_push_approval_port_defaults_to_terminal(monkeypatch) -> None:
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "feishu_push_approval_enabled", False)
+    port = _build_push_approval_port(github=None)
+
+    assert isinstance(port, TerminalPushApprovalPort)
+
+
+def test_push_approval_port_uses_feishu_when_enabled(monkeypatch) -> None:
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.feishu_approval import (
+        FeishuPushApprovalPort,
+    )
+
+    monkeypatch.setattr(settings, "feishu_push_approval_enabled", True)
+    monkeypatch.setattr(settings, "feishu_app_id", "cli_test")
+    monkeypatch.setattr(settings, "feishu_app_secret", "secret")
+    monkeypatch.setattr(settings, "delivery_approval_chat_id", "oc_chat")
+
+    port = _build_push_approval_port(github=None)
+
+    assert isinstance(port, FeishuPushApprovalPort)
 
 
 def test_delivery_run_parser_requires_repo_and_base_sha() -> None:

@@ -29,7 +29,7 @@
 
 | | 现状事实 | 缺口 |
 |---|---|---|
-| A1 远程审批 | `app/routes/feishu.py`、`app/routes/webhook.py` 已有审批路由与 `HITL_APPROVER_IDS` 白名单（`app/config.py:114`、`app/middleware/auth.py:36`） | 回调地址 `https://laptop-todom8hg.tailcdb1fe.ts.net` → `127.0.0.1:8083`，**8083 无监听**；仓库无 GitHub webhook；`.env` 无 `DELIVERY_WEBHOOK_ENABLED`。与 nexus-vibe 的地址共用是搁置原因，需确认是否解除 |
+| A1 远程审批 | **通道已定（2026-11-20）：飞书。** 合并审批的飞书回程已具备（`app/routes/github_delivery.py` 把 PR 生命周期接进 merge 状态机，`MergePoller`/`MergeNotifier` 绿了弹卡，飞书回调 → `_handle_merge_approval`）；`app/routes/feishu.py`、`app/routes/webhook.py` 已有审批路由与 `HITL_APPROVER_IDS` 白名单（`app/config.py:114`、`app/middleware/auth.py:36`）。**契约已冻结并实现（2026-11-20，待独立验收）：[plans/a1-feishu-push-approval-20261120.md](../plans/a1-feishu-push-approval-20261120.md)** | **推送审批**默认仍是 `TerminalPushApprovalPort`（本地 TTY）；A1 切片新增 `FeishuPushApprovalPort`（默认关），开启后第三人可在飞书批准。历史缺口：回调地址 `https://laptop-todom8hg.tailcdb1fe.ts.net` → `127.0.0.1:8083`，**8083 无监听**；仓库无 GitHub webhook；`.env` 无 `DELIVERY_WEBHOOK_ENABLED`。地址归属已确认可配置给 moa-gateway |
 | A2 多操作者身份 | **已交付（2026-11-19）**：合并评论通道（PR #106）作者只认 API `user.login` + 白名单 + ≠ PR 作者 + fail-closed；终端推送通道接入同一套三态闸门（白名单成员且 ≠ token 主人才放行；空白名单仅显式 insecure 放行；否则拒绝），`get_authenticated_login()` 失败映射 `INFRA_ERROR`；人工决策审计带 `channel` / `identity_verified` 标记，交付审计的 `approved` 行带 `approver` / `channel` / `identity_verified` / `operator_login` / `gate`。终端自称身份永远不可验证（审计标记 `identity_verified=False`），自审批默认被拒（显式 insecure 逃生口仍在） | 剩余缺口：A1 远程审批（审批仍发生在推送者的机器上，第三个人不能在终端外批） |
 
 **关键判断：A2 真于 A1。** A1 是「在哪个渠道审批」，A2 是「审批能不能算数」。
@@ -101,7 +101,7 @@ PR 里附上该仓库自己的 CI 绿灯。不需要「别人」。
 
 - P1 契约（PR #104）、ADR-039 BLE001、PR #71 —— 进行中/待签收；
 - 台账自写守卫（基线 §3.1）：目前只有人拦，应与 A2 的身份底座一起做；
-- **OTel：要么补齐，要么删宣称。** 二选一，不许悬着。
+- **OTel：已定（2026-11-20）补齐**（真实 exporter + 关键路径 span），不再停留在预留接口。
 
 ---
 
@@ -120,13 +120,13 @@ PR 里附上该仓库自己的 CI 绿灯。不需要「别人」。
   C 多轮评测仪器（#95 第 2–4 步）—— 从此才允许谈「通过率」
       │
 阶段 3（渠道 + 部署）
-  A1 远程审批（GitHub 原生评论优先，飞书可选）→ E headless runbook + 一键脚本
+  A1 远程审批（飞书通道；GitHub 评论通道保留为可选适配器）→ E headless runbook + 一键脚本
       │
 阶段 4（体验）
   B 探索/写入预算分离 + 失败→一键续跑；强模型批次等付费额度另立协议
       │
 阶段 5（收尾）
-  台账自写守卫（复用 A2 身份底座）、OTel 补齐或删宣称
+  台账自写守卫（复用 A2 身份底座）、OTel 补齐
 ```
 
 **为什么这么排（与原始清单的三处差异）**：
@@ -135,8 +135,9 @@ PR 里附上该仓库自己的 CI 绿灯。不需要「别人」。
    并列为「A」，实际执行时 A2 可以先走。
 2. **D 提到 C 前面**：跨仓实测暴露的是「配置契约」问题，不改代码就能发现；
    它比多轮评测更能直接回答「别人能不能用」。两者不改同一批文件，也可以并行。
-3. **A1 优先 GitHub 原生通道**：如果坚持飞书，第一版远程审批就被 nexus-vibe 的
-   地址争议卡住；GitHub 评论审批把这个外部依赖整个消掉。飞书作为第二适配器。
+3. **A1 走飞书通道（2026-11-20 决策）**：地址归属不再构成阻塞——公网地址可配置给
+   moa-gateway。合并审批的飞书回程已存在，A1 的增量是**推送审批**的 `PushApprovalPort`
+   飞书适配器；GitHub 评论通道（PR #106）保留为可选适配器，不删。
 
 **每阶段的硬门槛**（不过门槛不许进下一阶段）：
 
@@ -147,13 +148,16 @@ PR 里附上该仓库自己的 CI 绿灯。不需要「别人」。
 | 2 | 第 2 个仓库走完整链路并合并一单，仓库档案来自配置文件而非环境变量 |
 | 3 | n≥3 轮评测报告入库，区间可复现 |
 | 4 | 一人不在你机器前，完成审批 → 合并；干净机器照文档跑到第一单 |
-| 5 | 每一单失败都有分类与续跑路径；OTel 二选一有结论 |
+| 5 | 每一单失败都有分类与续跑路径；OTel 有真实 exporter 与关键路径 span |
 
 ---
 
-## 3. 待确认（只有你能定）
+## 3. 已定（2026-11-20，所有者书面决策）
 
-1. **A1 通道选择**：GitHub 原生评论审批（免公网地址）还是仍要飞书？
-2. **nexus-vibe 地址**：`8083` 是否可以归 moa-gateway（只有在选飞书时才需要）。
-3. **第二仓库**：D 阶段拿哪个仓库做实测（需要你指一个你有写权限的真实仓库）。
-4. **OTel**：补齐还是删宣称。
+1. **A1 通道**：飞书。远程审批按飞书卡片实现；GitHub 评论通道保留为可选适配器。
+2. **公网地址**：无固定归属，可配置为归 moa-gateway（`laptop-todom8hg.tailcdb1fe.ts.net`
+   → moa-gateway 监听端口）。切地址属于部署动作，合并后由主会话执行并留证。
+3. **第二仓库**：在 OpsShield / nexus-vibe 中选 **OpsShield** 做 D 阶段跨仓实测
+   （理由：工具链与 moa-gateway 不同，`mvn`/bash 验证命令能真正检验仓库档案契约，
+   而不是换个 Python 仓库复读）。nexus-vibe 作为第二备选。
+4. **OTel**：补齐（真实 exporter + 关键路径 span），不删宣称。

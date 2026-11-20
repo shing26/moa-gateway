@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -30,6 +31,11 @@ from app.fsm.state_machine import Event as FsmEvent
 from app.models.events import MoAEvent, new_trace_id
 from app.pipeline import PipelineResult
 from apps.code_review_pipeline.delivery.audit import WalDeliveryAudit
+from apps.code_review_pipeline.delivery.feishu_approval import (
+    PUSH_APPROVAL_KIND,
+    shared_storage_available,
+    write_decision,
+)
 from apps.code_review_pipeline.merge_executor import MergeExecutor
 from apps.code_review_pipeline.routing.github_provider import build_github_client
 
@@ -166,6 +172,17 @@ async def _process_hitl_card(
                 trace_id=trace_id,
                 created_at=hitl.created_at,
             )
+        if hitl.hitl_kind == PUSH_APPROVAL_KIND:
+            # A1：回调只记录决定，推送仍由操作者机器上的 CLI 用其 PAT 执行。
+            outcome = f"push_approval_{action}"
+            return await _handle_push_approval_decision(
+                hitl=hitl,
+                hitl_id=hitl_id,
+                action=action,
+                operator_id=operator_id,
+                session_id=session_id,
+                trace_id=trace_id,
+            )
         ctx, expired = await engine.decide_hitl(
             session_id=session_id, trace_id=trace_id, approve=(action == "approve"),
         )
@@ -224,6 +241,146 @@ async def _process_hitl_card(
         logger.info(
             "card_action closed trace=%s action=%s outcome=%s duration_ms=%s",
             trace_id, action, outcome, duration_ms,
+        )
+
+
+async def _handle_push_approval_decision(
+    *,
+    hitl: Any,
+    hitl_id: str,
+    action: str,
+    operator_id: str,
+    session_id: str,
+    trace_id: str,
+) -> None:
+    """A1 推送审批回调：校验身份与 bundle 绑定，写 decision，不执行推送。
+
+    白名单在 ``pop_hitl`` 之前已由 ``approver_gate_error`` 判定（无权限的点击
+    不消耗记录）。这里只剩下：共享存储、bundle 绑定、自审批三态。
+    """
+    payload = dict(getattr(hitl, "delivery_payload", None) or {})
+    run_id = str(payload.get("run_id", ""))
+    pending_hash = str(payload.get("bundle_hash", ""))
+    reply_target = getattr(hitl, "target", "") or session_id
+    ttl_s = max(60, int(settings.feishu_push_approval_timeout_s) + 60)
+    base_gate = "allowlist" if settings.hitl_approver_ids else "insecure_allowlist_empty"
+    human_latency_ms = (
+        round((time.time() - hitl.created_at) * 1000, 1)
+        if getattr(hitl, "created_at", 0.0) > 0
+        else 0.0
+    )
+
+    def _decision(decision: str, *, reason: str, gate: str) -> dict[str, Any]:
+        return {
+            "decision": decision,
+            "approver": operator_id,
+            "channel": "feishu",
+            "identity_verified": True,
+            "gate": gate,
+            "bundle_hash": pending_hash,
+            "reason": reason,
+        }
+
+    async def _record_and_reply(
+        decision: str,
+        *,
+        reason: str,
+        gate: str,
+        message: str,
+    ) -> None:
+        stored = write_decision(
+            engine.session_store,
+            hitl_id,
+            _decision(decision, reason=reason, gate=gate),
+            ttl_s=ttl_s,
+        )
+        await log_request(
+            None,
+            200,
+            0.0,
+            session_id=session_id,
+            agent_name=hitl.agent_name,
+            intent=hitl.intent,
+            guard_action=(
+                f"push_approval_{reason or decision}"
+                if stored
+                else "push_approval_write_failed"
+            ),
+            input_text="",
+            output_text=json.dumps(payload, ensure_ascii=False)[:2000],
+            hitl_decision=decision if stored else "error",
+            hitl_duration_ms=human_latency_ms,
+            hitl_kind=hitl.hitl_kind,
+            hitl_operator=operator_id,
+        )
+        if not stored:
+            message = "审批决定未能写入共享存储（Redis 未连接），请检查后重试"
+        await _safe_send(reply_target, message, trace_id)
+
+    if not shared_storage_available(engine.session_store):
+        await _safe_send(
+            reply_target,
+            "审批存储不可用（Redis 未连接），本次点击未记录",
+            trace_id,
+        )
+        return
+
+    current_hash = ""
+    if run_id:
+        try:
+            run = delivery_run_store.load(run_id)
+        except Exception:  # noqa: BLE001 - run 缺失/损坏都按 bundle 不符处理，fail-closed
+            logger.exception("push approval run lookup failed run_id=%s", run_id)
+            run = None
+        if run is not None and getattr(run, "bundle", None) is not None:
+            current_hash = str(run.bundle.bundle_hash)
+    if not run_id or not pending_hash or current_hash != pending_hash:
+        await _record_and_reply(
+            "reject",
+            reason="bundle_mismatch",
+            gate=base_gate,
+            message="bundle 已变化或记录不存在，本次审批作废",
+        )
+        return
+
+    operator_open_id = (settings.feishu_operator_open_id or "").strip()
+    insecure = insecure_mode_enabled(settings.gateway_allow_insecure)
+    gate = base_gate
+    if operator_open_id:
+        if operator_id.strip() == operator_open_id:
+            if not insecure:
+                await _record_and_reply(
+                    "reject",
+                    reason="self_approval",
+                    gate=base_gate,
+                    message="不能批准自己发起的推送（self_approval）",
+                )
+                return
+            gate = "insecure_self_approval"
+    elif not insecure:
+        await _record_and_reply(
+            "reject",
+            reason="operator_unverified",
+            gate=base_gate,
+            message="FEISHU_OPERATOR_OPEN_ID 未配置，无法验证 approver ≠ operator",
+        )
+        return
+    else:
+        gate = "insecure_operator_unverified"
+
+    if action == "approve":
+        await _record_and_reply(
+            "approve",
+            reason="",
+            gate=gate,
+            message="✅ 已批准推送；操作者终端将继续执行",
+        )
+    else:
+        await _record_and_reply(
+            "reject",
+            reason="rejected_by_human",
+            gate=gate,
+            message="❌ 已拒绝推送",
         )
 
 
