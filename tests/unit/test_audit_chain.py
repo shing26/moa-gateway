@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from datetime import date
 
 import pytest
 
@@ -66,6 +67,20 @@ def _rewrite(tmp_path, rows: list[dict]) -> None:
     _rewrite_file(_log_file(tmp_path), rows)
 
 
+class _FakeDate(date):
+    """只替换 ``wal.date`` 的 ``today()``，不动系统时钟。"""
+
+    _today = date(2026, 11, 20)
+
+    @classmethod
+    def today(cls) -> date:
+        return cls._today
+
+    @classmethod
+    def set(cls, day: date) -> None:
+        cls._today = day
+
+
 # ── 链本身 ──────────────────────────────────────────────────────────────────
 
 
@@ -94,6 +109,98 @@ async def test_chain_survives_a_process_restart(tmp_path) -> None:
     rows = _rows(tmp_path)
     assert rows[2]["prev_hash"] == last_hash
     assert verify_chain(_log_file(tmp_path)) is None
+
+
+@pytest.mark.asyncio
+async def test_chain_resets_at_date_rollover(tmp_path, monkeypatch) -> None:
+    """同一实例跨日：新文件首行 prev_hash 为空，每个日文件各自成链。"""
+    import app.audit.wal as wal_module
+
+    monkeypatch.setattr(wal_module, "date", _FakeDate)
+    _FakeDate.set(date(2026, 11, 19))
+
+    wal = _wal(tmp_path)
+    await _append_n(wal, 2)
+    day1 = tmp_path / "audit-2026-11-19.jsonl"
+    assert verify_chain(day1) is None
+
+    _FakeDate.set(date(2026, 11, 20))
+    await wal.append(_entry(9))
+
+    day2 = tmp_path / "audit-2026-11-20.jsonl"
+    rows = _rows_of(day2)
+    assert len(rows) == 1
+    assert rows[0]["prev_hash"] == "", "跨日首行必须起一条新链"
+    assert verify_chain(day2) is None
+    assert verify_chain(day1) is None
+
+
+@pytest.mark.asyncio
+async def test_rollover_resumes_from_the_current_day_own_chain(tmp_path, monkeypatch) -> None:
+    """D+1 已有他人写入时，本写者接**当日自己**的链尾，而不是昨日链头。"""
+    import app.audit.wal as wal_module
+    from app.audit.wal import chain_report
+
+    monkeypatch.setattr(wal_module, "date", _FakeDate)
+    _FakeDate.set(date(2026, 11, 19))
+    monkeypatch.setattr(wal_module, "_WRITER_ID", "host:111")
+
+    wal = _wal(tmp_path)
+    await _append_n(wal, 2)
+    yesterday_tail = _rows_of(tmp_path / "audit-2026-11-19.jsonl")[-1]["entry_hash"]
+
+    # D+1：另一个写者先落一行。
+    _FakeDate.set(date(2026, 11, 20))
+    monkeypatch.setattr(wal_module, "_WRITER_ID", "host:222")
+    other = _wal(tmp_path)
+    await other.append(_entry(50))
+
+    # 本写者另一个实例在 D+1 先写一行（当日尚无自己行 → 空链头）。
+    monkeypatch.setattr(wal_module, "_WRITER_ID", "host:111")
+    today_wal = _wal(tmp_path)
+    await today_wal.append(_entry(51))
+    day2 = tmp_path / "audit-2026-11-20.jsonl"
+    rows = _rows_of(day2)
+    assert rows[1]["writer"] == "host:111"
+    assert rows[1]["prev_hash"] == ""
+    own_tail = rows[1]["entry_hash"]
+    assert own_tail != yesterday_tail
+
+    # 另一个写者再插一行，然后**仍停留在 D 日**的实例跨日写入。
+    monkeypatch.setattr(wal_module, "_WRITER_ID", "host:222")
+    await other.append(_entry(52))
+    monkeypatch.setattr(wal_module, "_WRITER_ID", "host:111")
+    await wal.append(_entry(53))
+
+    rows = _rows_of(day2)
+    assert [r["writer"] for r in rows] == ["host:222", "host:111", "host:222", "host:111"]
+    assert rows[3]["prev_hash"] == own_tail, "要接当日自己的链尾"
+    assert chain_report(day2) == (None, 4)
+
+
+@pytest.mark.asyncio
+async def test_rollover_with_only_other_writer_starts_empty_chain(tmp_path, monkeypatch) -> None:
+    """D+1 只有他人行时，本写者当日首行仍以空链头起链。"""
+    import app.audit.wal as wal_module
+    from app.audit.wal import chain_report
+
+    monkeypatch.setattr(wal_module, "date", _FakeDate)
+    _FakeDate.set(date(2026, 11, 19))
+    monkeypatch.setattr(wal_module, "_WRITER_ID", "host:222")
+    other = _wal(tmp_path)
+    await other.append(_entry(1))
+
+    _FakeDate.set(date(2026, 11, 20))
+    await other.append(_entry(2))
+
+    monkeypatch.setattr(wal_module, "_WRITER_ID", "host:111")
+    wal = _wal(tmp_path)
+    await wal.append(_entry(3))
+
+    rows = _rows_of(tmp_path / "audit-2026-11-20.jsonl")
+    assert rows[1]["writer"] == "host:111"
+    assert rows[1]["prev_hash"] == ""
+    assert chain_report(tmp_path / "audit-2026-11-20.jsonl") == (None, 2)
 
 
 # ── 篡改检测 ────────────────────────────────────────────────────────────────
