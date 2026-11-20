@@ -17,6 +17,15 @@ class WalDeliveryAudit:
         current: DeliveryRunState,
         detail: dict[str, object],
     ) -> None:
+        extra: dict[str, object] = {
+            **detail,
+            "run_id": run.run_id,
+            "from_state": previous.value if previous else "",
+            "to_state": current.value,
+        }
+        if run.bundle is not None:
+            # 审批行（approved 等）必须能直接对到被批准的 bundle（契约 §6）。
+            extra["bundle_hash"] = run.bundle.bundle_hash
         await record_audit(
             AuditEntry(
                 trace_id=run.trace_id,
@@ -24,11 +33,6 @@ class WalDeliveryAudit:
                 agent_name="delivery_lifecycle",
                 agent_output=current.value,
                 intent="delivery_lifecycle",
-                extra={
-                    **detail,
-                    "run_id": run.run_id,
-                    "from_state": previous.value if previous else "",
-                    "to_state": current.value,
-                },
+                extra=extra,
             )
         )

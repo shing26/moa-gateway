@@ -338,6 +338,26 @@ class Settings:
         # CODE_REVIEW_FEISHU_CHANNEL：合并审批是"人做决策"的动作，与审查报告
         # 的推送目标分开，避免审查报告把审批卡片淹没。
         self.code_review_merge_channel: str = os.getenv("CODE_REVIEW_MERGE_CHANNEL", "")
+        # ── 飞书推送审批（A1 / ADR-042）──────────────────────────────────
+        # 默认关：开的时候 delivery run 会阻塞等待飞书卡片，而不是读终端。
+        # 关的时候终端端口行为逐字不变。
+        self.feishu_push_approval_enabled: bool = _parse_bool(
+            os.getenv("FEISHU_PUSH_APPROVAL_ENABLED"), False
+        )
+        self.feishu_push_approval_timeout_s: int = _parse_int(
+            os.getenv("FEISHU_PUSH_APPROVAL_TIMEOUT_S"),
+            1800,
+            name="FEISHU_PUSH_APPROVAL_TIMEOUT_S",
+        )
+        # 操作者自己的飞书 open_id。空 = 无法验证「approver ≠ operator」，
+        # 默认 fail-closed；只有显式 GATEWAY_ALLOW_INSECURE=1 才放行并标记 gate。
+        self.feishu_operator_open_id: str = (
+            os.getenv("FEISHU_OPERATOR_OPEN_ID", "") or ""
+        ).strip()
+        # 审批卡收件目标；未单独配置时沿用合并审批会话。
+        self.delivery_approval_chat_id: str = (
+            os.getenv("DELIVERY_APPROVAL_CHAT_ID", "") or ""
+        ).strip() or self.code_review_merge_channel
         # 轮询间隔（秒）。网关跑在笔记本上，经 Tailscale Funnel 暴露，
         # 休眠时 GitHub 推来的事件会丢，轮询在恢复后能补上。
         self.code_review_merge_poll_interval_s: int = _parse_int(
