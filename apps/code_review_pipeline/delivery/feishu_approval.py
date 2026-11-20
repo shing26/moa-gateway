@@ -271,6 +271,8 @@ class FeishuPushApprovalPort:
         }
         card = PushApprovalCard(
             session_id=f"delivery:{run_id}",
+            # 卡片按钮回传的 trace_id 就是 pending 记录的 key：回调靠它
+            # ``pop_hitl`` 认领，所以这里是 hitl_id，不是 bundle.trace_id。
             trace_id=hitl_id,
             target=target,
             run_id=run_id,
@@ -342,7 +344,10 @@ class FeishuPushApprovalPort:
 
         return ChangeApproval(
             approver=str(decision.get("approver", "")),
-            trace_id=hitl_id,
+            # DeliveryFlow / ChangePublisher 都以 approval.trace_id ==
+            # bundle.trace_id 作为进入推送的绑定条件；hitl_id 只用于
+            # pending 记录与 decision key 的关联（修正案 1）。
+            trace_id=str(getattr(bundle, "trace_id", "")),
             bundle_hash=str(getattr(bundle, "bundle_hash", "")),
             run_id=run_id,
             channel="feishu",

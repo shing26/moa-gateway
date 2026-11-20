@@ -549,3 +549,105 @@ async def test_callback_storage_unavailable_does_not_write(monkeypatch) -> None:
 
 def test_decision_key_is_namespaced() -> None:
     assert decision_key("abc") == "moa:delivery_push_decision:abc"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_callbacks_write_exactly_one_decision(monkeypatch) -> None:
+    """两个 callback 协程真并发到达时，``pop_hitl`` 只让一个写入 decision。"""
+    import app.routes.feishu as feishu_route
+
+    store = SessionStore(storage=FakeStorage())
+    _callback_env(monkeypatch, store)
+    sent: list[tuple[str, str]] = []
+
+    async def yielding_send(target: str, text: str, trace_id: str) -> None:
+        # 制造一次真实的调度让步：让两个回调在写 decision 之前交错执行。
+        await asyncio.sleep(0)
+        sent.append((target, text))
+
+    async def fake_log(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(feishu_route, "_safe_send", yielding_send)
+    monkeypatch.setattr(feishu_route, "log_request", fake_log)
+    _store_push_hitl(store)
+
+    real_write = feishu_route.write_decision
+    writes: list[str] = []
+
+    def counting_write(
+        session_store: Any,
+        hitl_id: str,
+        decision: dict[str, Any],
+        *,
+        ttl_s: int,
+    ) -> bool:
+        writes.append(str(decision.get("decision", "")))
+        return bool(real_write(session_store, hitl_id, decision, ttl_s=ttl_s))
+
+    monkeypatch.setattr(feishu_route, "write_decision", counting_write)
+
+    await asyncio.gather(
+        feishu_route._process_hitl_card(
+            "approve", "hitl-1", "delivery:run-1", "ou_approver"
+        ),
+        feishu_route._process_hitl_card(
+            "reject", "hitl-1", "delivery:run-1", "ou_approver"
+        ),
+    )
+
+    assert len(writes) == 1
+    decision = read_decision(store, "hitl-1")
+    assert decision is not None
+    assert decision["decision"] == writes[0]
+    assert any("已失效或已被处理" in text for _, text in sent)
+
+
+@pytest.mark.asyncio
+async def test_callback_insecure_self_approval_gate_is_recorded(monkeypatch) -> None:
+    """显式 insecure 放行自审批时，审计 gate 必须如实标记 ``insecure_self_approval``。"""
+    import app.routes.feishu as feishu_route
+
+    store = SessionStore(storage=FakeStorage())
+    _callback_env(
+        monkeypatch,
+        store,
+        gateway_allow_insecure="1",
+        feishu_operator_open_id="ou_approver",
+    )
+    _patch_side_effects(monkeypatch)
+    _store_push_hitl(store)
+
+    await feishu_route._process_hitl_card(
+        "approve", "hitl-1", "delivery:run-1", "ou_approver"
+    )
+
+    decision = read_decision(store, "hitl-1")
+    assert decision is not None
+    assert decision["decision"] == "approve"
+    assert decision["gate"] == "insecure_self_approval"
+
+
+@pytest.mark.asyncio
+async def test_callback_insecure_unverified_operator_gate_is_recorded(monkeypatch) -> None:
+    """未配置 operator 且显式 insecure 时，gate 必须标记 ``insecure_operator_unverified``。"""
+    import app.routes.feishu as feishu_route
+
+    store = SessionStore(storage=FakeStorage())
+    _callback_env(
+        monkeypatch,
+        store,
+        gateway_allow_insecure="1",
+        feishu_operator_open_id="",
+    )
+    _patch_side_effects(monkeypatch)
+    _store_push_hitl(store)
+
+    await feishu_route._process_hitl_card(
+        "approve", "hitl-1", "delivery:run-1", "ou_approver"
+    )
+
+    decision = read_decision(store, "hitl-1")
+    assert decision is not None
+    assert decision["decision"] == "approve"
+    assert decision["gate"] == "insecure_operator_unverified"

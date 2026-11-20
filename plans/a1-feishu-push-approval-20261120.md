@@ -4,6 +4,32 @@
 冻结后实现偏离须回到主会话重新冻结。
 裁决方：主会话（审计）；实现方：独立 worktree Implementer；验证方：全新 verifier subagent。
 
+## 修正案 1（2026-11-20，独立 Verifier 判 FAIL 后重新冻结）
+
+Verifier 在 HEAD `11d8dd2` 上发现契约自身存在冲突，现按裁决修正，**以下条目取代原文**：
+
+1. **`ChangeApproval.trace_id` 必须等于 `bundle.trace_id`**，不是 `hitl_id`。
+   既有 `DeliveryFlow`（`flow.py:392`）与 `ChangePublisher`（`pipeline.py:423`）都以
+   `approval.trace_id == bundle.trace_id` 作为进入推送的绑定条件；原文写 `hitl_id`
+   会使飞书批准后必然被拒。`hitl_id` 只作为 pending 记录与 decision key 的关联标识，
+   不进入 `ChangeApproval.trace_id`。
+2. **approved 审计行的 `bundle_hash`**：允许修改
+   `apps/code_review_pipeline/delivery/audit.py`，在 `run.bundle` 存在时把
+   `bundle_hash` 并入 `extra`。这是审计层的最小改动，不改 `DeliveryFlow`。
+3. **`delivery resume` 端口选择属于本契约范围**：恢复路径必须与原运行使用同一审批通道，
+   否则远程审批会在 resume 时退回终端。`app/cli.py` 的范围扩为
+   “`delivery run` 与 `delivery resume` 的端口选择及来源提示行”。
+4. **路线图变更范围**：`docs/roadmap-generality-20261117.md` 的 2026-11-20 所有者决策
+   记录（A1 通道、第二仓库、OTel、阶段表述）属于裁决方记录，纳入本契约范围；
+   Implementer 不得再改其他行。
+5. **A11 必补测试**（Verifier 指出的覆盖缺口）：
+   - flow 级 A9：用带非空 `trace_id` 的真实 `ChangeBundle` 走批准 → 断言进入
+     `PUSHING` 且 publisher 被调用；`trace_id` 或 `bundle_hash` 不符 → 拒绝；
+   - 真并发回调：两个 callback 协程同时到达，只有一个写 decision；
+   - insecure 分支：`insecure_self_approval` 与 `insecure_operator_unverified` 两个 gate
+     字符串各有断言；
+   - `delivery resume` 使用同一端口选择（开关开 → 飞书，关 → 终端）。
+
 ## 为什么
 
 A2 已交付（2026-11-19）：审批身份可验证、approver ≠ operator、fail-closed 并写审计。
@@ -71,7 +97,7 @@ CLI 与飞书回调服务是两个进程，共享 Redis：
 ```python
 ChangeApproval(
     approver=<飞书 open_id>,
-    trace_id=<hitl_id>,
+    trace_id=<bundle.trace_id>,   # 修正案 1：不是 hitl_id
     bundle_hash=bundle.bundle_hash,
     run_id=run_id,
     channel="feishu",
@@ -108,13 +134,14 @@ ChangeApproval(
 apps/code_review_pipeline/delivery/feishu_approval.py   (新文件：端口、发卡、轮询、decision key)
 app/engine.py                                           (只加 HitlRequest.delivery_payload 可选字段)
 app/routes/feishu.py                                    (只加 push_approval 回调分支与校验)
-app/cli.py                                              (只改 delivery run 的端口选择与来源提示行)
+app/cli.py                                              (delivery run 与 resume 的端口选择及来源提示行)
 app/config.py                                           (只加上述 4 个设置)
 app/deps.py                                             (只在需要时注入共享 SessionStore)
+apps/code_review_pipeline/delivery/audit.py             (修正案 1：approved 行补 bundle_hash)
 tests/unit/**                                           (新增/修改回归测试)
 tests/integration/**                                    (Redis 跨进程语义，可自跳过)
 docs/adr/adr-042-feishu-push-approval.md                (新 ADR：为什么阻塞等待而非新增状态、fail-closed 姿态)
-docs/roadmap-generality-20261117.md                     (只更新 A1 行状态)
+docs/roadmap-generality-20261117.md                     (只承载 2026-11-20 决策记录与 A1 行状态)
 .env.template                                           (只加新变量与注释)
 plans/a1-feishu-push-approval-20261120.md               (本文件)
 ```
@@ -143,8 +170,9 @@ plans/a1-feishu-push-approval-20261120.md               (本文件)
   `gate` 正确；推送仍走既有 bundle 校验与 PR 创建；审计 `approved` 行字段完整。
 - **A10 验签不回归**：`FEISHU_VERIFICATION_TOKEN` 为空时回调仍 401（除显式 insecure）；
   加密事件仍 400。
-- **A11 测试**：新增覆盖 A1–A10 的单测（含并发/连点、bundle 不符、身份不符、超时）；
-  既有单测全绿，`tests/` 只新增不删改。
+- **A11 测试**：新增覆盖 A1–A10 的单测（含真并发回调、bundle/trace_id 不符、身份不符、
+  超时、insecure 两个 gate、flow 级 trace_id 绑定、resume 端口选择）；
+  既有单测全绿，只允许在既有测试文件末尾追加，不改既有断言。
 - **A12 证据绑定**：HEAD SHA + `git status --short`。
 
 ## Verification commands
