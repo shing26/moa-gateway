@@ -3,6 +3,24 @@
 状态：**已冻结**（2026-11-20，A1 部署时实测发现；属于 `GATEWAY_ALLOW_INSECURE=0` 的必要配套）。
 裁决方：主会话（审计）；实现方：独立 worktree Implementer；验证方：全新 verifier subagent。
 
+## 修正案 1（2026-11-20，Verifier 因 V3 裸跑失败后）
+
+Verifier 在 HEAD `75f4a8b` 上发现：裸跑 V3 时
+`tests/unit/test_delivery_resume.py::test_cmd_delivery_resume_prints_reconcile_view_and_returns_exit_code`
+失败。根因不是中间件改动，而是 A1 的
+`app/cli.py:_build_push_approval_port` 把
+`push approval: feishu (timeout=...)` 打到 **stdout**；当父目录 `.env` 打开
+`FEISHU_PUSH_APPROVAL_ENABLED=1` 时，`delivery resume` 的机器可读 JSON 输出被污染，
+测试的 `json.loads(captured.out)` 失败。
+
+**裁决**：修根因，不隔离环境、不改测试。
+
+- Allowed paths 增加 `app/cli.py`，范围仅限“把该状态行从 stdout 改为 stderr”；
+- 新增 **A6a**：`FEISHU_PUSH_APPROVAL_ENABLED=1` 时，`delivery resume` 的 stdout
+  仍必须是可解析 JSON；状态行只能出现在 stderr；
+- V3 恢复为**裸跑**（不设 `FEISHU_PUSH_APPROVAL_ENABLED=0`），必须全绿；
+- 既有 `test_delivery_resume` 不得修改断言。
+
 ## 背景与证据
 
 A1 部署按所有者授权把 `GATEWAY_ALLOW_INSECURE` 设为 `0`、`WEBHOOK_AUTH_TOKEN` 设为非空，
@@ -35,6 +53,7 @@ token 对 GitHub 通道既不适用、也不应成为第二套无法满足的门
 
 ```
 app/middleware/auth.py                                  (只加 GitHub 前缀豁免与注释)
+app/cli.py                                              (修正案 1：仅状态行 stdout → stderr)
 tests/unit/test_auth.py                                 (只追加回归测试)
 tests/unit/test_github_delivery_webhook.py              (只追加路由级回归)
 tests/unit/test_github_webhook_e2e.py                   (只追加端到端回归)
@@ -57,6 +76,9 @@ plans/github-webhook-auth-exempt-20261120.md            (本文件)
 - **A5 伪造前缀不绕过**：`/webhook/githubx/...`、`/webhook/github`（无尾斜杠）不得被
   前缀豁免误放行；只匹配 `/webhook/github/`。
 - **A6 既有单测全绿**，只允许在既有测试文件末尾追加，不改既有断言。
+- **A6a stdout 纯净**：`FEISHU_PUSH_APPROVAL_ENABLED=1` 时，`delivery resume`
+  的 stdout 仍是可解析 JSON；`push approval: feishu ...` 只出现在 stderr。
+  既有 `test_delivery_resume` 在父 `.env` 打开该开关时也必须通过。
 - **A7 证据绑定**：HEAD SHA + `git status --short`。
 
 ## Verification commands
@@ -64,7 +86,7 @@ plans/github-webhook-auth-exempt-20261120.md            (本文件)
 ```
 V1  PYTHONPATH=. .venv/Scripts/python.exe -m pytest tests/unit/test_auth.py -q
 V2  PYTHONPATH=. .venv/Scripts/python.exe -m pytest tests/unit/test_github_delivery_webhook.py tests/unit/test_github_webhook_e2e.py -q
-V3  PYTHONPATH=. .venv/Scripts/python.exe -m pytest tests/unit -q
+V3  PYTHONPATH=. .venv/Scripts/python.exe -m pytest tests/unit -q   (裸跑，不隔离 FEISHU_*)
 V4  PYTHONPATH=. .venv/Scripts/python.exe -m ruff check .
 ```
 

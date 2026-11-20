@@ -1042,3 +1042,56 @@ def test_delivery_resume_reuses_the_configured_approval_channel(
     monkeypatch.setattr(settings, "feishu_push_approval_enabled", True)
     assert cmd_delivery_resume(args) == 0
     assert isinstance(captured[-1], FeishuPushApprovalPort)
+
+
+def test_delivery_resume_keeps_stdout_json_when_feishu_approval_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A6a：飞书审批开启时，状态行只能进 stderr，stdout 仍是可解析 JSON。
+
+    父目录 `.env` 常把 ``FEISHU_PUSH_APPROVAL_ENABLED`` 设为 1；若状态行打到
+    stdout，``delivery resume`` 的机器可读输出就会被污染。
+    """
+    from app.cli import cmd_delivery_resume
+    from app.config import settings
+    from apps.code_review_pipeline import merge_store as merge_store_module
+    from apps.code_review_pipeline.delivery import resume as resume_module
+    from apps.code_review_pipeline.delivery.resume import ResumeOutcome
+    from apps.code_review_pipeline.routing import github_provider
+
+    class FakeGitHub:
+        async def aclose(self) -> None:
+            return None
+
+    async def fake_resume(run_id: str, **kwargs: object) -> ResumeOutcome:
+        assert run_id == "run-1"
+        return ResumeOutcome(
+            run=SimpleNamespace(),
+            exit_code=0,
+            view={"state": "waiting_ci", "run_id": "run-1"},
+        )
+
+    merge_store = merge_store_module.PostgresMergeStore(
+        dsn="postgresql://unused",
+        _psycopg=object(),
+    )
+    monkeypatch.setattr(merge_store_module, "build_merge_store", lambda: merge_store)
+    monkeypatch.setattr(github_provider, "build_github_client", lambda: FakeGitHub())
+    monkeypatch.setattr(resume_module, "resume_run", fake_resume)
+    monkeypatch.setattr(settings, "github_token", "token")
+    monkeypatch.setattr(settings, "delivery_run_record_dir", str(tmp_path / "runs"))
+    monkeypatch.setattr(settings, "feishu_push_approval_enabled", True)
+    monkeypatch.setattr(settings, "feishu_push_approval_timeout_s", 600)
+    monkeypatch.setattr(settings, "feishu_app_id", "cli_test")
+    monkeypatch.setattr(settings, "feishu_app_secret", "secret")
+    monkeypatch.setattr(settings, "delivery_approval_chat_id", "oc_chat")
+
+    args = build_parser().parse_args(["delivery", "resume", "--run-id", "run-1"])
+    assert cmd_delivery_resume(args) == 0
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {"state": "waiting_ci", "run_id": "run-1"}
+    assert "push approval: feishu (timeout=600s)" in captured.err
+    assert "push approval" not in captured.out
