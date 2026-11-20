@@ -229,3 +229,81 @@ def test_webhook_callback_rejects_wrong_lark_token_when_configured():
 def test_webhook_callback_fail_open_when_not_configured():
     with build_client(token="gateway-secret") as client:
         assert client.post("/webhook/callback").status_code == 200
+
+
+# ── GitHub webhook provider-verified 前缀（2026-11-20）────────────────
+
+
+def _build_github_prefix_client(
+    *,
+    token: str = "gateway-secret",
+    allow_insecure: bool = False,
+) -> TestClient:
+    """只装配中间件与路径桩，验证豁免边界本身（路由签名由路由级测试覆盖）。"""
+    inner = FastAPI()
+
+    @inner.post("/webhook/github/delivery")
+    async def github_delivery():
+        return {"status": "ignored"}
+
+    @inner.post("/webhook/github/review")
+    async def github_review():
+        return {"status": "ignored"}
+
+    @inner.post("/webhook/github")
+    async def github_bare():
+        return {"status": "reached"}
+
+    @inner.post("/webhook/githubx/probe")
+    async def githubx_probe():
+        return {"status": "reached"}
+
+    @inner.post("/webhook/test")
+    async def webhook_test():
+        return {"ok": True}
+
+    @inner.post("/webhook/callback")
+    async def webhook_callback():
+        return {"ok": True}
+
+    @inner.post("/feishu/event")
+    async def feishu_event():
+        return {"ok": True}
+
+    inner.add_middleware(
+        AuthMiddleware,
+        token=token,
+        allow_insecure=allow_insecure,
+    )
+    return TestClient(inner)
+
+
+def test_github_webhook_prefix_passes_without_gateway_token():
+    """A1（中间件层）：配置了 token 且 insecure=0，GitHub 路由仍可无 token 进入。
+
+    GitHub 只会发 ``X-Hub-Signature-256``，不发 ``X-Gateway-Token``；签名门由
+    路由自身 fail-closed 校验（见 test_github_delivery_webhook.py）。
+    """
+    with _build_github_prefix_client(token="gateway-secret", allow_insecure=False) as client:
+        assert client.post("/webhook/github/delivery").status_code == 200
+        assert client.post("/webhook/github/review").status_code == 200
+
+
+def test_non_github_webhook_still_requires_gateway_token():
+    """A4：只豁免 `/webhook/github/`；其余 webhook 路径与飞书回调行为不变。"""
+    with _build_github_prefix_client(token="gateway-secret", allow_insecure=False) as client:
+        assert client.post("/webhook/test").status_code == 401
+        assert (
+            client.post("/webhook/test", headers={"X-Gateway-Token": "gateway-secret"}).status_code
+            == 200
+        )
+        assert client.post("/webhook/callback").status_code == 200
+        assert client.post("/feishu/event").status_code == 200
+
+
+def test_github_exemption_requires_exact_trailing_slash_prefix():
+    """A5：`/webhook/github` 与 `/webhook/githubx/...` 不得被前缀豁免误放行。"""
+    with _build_github_prefix_client(token="gateway-secret", allow_insecure=False) as client:
+        assert client.post("/webhook/github").status_code == 401
+        assert client.post("/webhook/githubx/probe").status_code == 401
+        assert client.post("/webhook/github/delivery").status_code == 200

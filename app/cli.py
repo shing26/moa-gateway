@@ -426,7 +426,8 @@ def _build_push_approval_port(github: Any) -> Any:
 
     print(
         "push approval: feishu "
-        f"(timeout={settings.feishu_push_approval_timeout_s}s)"
+        f"(timeout={settings.feishu_push_approval_timeout_s}s)",
+        file=sys.stderr,
     )
     auth = FeishuTokenProvider(
         FeishuAuthConfig(
