@@ -57,3 +57,33 @@ V3  $env:PYTHONPATH='.'; .venv/Scripts/python.exe -m ruff check .
 - 扩大改动到 `preflight.py` 之外的非测试代码（`app/cli.py` 仅限
   `cmd_delivery_preflight` 及其参数传递）。
 - 改既有断言换通过。
+
+## 6. 签收记录（2026-11-21）
+
+**所有者书面签收**：用户消息「签收」（2026-11-21，指 PR #111 连同本契约的 P1 修复一并签收）。
+
+**合并**：PR #111 → `main`，merge commit
+`fa473bf685faaa7f448f976c07687073595e9e59`，2026-11-20T19:25:40Z（分支先经
+`gh pr update-branch` 同步 main 至 `e14aeb3`，CI 重跑全绿后合并）。
+
+**验收证据**
+
+- 首版 `b11f39b` 被独立 Verifier 判不可合并：3 个 P1（超时冒泡、空命令
+  `IndexError`、`--json` 无断言），均有独立复现输出。
+- 修复 HEAD：`bb69f5e5cc24883d99f356650ae416e0b69f41e0`；`git status --short` 空。
+- 复验（Verifier 亲跑）：V1 `49 passed`；V2 `2218 passed / 6 skipped`；
+  V3 `All checks passed!`；五种输入探针（`()` blocked / `None` 无该项 /
+  坏路径 blocked / 裸 `python` ok / 注入超时 blocked）全符合预期，
+  无残留临时目录；A1–A5 全 PASS，无 P0/P1/P2。
+- GitHub CI（`e14aeb3`）：`test` / `integration` 绿，`docker` skipped。
+
+**人审四问**
+
+1. **是否在冻结契约范围内？** 是。改动仅 `preflight.py` + 两个既有测试文件 +
+   契约文件；`app/cli.py` 保持首版一行传参。
+2. **证据是否绑定 HEAD 且可复跑？** 是。首版与修复版均由独立 Verifier 重跑
+   V1–V3 与自写探针，未采信实现方自评。
+3. **是否有未声明行为变化？** 无。超时与空命令从"异常冒泡/崩溃"变为显式
+   `blocked`，正是契约要求的失败前移；`verify_command=None` 的既有行为不变。
+4. **残余是否如实记录并接受？** 是。`resolve_program` / `build_verify_env`
+   之外的极端 `OSError` 理论路径未触发、未纳入本轮（P2 级，已知）。
