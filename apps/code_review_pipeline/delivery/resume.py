@@ -34,6 +34,7 @@ from apps.code_review_pipeline.delivery.ports import (
     BundleChanged,
     PushRecoveryRequired,
 )
+from apps.code_review_pipeline.delivery.retry import RETRY_STATES, retry_failed_run
 from apps.code_review_pipeline.delivery.state import assert_transition
 from apps.code_review_pipeline.delivery.workspace import GitHubWorkspaceProvisioner
 
@@ -127,9 +128,17 @@ async def resume_run(
     merge_store: Any,
     settings: Any,
     approval_port: Any,
+    flow_factory: Any | None = None,
 ) -> ResumeOutcome:
-    """按记录状态分派：门禁重入 / 合并对齐 / 拒绝。"""
+    """按记录状态分派：失败续跑 / 门禁重入 / 合并对齐 / 拒绝。"""
     run = store.load(run_id)
+    if run.state in RETRY_STATES:
+        return await retry_failed_run(
+            run_id,
+            store=store,
+            settings=settings,
+            flow_factory=flow_factory,
+        )
     if run.state in _RECONCILE_STATES:
         current = await store.reconcile(run, merge_store)
         return ResumeOutcome(run=current, exit_code=0, view=current.to_dict())

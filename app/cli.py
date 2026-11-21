@@ -865,6 +865,7 @@ def cmd_delivery_resume(args: argparse.Namespace) -> int:
     """重入搁浅记录：门禁重入或合并对齐，绝不重跑实现者。"""
     from app.config import settings
     from apps.code_review_pipeline.delivery.resume import resume_run
+    from apps.code_review_pipeline.delivery.retry import RetryOutcome
     from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
     from apps.code_review_pipeline.merge_store import (
         PostgresMergeStore,
@@ -903,6 +904,20 @@ def cmd_delivery_resume(args: argparse.Namespace) -> int:
             await github.aclose()
 
     outcome = asyncio.run(execute())
+    if isinstance(outcome, RetryOutcome):
+        print(f"parent_run_id: {outcome.parent_run_id}")
+        run = outcome.run
+        if run is not None:
+            print(f"run_id    : {run.run_id}")
+            print(f"state     : {run.state.value}")
+            print(f"failure   : {run.failure.to_dict() if run.failure else '-'}")
+            print(
+                f"record    : {settings.delivery_run_record_dir}"
+                f"/{run.run_id}.json"
+            )
+        if outcome.reason:
+            print(outcome.reason, file=sys.stderr)
+        return outcome.exit_code
     if outcome.view is not None:
         print(json.dumps(outcome.view, ensure_ascii=False, indent=2))
         return outcome.exit_code
