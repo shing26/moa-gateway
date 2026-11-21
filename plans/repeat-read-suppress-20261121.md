@@ -67,3 +67,34 @@ V3  $env:PYTHONPATH='.'; .venv/Scripts/python.exe -m ruff check .
 - 动 Run Record / 审计口径（`steps[].observation` 必须仍存完整观察）。
 - 改/删既有断言换通过；新增 skip/xfail。
 - 触碰 Allowed paths 之外的模块（含 `bench/` 与交付管线）。
+
+## 6. 签收记录（2026-11-21）
+
+**所有者书面签收**：用户消息「签收」（2026-11-21，指 PR #119）。
+
+**合并**：PR #119 → `main`，merge commit
+`5a5deda17081a2efdf96d19af08102a0ea91a20d`，2026-11-21T06:06:10Z。
+
+**验收证据**
+
+- 实现 HEAD：`da5e7b50983ec958797c26e54c955e8582ee2566`；`git status --short` 空。
+- V1 `28 passed`；V2 全量 187 个测试文件分 3 块跑完
+  `2265 passed / 6 skipped / 0 failed`（单进程跑会被本机环境截断，分块为等价
+  全量覆盖）；V3 `All checks passed!`。
+- 独立 Verifier 自写探针 5 组全 PASS（窗口内 stub / 窗口外正文 / 失败送达 /
+  开关 / 第 3 次重复）；S1–S7 全 PASS；无 P0/P1。
+- 既有 3 条 repeat 用例零删除，`test_tool_loop_repeat_marker_on_identical_read`
+  仅追加 2 条加强断言（stub 必现、正文必不回灌）。
+- GitHub CI：`test` / `integration` 绿，`docker` skipped。
+
+**人审四问**
+
+1. **是否在冻结契约范围内？** 是。diff 仅 `app/agents/memory.py`（+2）、
+   `app/agents/stubs.py`（+26 -1）、`tests/unit/test_structured_tool_loop.py`
+   （+282 -0）；`compact_messages` / `truncate_observation` 零改动。
+2. **证据是否绑定 HEAD 且可复跑？** 是。V1–V3 与探针由独立 Verifier 重跑，
+   未采信实现方自评。
+3. **是否有未声明行为变化？** 无。抑制仅在「原文仍在上下文窗口 + outcome ok」
+   时生效；窗口外、失败/被拒、开关关闭均保持现行为；Run Record 全文不缩水。
+4. **残余是否如实记录并接受？** 是。P2（既有）：重复标记文案在失败重复与
+   窗口外场景语义略误导，基线行为即如此，本次未恶化、不阻塞。
