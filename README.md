@@ -1,33 +1,26 @@
 <div align="center">
 
+<img src="docs/assets/readme-hero.svg" alt="MoA Gateway：受治理的仓库交付 Agent，交付经过验证、审批、审计三道门禁" width="100%">
+
 # MoA Gateway
-### 受治理的仓库交付 Agent
 
-仓库名保留历史写法（`Gateway` / `MoA` 两个词在正文口径里停用，理由见下）。**产品是受治理的仓库交付 Agent**：入口为 `DeliveryRequest -> DeliveryRun`，默认单 Implementer，负责在隔离工作区中修改、验证并产出可审批的 PR；推送和合并仍必须经过 bundle、人工审批与审计。`app/` 是支撑交付链的 LLM 治理运行时，`bench/` 是验证多智能体编排是否值得的等预算实验台。S0 已实现，真实仓库端到端验收已于 2026-10-30 完成（证据见 `docs/acceptance/2026-10-30-s0-acceptance.md`）；只读 Verifier 是预注册实验 S1，默认关闭。
+**受治理的仓库交付 Agent**
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688.svg)](https://fastapi.tiangolo.com/)
-[![LangGraph](https://img.shields.io/badge/LangGraph-StateGraph-orange.svg)](https://github.com/langchain-ai/langgraph)
-[![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white)](https://redis.io/)
-[![pgvector](https://img.shields.io/badge/pgvector-4169E1?logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector)
-[![Elasticsearch](https://img.shields.io/badge/Elasticsearch-005571?logo=elasticsearch&logoColor=white)](https://www.elastic.co/elasticsearch)
-<br>
-[![CI](https://github.com/shing26/moa-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/shing26/moa-gateway/actions/workflows/ci.yml)
-[![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
-[![Security: Bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
+Agent 在隔离工作区里改代码、跑验证、产出可审批的 PR；推送、CI 与合并必须留下可复核证据并经过人批准。<br>S0 已实现，真实仓库端到端验收于 2026-10-30 完成；只读 Verifier 是预注册实验 S1，默认关闭。
+
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/) [![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688.svg)](https://fastapi.tiangolo.com/) [![LangGraph](https://img.shields.io/badge/LangGraph-StateGraph-orange.svg)](https://github.com/langchain-ai/langgraph) [![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white)](https://redis.io/) [![pgvector](https://img.shields.io/badge/pgvector-4169E1?logo=postgresql&logoColor=white)](https://github.com/pgvector/pgvector) [![Elasticsearch](https://img.shields.io/badge/Elasticsearch-005571?logo=elasticsearch&logoColor=white)](https://www.elastic.co/elasticsearch)
+
+[![CI](https://github.com/shing26/moa-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/shing26/moa-gateway/actions/workflows/ci.yml) [![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff) [![Security: Bandit](https://img.shields.io/badge/security-bandit-yellow.svg)](https://github.com/PyCQA/bandit)
+
+<sub><b>42</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测 · 自动化测试门禁</sub>
 
 <p align="center">
-自动化测试门禁 · <b>33</b> 份 ADR · <b>23</b> 条 gold set · <b>10</b> 节点拓扑 · <b>4</b> 条零网络演示 · <b>6</b> 维离线评测
-</p>
-
-<p align="center">
-  <a href="#-关键词与证据索引">关键词与证据索引</a> •
-  <a href="#-一次真实交付的完整-trace-2026-11-01">真实交付 trace</a> •
-  <a href="#-核心工程防线">核心工程防线</a> •
+  <a href="#-60-秒上手"><b>60 秒上手</b></a> •
+  <a href="#-一次真实交付的完整-trace2026-11-01">真实交付 trace</a> •
+  <a href="#-关键词与证据索引">证据索引</a> •
+  <a href="#-核心工程防线">工程防线</a> •
   <a href="#-真实节点拓扑">节点拓扑</a> •
   <a href="#-多智能体剂量实验台bench">剂量实验台</a> •
-  <a href="#-秒级实测零网络依赖">秒级实测</a> •
-  <a href="#-本地运行">本地运行</a> •
   <a href="#-项目结构概览">项目结构</a> •
   <a href="#-核心架构决策记录-adr">架构决策 (ADR)</a> •
   <a href="#-口径与边界">口径与边界</a>
@@ -35,26 +28,67 @@
 
 </div>
 
-> [!NOTE]
-> **这是什么、不是什么**：
-> 这个项目的**产品**是受治理的仓库交付 Agent；**支撑层**是 `app/` 的治理运行时（拦截、审批、留痕、回归）；**验证层**是 `bench/` 的等预算实验台（同一任务集、同一预算下把 agent 结构从 L0 加到 L3，看边际收益）。三层不能倒过来读成“平台已经支撑多场景”。
-> 这里**停用两个词**，并明确交付 Agent 的当前边界：
-> - **网关**——设计文档 §2.1 判定不成立：请求进来之后是它在干活，不是转发给别人、也不替谁挡流量。"网关"会让人以为它只是中间层。仓库名是历史遗留。
-> - **多智能体系统**——PR 审查 R0 是 5 段顺序 LLM 调用；R1 再加入逐 finding 的 Critic，并把 `revise` 的一次回边送回 Report。它不是无边界 handoff 或并行调度。真有多个执行体并发分工的只有两处，且都不在产品主路径上：`app/orchestration/collaboration.py`（Supervisor + `Send` 扇出，`COLLAB_ENABLED=false`，显式入口，ADR-022）与 `bench/` 的剂量实验（L0–L3，人工跑，不进 CI，ADR-023）。
-> - **交付 Agent**——默认是单 Implementer，负责改代码、验证、产出可审批的 PR；只读 Verifier 是预注册实验 S1，不是默认拓扑。CI 失败诊断是只读辅助入口，不是 CI 自动修复。
+## 🚀 60 秒上手
+
+```bash
+# 1. 安装依赖（Python 3.12 + uv，首次约 1–3 分钟）
+uv sync --all-extras --dev
+
+# 2. 环境自检：Python / .env / 端口 / Redis / Ollama / pgvector
+uv run python scripts/doctor.py
+
+# 3. 启动（Windows；Linux / macOS 用 .venv/bin/python -m app）
+.venv\Scripts\python.exe -m app --port 8081
+```
+
+没有 API Key 也能先看效果——零网络、零 Token，单条约 3–8 秒：
+
+```bash
+uv run python scripts/run_collaboration.py
+```
+
+完整步骤与端口说明见 [本地运行](#-本地运行)，四条零网络演示见 [秒级实测](#-秒级实测零网络依赖)。
+
+## 🧱 三层结构
+
+| 层 | 它是什么 | 从这里进入 |
+|---|---|---|
+| **产品 · 交付 Agent** | `DeliveryRequest -> DeliveryRun`，默认单 Implementer，产出可审批的 PR | [受治理仓库交付 Agent](#受治理仓库交付-agent) |
+| **支撑 · 治理运行时** | `app/`：FSM 主链、HITL、Guard、审计 WAL、检索与预算 | [核心工程防线](#-核心工程防线) |
+| **验证 · 实验台** | `bench/`：同任务、同预算下比较 L0–L3，回答“多智能体值不值得” | [剂量实验台](#-多智能体剂量实验台bench) |
+
+> [!IMPORTANT]
+> **先对齐口径——这不是网关，也不是无边界多智能体系统，更不是自动合并。**
+> - **网关**：请求进来后由它执行，不是转发层，也不替谁挡流量；仓库名是历史遗留。
+> - **多智能体**：默认单 Implementer。多执行体只在两条显式入口存在：协作图（`COLLAB_ENABLED=false`，ADR-022）与 `bench/` 剂量实验（人工跑、不进 CI，ADR-023）。
+> - **自动合并**：推送与合并必须过 bundle、人工审批与审计；CI 失败只做只读诊断并转人工，不自动修复。
 >
-> 对外一句话：**"我让 Agent 把仓库变更做完，但推送、CI 与合并都必须留下可复核证据并经过人批准。"**
+> 对外一句话：**“我让 Agent 把仓库变更做完，但推送、CI 与合并都必须留下可复核证据并经过人批准。”**
+
+<details>
+<summary><b>展开：完整定位、停用词与当前边界</b></summary>
+
+仓库名保留历史写法（`Gateway` / `MoA` 两个词在正文口径里停用，理由见下）。**产品是受治理的仓库交付 Agent**：入口为 `DeliveryRequest -> DeliveryRun`，默认单 Implementer，负责在隔离工作区中修改、验证并产出可审批的 PR；推送和合并仍必须经过 bundle、人工审批与审计。`app/` 是支撑交付链的 LLM 治理运行时，`bench/` 是验证多智能体编排是否值得的等预算实验台。S0 已实现，真实仓库端到端验收已于 2026-10-30 完成（证据见 `docs/acceptance/2026-10-30-s0-acceptance.md`）；只读 Verifier 是预注册实验 S1，默认关闭。
+
+这个项目的**产品**是受治理的仓库交付 Agent；**支撑层**是 `app/` 的治理运行时（拦截、审批、留痕、回归）；**验证层**是 `bench/` 的等预算实验台（同一任务集、同一预算下把 agent 结构从 L0 加到 L3，看边际收益）。三层不能倒过来读成“平台已经支撑多场景”。
+
+这里**停用两个词**，并明确交付 Agent 的当前边界：
+
+- **网关**——设计文档 §2.1 判定不成立：请求进来之后是它在干活，不是转发给别人、也不替谁挡流量。"网关"会让人以为它只是中间层。仓库名是历史遗留。
+- **多智能体系统**——PR 审查 R0 是 5 段顺序 LLM 调用；R1 再加入逐 finding 的 Critic，并把 `revise` 的一次回边送回 Report。它不是无边界 handoff 或并行调度。真有多个执行体并发分工的只有两处，且都不在产品主路径上：`app/orchestration/collaboration.py`（Supervisor + `Send` 扇出，`COLLAB_ENABLED=false`，显式入口，ADR-022）与 `bench/` 的剂量实验（L0–L3，人工跑，不进 CI，ADR-023）。
+- **交付 Agent**——默认是单 Implementer，负责改代码、验证、产出可审批的 PR；只读 Verifier 是预注册实验 S1，不是默认拓扑。CI 失败诊断是只读辅助入口，不是 CI 自动修复。
+
+</details>
 
 ---
 
 ## 🔍 关键词与证据索引
 
-面试与评审中最常被追问的关键词，每个都对应一个可点开的 artifact（主路径代码、ADR 或带四
-方对账的验收记录），不指向架构图或宣称：
+面试与评审中最常被追问的关键词，每个都对应一个可点开的 artifact（主路径代码、ADR 或带四方对账的验收记录），不指向架构图或宣称：
 
 | 关键词 | 可点开的证据 |
 |---|---|
-| **审批 · 人机协同** | 运行时 HITL 挂起-恢复与审批白名单：[ADR-021](docs/adr/adr-021-approval-gated-merge.md)、`app/pipeline.py` 的 `prepare_hitl` / `await_human`；合并门禁（head-SHA 乐观锁）：[`merge_executor.py`](apps/code_review_pipeline/merge_executor.py)；推送的 TTY 人工审批：[`cli.py`](app/cli.py) `TerminalPushApprovalPort` |
+| **审批 · 人机协同** | 运行时 HITL 挂起-恢复与审批白名单：[ADR-021](docs/adr/adr-021-approval-gated-merge.md)、`app/pipeline.py` 的 `prepare_hitl` / `await_human`；合并门禁（head-SHA 乐观锁）：[`merge_executor.py`](apps/code_review_pipeline/merge_executor.py)；推送审批现支持 TTY（[`cli.py`](app/cli.py)）与飞书远程卡片（ADR-042）两条通道 `TerminalPushApprovalPort` |
 | **审计 · 留痕** | 哈希链审计 WAL（tamper-evident，能指出第一个被改的行号）：[ADR-019](docs/adr/adr-019-audit-chain-and-retention.md)、[`app/audit/wal.py`](app/audit/wal.py)；GitHub / DeliveryRun / MergeRecord / 审计 WAL 四方对账实例：[S0 真实验收记录](docs/acceptance/2026-10-30-s0-acceptance.md) |
 | **评测 · 效果度量** | RAG 六维离线评测与同源特征止损（实测 nDCG 负向倒退即关闭）：[docs/retrieval-evaluation.md](docs/retrieval-evaluation.md)；预注册配对分析协议：[ADR-029](docs/adr/adr-029-preregistered-paired-analysis.md) |
 | **实验设计** | 实验协议与运行记录：[ADR-026](docs/adr/adr-026-experiment-protocol.md)、[ADR-025](docs/adr/adr-025-multi-agent-experiment-run-record.md)；等预算剂量设计：[ADR-023](docs/adr/adr-023-bench-agent-primitive.md)；实验台：`bench/` |
@@ -107,6 +141,10 @@
 * **主路径轻量自研 FSM**：生产请求主干（`app/pipeline.py` + `app/fsm/state_machine.py`）运行在零外部编排框架依赖的自建有限状态机上（8 态全覆盖，重试预算由状态机结构决定）。状态转移表是全仓库唯一权威——图运行时试图走非法迁移会直接抛 `InvalidStateTransitionException`。
 * **LangGraph 对照适配器**：`app/orchestration/graph.py`（ADR-008）把同一条请求链表达成 `StateGraph`，与 FSM 管道共用同一批协作者对象；`test_langgraph_adapter.py` 的协作者表面漂移门禁 + `test_engine_parity_golden.py` 的三个确定性场景逐字段对拍，严防引擎间的行为漂移。LangGraph 是独立可选 extra（`uv sync --extra langgraph`），默认不参与运行时。
 
+### 1b. 启动前 preflight verify 自检
+
+交付启动前对配置里的 verify 命令做一次探测：命令超时或为空一律映射为 `blocked`，不让空配置伪装成已验证（2026-11-20 修复，PR #111）。这条是本地启动门，不替代 CI。
+
 ### 2. 治理之下的专家分工与并发调度
 
 * **受控意图路由**：`route` 节点完成意图解析（正则 → 微模型 → 路由 LLM 三级降级），`execute` 节点把任务分发至专家池（`coder` / `general` / `review`，复用 `AGENT_REGISTRY`，不引入新的 Agent 实现）。
@@ -129,7 +167,7 @@
 
 ### 5. 全链路审计与零成本 CI 确定性测试
 
-* **全生命周期记账**：共享 `trace_id` 经 ContextVar 贯穿路由、执行、质检全流程，协作层自身的 Token 与延迟也纳管记账；`budget_guard` 会话级成本熔断（`BUDGET_SESSION_LIMIT_USD`）；审计 WAL 写成链（`prev_hash` / `entry_hash`，能指出第一个被改过的行号——tamper-evident，不是 tamper-proof）。
+* **全生命周期记账**：共享 `trace_id` 经 ContextVar 贯穿路由、执行、质检全流程，协作层自身的 Token 与延迟也纳管记账；`budget_guard` 会话级成本熔断（`BUDGET_SESSION_LIMIT_USD`）；审计 WAL 写成链（`prev_hash` / `entry_hash`，能指出第一个被改过的行号——tamper-evident，不是 tamper-proof）；跨日按当日文件重恢复链头（2026-11-20 修复），不会因 rollover 断链。
 * **离线确定性保障**：Mock 协作 / 任务 LLM 与真机调合同构，CI 在 100% 零网络、零 Token 消耗下完成拓扑、流式链路与存储契约验证；具体测试数由当次 `pytest` 输出为准，不在 README 固化易漂移的数字。
 
 ---
@@ -309,10 +347,10 @@ qwen2.5:3b + 512 这一配置。多档重进须新协议重过门禁；主线编
 **前置（一次性）**：安装 [uv](https://docs.astral.sh/uv/) 后执行 `uv sync --all-extras --dev`——协作演示（1–3）硬依赖 `langgraph` optional extra，漏装会报 `ModuleNotFoundError`；第 4 条 RAG 案例不需要 extra。首次运行 uv 会自动安装依赖与 Python（约 1–3 分钟，之后才是秒级）。
 
 ```bash
-# 1. 默认流式协作演示（Supervisor 规划 → Send 扇出并发执行 → Critic 放行 → 治理链 → 交付）
+# 1. 协作实验演示（需显式开启 COLLAB_ENABLED；Supervisor → Send 扇出 → Critic 放行 → 治理链）
 uv run python scripts/run_collaboration.py
 
-# 2. 靶向回边重跑演示（Critic 打回 targets=[0] → 只重跑该子任务 → 第二轮 APPROVED 放行）
+# 2. 靶向回边实验（Critic 打回 targets=[0] → 只重跑该子任务 → 第二轮 APPROVED；非默认交付路径）
 uv run python scripts/run_collaboration.py --scripted-revise
 
 # 3. 失败信封演示（专家把失败当答案返回 → 评审前识别 → 直接升级人工，不伪装成功）
@@ -345,7 +383,12 @@ uv run python scripts/doctor.py # 环境诊断：Python / .env / 端口 / Redis 
 - 演示前一键起停：`powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1`（按序拉起容器 → Ollama → 应用，等 `/healthz` 通过）。
 - 访问入口：`/dashboard`（管理后台）、`/dashboard/chat`（自主任务对话）、`/health` 与 `/healthz`（健康检查）。
 
+> [!TIP]
+> **换目标仓库不改主配置**：`config/repos/<owner>/<repo>.toml` 保存单个目标仓库的知识配置（ADR-041）。
+
 ---
+
+> **Dashboard 重设计预览**：`design-preview/` 下有 3 视图草案与 HANDOFF（2026-11-21 staged），仅设计稿，实现未开始，不代表当前可用能力。
 
 ## 📂 项目结构概览
 
@@ -372,7 +415,7 @@ moa-gateway/
 ├── bench/       # §5.0 agent 原语 + §5.1 带工具专家 + harness + 预算 B1/B3 + 报告聚合 + 任务定义（剂量曲线实验）
 ├── delivery/    # 定位与减法清单（对外口径的单一来源）+ 交付材料摘要
 ├── docs/
-│   ├── adr/                           # ADR-002 ~ ADR-032
+│   ├── adr/                           # ADR-002 ~ ADR-043
 │   ├── archive/                       # 历史文档 9 份（未按此实施，见 archive/README.md）
 │   ├── multi-agent-collaboration.md # 协作链路架构与并发写治理说明
 │   ├── multi-agent-experiment-bench.md # Experiment/Trial/Run Record 契约与复跑语义
@@ -386,7 +429,7 @@ moa-gateway/
 
 ## 📑 核心架构决策记录 (ADR)
 
-项目所有核心演化遵循「决策先行、代码在后」原则，完整归档于 `docs/adr/`（adr-002 ~ adr-036）：
+项目所有核心演化遵循「决策先行、代码在后」原则，完整归档于 `docs/adr/`（adr-002 ~ adr-043）：
 
 | ADR 编号 | 核心决策主题 | 关键设计与约束 |
 | :---: | :--- | :--- |
@@ -413,9 +456,9 @@ moa-gateway/
 `apps/code_review_pipeline/` 内置 GitHub PR 审查流水线：Triage → 静态分析 → 语义 RAG → 测试覆盖 → 汇总报告。默认配置再加一层 **Review L1**：Report 产出的候选 finding 先由 Critic 逐条 `keep / revise / drop`，`revise` 只允许一次回边，随后经过 evidence gate 才能进入人工逐条反馈。
 
 > [!IMPORTANT]
-> **口径说明**：这条链路仍是**人工审批的 PR 审查助手**，不是自动合并门禁，也不是完整的 L2/L3 多智能体网络。R1 的 Critic 是一条有界回边；合并审批是另一条独立通道。
+> **口径说明**：这条链路仍是**人工审批的 PR 审查助手**，不是自动合并门禁，也不是多 Agent 网络（该词已在「完整定位」中停用）。R1 的 Critic 是一条有界回边；合并审批是另一条独立通道。
 
-- 入口：`POST /webhook/github/review`（GitHub webhook body）或指令 `/review` 后输入 `owner/repo#PR号`；无 `GITHUB_TOKEN` 时优雅降级，不崩溃。
+- 入口：`POST /webhook/github/review`（GitHub webhook body）或指令 `/review` 后输入 `owner/repo#PR号`；无 `GITHUB_TOKEN` 时优雅降级，不崩溃。`/webhook/github/` 精确前缀走 provider-verified 鉴权豁免（ADR-043），该豁免不对其它路径生效。合并审批另有 GitHub 评论通道（ADR-040）。
 - 报告阶段出现 `critical` / `high` 发现，或 `medium` 发现 ≥3 条，或任一审查器返回无法解析的内容，即 `overall_need_human_review=True`，落库并进飞书卡片（2026-10-12 修复：此前该标记恒为 `False`，回归测试见 `tests/unit/test_review_hitl_escalation.py`）。
 - **合并是独立的经审批通道**（ADR-021，`CODE_REVIEW_MERGE_ENABLED=1`）：CI 绿 → 飞书弹审批卡片 → 人点批准 → 运行时合并 → 审计。合并必须过审批门，全程留痕。
 - 审查 finding 以候选、最终发布、Critic 丢弃和 superseded 状态落库；飞书逐条卡固定提供 `accepted_actionable` / `accepted_non_actionable` / `false_positive` / `duplicate` / `already_known` 五态。所有 finding 完成人工标注后，审批卡才允许写回 GitHub；写回固定为 `COMMENT`，不会自动批准或合并。
@@ -464,7 +507,7 @@ python scripts/redteam/run_redteam.py         # 200 条对抗用例，零网络�
 python scripts/compare_rerank.py              # 精排 off/on 前后对比（gold set 23 条）
 ```
 
-GitHub Actions CI（Python 3.12）依次执行：pytest → ruff → 防源码补丁脚本 → bandit → eval offline → 红队基线 → 导入自检，全链路零网络；Docker 镜像（`python:3.12-slim` + uv）在打版本 tag 时构建并推送；没有 tag 时，可以在 Actions 页面手动触发 CI workflow 并勾选 run_docker，只构建不推送，以证明 Dockerfile 和依赖锁依然可构建。
+GitHub Actions CI（Python 3.12）主链依次执行：pytest → ruff → 防源码补丁脚本 → bandit → eval offline → 红队基线 → 导入自检，零网络；另有独立的 integration job（真 PG / Redis，非零网络）与 `uv lock --check`、实验迁移契约门禁（ci.yml:37-49, 65-110）。Docker 镜像（`python:3.12-slim` + uv）在打版本 tag 时构建并推送；没有 tag 时，可以在 Actions 页面手动触发 CI workflow 并勾选 run_docker，只构建不推送，以证明 Dockerfile 和依赖锁依然可构建。
 
 ---
 
@@ -475,10 +518,10 @@ GitHub Actions CI（Python 3.12）依次执行：pytest → ruff → 防源码�
 - **e2e 的 `intent_match` 是"与数据集标签的偏离率"，不是路由准确率**；judge 均分随机器 / 模型变化，不写死数字。
 - **HITL 不跨重启**：会话状态在进程内、挂起记录在 Redis，重启后未决审批按 ADR-012 惰性作废（审计 `hitl_expired`）并告知用户——这是有意为之，要么接外部状态存储，要么承认它只在进程生命周期内有效。
 - **同会话是排队的，不是并行的**：`MoAPipeline.run` 整个请求生命周期独占该会话（先到先处理，跨会话完全并行）——同会话并发投喂过去会撞出 `invalid_state_transition` 500，现在改为排队。代价是同一会话里一条慢请求会挡住下一条（LLM 超时上限之内）；不限流的匿名请求共用同一把锁（ADR-016 §五）。
-- **OTel 是预留接口，不是链路**：全仓只有 2 个 span、未声明 exporter 依赖，设了端点也只落到 console。
+- **OTel 是预留接口，不是链路**：生产代码当前 1 处 `start_as_current_span`（`app/channels/webhook.py`），未声明 exporter 依赖，设了端点也只落到 console；补齐 exporter 已于 11-20 定方向但未落地，旧文“2 个 span”作废。
 - **协作链路边界**（ADR-022）：不进意图路由、不驱动会话 FSM；checkpointer 默认是单机 SQLite（`COLLAB_CHECKPOINT_PATH`，显式注入其它实现或 `:memory:` 可覆盖），CLI 的 mock 快捷路径仍用进程内 `InMemorySaver`；`COLLAB_LLM=litellm` 解析失败会降级规则式 mock；`depends_on` 已按依赖波次真实调度，工作区工具必须显式配置 `COLLAB_WORKSPACE_ROOT`。
 - **成本量化本地不可验**：`avg_cost_usd` 恒 0（本地 Ollama 不计费）；`hitl_feedback` 4 条全是本地模拟种子，介入率无统计意义。
-- **评测没有"本次 vs 上次"的基线对比**：报告覆盖写且不入库，结论目前不回流到任何决策点——这是"改进闭环"缺失的如实记录。
+- **评测基线**：`docs/acceptance/eval-baseline-v1.md` / `v2.md` 留了 26 例多轮基线与 Wilson 区间；单次报告仍覆盖写、不入库，结论未回流到决策点——这是"改进闭环"缺失的如实记录。
 - 更完整的边界与残留项见各 ADR 的「后果 / 残留」节与 `delivery/` 文档；所有密钥经环境变量注入，`.env` / `logs/` / `data/` / `evals/reports/` 不入库。
 
 ---
@@ -486,5 +529,5 @@ GitHub Actions CI（Python 3.12）依次执行：pytest → ruff → 防源码�
 <div align="center">
 <sub><b>Python 3.12 · FastAPI · LangGraph · Redis · pgvector · Elasticsearch · uv</b></sub>
 <br>
-<sub>本 README 的每个定量声明都可用上文命令在本地复现（bench 曲线那条真花钱） · 架构决策归档于 docs/adr/（31 份）</sub>
+<sub>本 README 的每个定量声明都可用上文命令在本地复现（bench 曲线那条真花钱） · 架构决策归档于 docs/adr/（42 份）</sub>
 </div>
