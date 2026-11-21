@@ -92,3 +92,33 @@ V3  $env:PYTHONPATH='.'; .venv/Scripts/python.exe -m ruff check .
 - 对 `APPROVAL_REJECTED` / `PUSH_FAILED` / CI/MERGE 类失败码放行。
 - 动 `cmd_delivery_run`、`flow.py`、`models.py`、run store、审计语义。
 - 触碰 Allowed paths 之外的模块。
+
+## 8. 签收记录（2026-11-21）
+
+**所有者书面签收**：用户消息「签收」（2026-11-21，指 PR #121）。
+
+**合并**：PR #121 → `main`，merge commit
+`0f2ccde019ca6ccd8a953cc4c9120648c86ce25e`，2026-11-21T08:47:59Z。
+
+**验收证据**
+
+- 实现 HEAD：`667595eaa527097003314fe6f02dac01af3f9e6e`；`git status --short` 空。
+- V1 `29 passed`；V2 全量分块 `2280 passed / 0 failed`（首跑 1 个 error 经三层
+  复跑证明为环境性 WinError 10055 socket 缓冲耗尽，非代码归因）；
+  V3 `All checks passed!`。
+- 独立 Verifier 自写探针 41 checks / 0 failed；R1–R7 全 PASS；无 P0/P1。
+- `cmd_delivery_run` diff 0 行；`flow.py` / `models.py` / run store 零改动。
+- GitHub CI：`test` / `integration` 绿，`docker` skipped。
+
+**人审四问**
+
+1. **是否在冻结契约范围内？** 是。6 个文件全部在 Allowed paths；
+   `cmd_delivery_run` / `flow.py` / `models.py` / run store / 审计语义零改动。
+2. **证据是否绑定 HEAD 且可复跑？** 是。V1–V3、探针、循环导入探针由
+   独立 Verifier 亲跑，未采信实现方自评。
+3. **是否有未声明行为变化？** 无。新分支只命中 `FAILED` / `BUDGET_EXHAUSTED`
+   + 白名单失败码；门禁重入与 reconcile 分支及其余 refusal 逐字不变；
+   新单照常过 `PushApprovalPort`。
+4. **残余是否如实记录并接受？** 是。4 条 P2（delivery→cli 反向依赖、过期锁
+   静默抢占无警告、`flow_factory` 测试注入缝、CLI 打印无 CLI 层测试）
+   全部记录在验收报告，不阻塞。
