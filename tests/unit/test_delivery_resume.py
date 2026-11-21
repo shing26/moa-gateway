@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import subprocess
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from apps.code_review_pipeline.delivery.models import (
     DeliveryRunState,
     DeliveryUsage,
     FailureCode,
+    FailureInfo,
     PushOutcome,
 )
 from apps.code_review_pipeline.delivery.resume import (
@@ -316,8 +318,6 @@ def test_gate_reentry_state_is_only_ready_for_push_approval(
         DeliveryRunState.MERGED,
         DeliveryRunState.REJECTED,
         DeliveryRunState.NEEDS_HUMAN,
-        DeliveryRunState.BUDGET_EXHAUSTED,
-        DeliveryRunState.FAILED,
     ):
         run = _run(state)
         asyncio.run(_save(store, run))
@@ -341,6 +341,151 @@ def test_gate_reentry_state_is_only_ready_for_push_approval(
             tmp_path / "runs" / "run-1.json"
         ).read_text(encoding="utf-8") == before
     assert adapters == []
+
+
+# ---------------------------------------------------------------------------
+# 失败续跑分派（retry-failed-run）
+# ---------------------------------------------------------------------------
+
+
+def _retry_settings(tmp_path: Path) -> SimpleNamespace:
+    settings = _settings(tmp_path)
+    settings.delivery_repo_profile_dir = str(tmp_path / "profiles")
+    settings.change_agent_verify_command = "python -m pytest -q"
+    settings.change_agent_base_branch = "main"
+    settings.change_agent_model = "test-model"
+    settings.delivery_max_steps = 40
+    settings.delivery_max_tokens = 400_000
+    settings.change_agent_verify_timeout_s = 900.0
+    return settings
+
+
+def _failed_run(code: FailureCode) -> DeliveryRun:
+    run = _run(DeliveryRunState.FAILED)
+    return replace(run, failure=FailureInfo(code, "boom"))
+
+
+class _RetryFlow:
+    def __init__(self, run: DeliveryRun) -> None:
+        self.new_run = run
+        self.requests: list[DeliveryRequest] = []
+
+    async def run(self, request: DeliveryRequest) -> DeliveryRun:
+        self.requests.append(request)
+        return self.new_run
+
+
+def test_resume_dispatches_failed_run_to_retry(tmp_path: Path) -> None:
+    parent = _failed_run(FailureCode.VERIFY_FAILED)
+    store = DeliveryRunStore(tmp_path / "runs")
+    asyncio.run(_save(store, parent))
+    flow = _RetryFlow(
+        replace(
+            parent,
+            run_id="run-2",
+            trace_id="delivery-999",
+            state=DeliveryRunState.WAITING_CI,
+            failure=None,
+        )
+    )
+
+    def factory(**kwargs):
+        return flow
+
+    outcome = asyncio.run(
+        resume_run(
+            "run-1",
+            store=store,
+            github=_FakeGithub(),
+            merge_store=_FakeMergeStore(),
+            settings=_retry_settings(tmp_path),
+            approval_port=_FakeApprovalPort(None),
+            flow_factory=factory,
+        )
+    )
+
+    assert outcome.exit_code == 0
+    assert outcome.parent_run_id == "run-1"
+    assert outcome.refused is False
+    request = flow.requests[0]
+    assert request.source_ref == "retry:run-1"
+    assert request.trace_id != parent.request.trace_id
+    assert request.repo == parent.request.repo
+    assert request.branch == parent.request.branch
+    assert request.goal == parent.request.goal
+    assert request.title == parent.request.title
+    # 父记录一个字节不改。
+    assert _record_state(tmp_path) == "failed"
+    assert json.loads(
+        (tmp_path / "runs" / "run-1.json").read_text(encoding="utf-8")
+    )["request"]["trace_id"] == "trace-1"
+
+
+def test_resume_dispatches_budget_exhausted_run_to_retry(
+    tmp_path: Path,
+) -> None:
+    parent = _failed_run(FailureCode.INFRA_ERROR)
+    parent = replace(parent, state=DeliveryRunState.BUDGET_EXHAUSTED)
+    store = DeliveryRunStore(tmp_path / "runs")
+    asyncio.run(_save(store, parent))
+    flow = _RetryFlow(
+        replace(
+            parent,
+            run_id="run-2",
+            state=DeliveryRunState.WAITING_CI,
+            failure=None,
+        )
+    )
+
+    def factory(**kwargs):
+        return flow
+
+    outcome = asyncio.run(
+        resume_run(
+            "run-1",
+            store=store,
+            github=_FakeGithub(),
+            merge_store=_FakeMergeStore(),
+            settings=_retry_settings(tmp_path),
+            approval_port=_FakeApprovalPort(None),
+            flow_factory=factory,
+        )
+    )
+
+    assert outcome.exit_code == 0
+    assert outcome.parent_run_id == "run-1"
+    assert flow.requests[0].source_ref == "retry:run-1"
+
+
+def test_resume_refuses_push_failed_without_building_flow(
+    tmp_path: Path,
+) -> None:
+    parent = _failed_run(FailureCode.PUSH_FAILED)
+    store = DeliveryRunStore(tmp_path / "runs")
+    asyncio.run(_save(store, parent))
+    before = (tmp_path / "runs" / "run-1.json").read_text(encoding="utf-8")
+
+    def forbidden_factory(**kwargs):
+        raise AssertionError("flow must not be built for refused retries")
+
+    outcome = asyncio.run(
+        resume_run(
+            "run-1",
+            store=store,
+            github=_FakeGithub(),
+            merge_store=_FakeMergeStore(),
+            settings=_retry_settings(tmp_path),
+            approval_port=_FakeApprovalPort(None),
+            flow_factory=forbidden_factory,
+        )
+    )
+
+    assert outcome.exit_code == 2
+    assert outcome.refused is True
+    assert "PR may already exist" in outcome.reason
+    assert (
+        tmp_path / "runs" / "run-1.json"
+    ).read_text(encoding="utf-8") == before
 
 
 # ---------------------------------------------------------------------------
