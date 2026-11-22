@@ -323,6 +323,7 @@ class DeliveryFlow:
 
             retryable = preparation.status in {
                 PreparationStatus.VERIFY_FAILED,
+                PreparationStatus.GATE_FAILED,
             }
             if retryable and revisions < self._policy.max_revisions:
                 revisions += 1
@@ -334,13 +335,15 @@ class DeliveryFlow:
                 )
                 continue
 
-            code = (
-                FailureCode.NO_CHANGES
-                if preparation.status is PreparationStatus.NO_CHANGES
-                else FailureCode.VERIFY_FAILED
-                if preparation.status is PreparationStatus.VERIFY_FAILED
-                else FailureCode.INFRA_ERROR
-            )
+            if preparation.status is PreparationStatus.NO_CHANGES:
+                code = FailureCode.NO_CHANGES
+            elif preparation.status in {
+                PreparationStatus.VERIFY_FAILED,
+                PreparationStatus.GATE_FAILED,
+            }:
+                code = FailureCode.VERIFY_FAILED
+            else:
+                code = FailureCode.INFRA_ERROR
             return await self._finish(
                 run,
                 DeliveryRunState.NEEDS_HUMAN,
