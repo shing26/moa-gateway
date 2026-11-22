@@ -123,13 +123,21 @@ async def test_implementer_passes_its_command_timeout_to_the_tools(
     captured: dict[str, object] = {}
     real_build = agent_module.build_toolset
 
-    def spy(*, workspace, verify_command, limits=None, names=None):
+    def spy(
+        *,
+        workspace,
+        verify_command,
+        limits=None,
+        names=None,
+        require_test_selector=False,
+    ):
         captured["limits"] = limits
         return real_build(
             workspace=workspace,
             verify_command=verify_command,
             limits=limits,
             names=names,
+            require_test_selector=require_test_selector,
         )
 
     monkeypatch.setattr(agent_module, "build_toolset", spy)
@@ -150,6 +158,35 @@ async def test_implementer_passes_its_command_timeout_to_the_tools(
     limits = captured["limits"]
     assert limits is not None
     assert limits.command_timeout_s == expected
+
+
+@pytest.mark.asyncio
+async def test_implementer_requires_a_test_selector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    real_build = agent_module.build_toolset
+
+    def spy(**kwargs):
+        captured.update(kwargs)
+        return real_build(**kwargs)
+
+    monkeypatch.setattr(agent_module, "build_toolset", spy)
+    adapter = ProductionImplementer(
+        llm=FakeImplementerLLM(),
+        verify_command=("python", "-m", "pytest", "-q"),
+    )
+
+    await adapter.run(
+        workspace=tmp_path,
+        goal="fix",
+        feedback="",
+        max_steps=5,
+        max_tokens=1000,
+    )
+
+    assert captured["require_test_selector"] is True
 
 
 @pytest.mark.asyncio

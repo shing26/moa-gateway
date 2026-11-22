@@ -391,6 +391,101 @@ async def test_run_tests_appends_selector_to_the_fixed_command(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_run_tests_rejects_empty_selector_when_required(tmp_path: Path) -> None:
+    probe = tmp_path / "ran.txt"
+    command = (
+        sys.executable,
+        "-c",
+        f"open({str(probe)!r}, 'w').write('ran')",
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=command,
+        names=("run_tests",),
+        require_test_selector=True,
+    )
+
+    outcome = await call_bench_tool(tools.get("run_tests"), {}, workspace=tmp_path)
+
+    assert outcome.kind == "failed"
+    assert "selector 必填" in outcome.detail
+    assert "tests/unit/test_x.py" in outcome.detail
+    assert "::test_name" in outcome.detail
+    # 守卫必须发生在执行之前：探针命令一次都不能跑。
+    assert not probe.exists()
+
+
+@pytest.mark.asyncio
+async def test_run_tests_rejects_blank_selector_when_required(tmp_path: Path) -> None:
+    probe = tmp_path / "ran.txt"
+    command = (
+        sys.executable,
+        "-c",
+        f"open({str(probe)!r}, 'w').write('ran')",
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=command,
+        names=("run_tests",),
+        require_test_selector=True,
+    )
+
+    outcome = await call_bench_tool(
+        tools.get("run_tests"), {"selector": "   "}, workspace=tmp_path
+    )
+
+    assert outcome.kind == "failed"
+    assert "selector 必填" in outcome.detail
+    assert not probe.exists()
+
+
+@pytest.mark.asyncio
+async def test_run_tests_runs_with_selector_when_required(tmp_path: Path) -> None:
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=PRINT_ARGV,
+        names=("run_tests",),
+        require_test_selector=True,
+    )
+
+    outcome = await call_bench_tool(
+        tools.get("run_tests"),
+        {"selector": "tests/unit/test_x.py"},
+        workspace=tmp_path,
+    )
+
+    assert outcome.kind == "ok"
+    assert "argv: ['tests/unit/test_x.py']" in outcome.detail
+
+
+@pytest.mark.asyncio
+async def test_run_tests_keeps_empty_selector_allowed_by_default(
+    tmp_path: Path,
+) -> None:
+    tools = make_tools(tmp_path)
+
+    outcome = await call_bench_tool(tools.get("run_tests"), {}, workspace=tmp_path)
+
+    assert outcome.kind == "ok"
+    assert "argv: []" in outcome.detail
+
+
+def test_run_tests_selector_description_marks_it_required(tmp_path: Path) -> None:
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=PRINT_ARGV,
+        names=("run_tests",),
+        require_test_selector=True,
+    )
+
+    tool = tools.get("run_tests")
+    schema_description = tool.parameters["properties"]["selector"]["description"]
+
+    assert "必填" in schema_description
+    assert "必填" in tool.description
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "selector",
     [

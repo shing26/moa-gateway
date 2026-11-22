@@ -19,7 +19,8 @@ Orient before editing: list the relevant directory, then read only the files you
 Read before editing. Prefer replace_in_file for a targeted edit; use write_file for new
 files or full rewrites. When the goal is complete, stop calling tools and summarize.
 Before finishing, call git_diff to review your own change. Do not spend the whole budget
-exploring: write the change, then run the verification.
+exploring: write the change, then run the verification. run_tests always requires a
+selector (a test file path or ::test name); never call it without one.
 """
 
 
@@ -64,6 +65,7 @@ class ProductionImplementer:
             verify_command=self._verify_command,
             limits=ToolLimits(command_timeout_s=self._command_timeout_s),
             names=tuple(names),
+            require_test_selector=True,
         )
         user_parts = [
             f"Goal:\n{goal}",
