@@ -862,7 +862,7 @@ def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
 
 
 def cmd_delivery_resume(args: argparse.Namespace) -> int:
-    """重入搁浅记录：门禁重入或合并对齐，绝不重跑实现者。"""
+    """重入搁浅记录：门禁重入/合并对齐不重跑实现者；FAILED/BUDGET_EXHAUSTED 经 retry 重跑。"""
     from app.config import settings
     from apps.code_review_pipeline.delivery.resume import resume_run
     from apps.code_review_pipeline.delivery.retry import RetryOutcome

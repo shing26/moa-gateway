@@ -111,7 +111,12 @@ def _profile_root(settings: Any) -> Path:
 
 
 def _exit_code_for(run: DeliveryRun) -> int:
-    return 0 if run.state.value in {"waiting_ci", "ready_for_push_approval"} else 1
+    return (
+        0
+        if run.state
+        in {DeliveryRunState.WAITING_CI, DeliveryRunState.READY_FOR_PUSH_APPROVAL}
+        else 1
+    )
 
 
 async def retry_failed_run(
@@ -159,6 +164,12 @@ async def retry_failed_run(
     verify_command = resolved.verify_command
     if not verify_command:
         return _refused(run_id, "CHANGE_AGENT_VERIFY_COMMAND 未配置")
+    if settings.delivery_topology != "single":
+        return _refused(
+            run_id,
+            "delivery retry 当前只支持 single topology；verified topology "
+            "属于另行规划的 S1 实验，不能静默降级。",
+        )
     if not settings.change_agent_model.strip():
         return _refused(run_id, "CHANGE_AGENT_MODEL 未配置")
 
@@ -171,7 +182,7 @@ async def retry_failed_run(
     )
     policy = DeliveryPolicy(
         verify_command=verify_command,
-        topology=parent.topology,
+        topology=settings.delivery_topology,
         max_steps=settings.delivery_max_steps,
         max_tokens=settings.delivery_max_tokens,
     )

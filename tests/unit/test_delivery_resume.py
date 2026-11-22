@@ -340,6 +340,49 @@ def test_gate_reentry_state_is_only_ready_for_push_approval(
         assert (
             tmp_path / "runs" / "run-1.json"
         ).read_text(encoding="utf-8") == before
+
+    # FAILED / BUDGET_EXHAUSTED 已从 refusal 面移出：它们命中可续跑失败码时
+    # 分派到 retry_failed_run（新开一单、重跑实现者），放回上面的循环会与新语义
+    # 冲突。这里显式断言确实分派到 retry，避免这两态再次从覆盖中消失。
+    for state, code in (
+        (DeliveryRunState.FAILED, FailureCode.VERIFY_FAILED),
+        (DeliveryRunState.BUDGET_EXHAUSTED, FailureCode.INFRA_ERROR),
+    ):
+        parent = replace(_run(state), failure=FailureInfo(code, "boom"))
+        asyncio.run(_save(store, parent))
+        before = (tmp_path / "runs" / "run-1.json").read_text(encoding="utf-8")
+        flow = _RetryFlow(
+            replace(
+                parent,
+                run_id="run-2",
+                state=DeliveryRunState.WAITING_CI,
+                failure=None,
+            )
+        )
+
+        def factory(flow=flow, **kwargs):
+            return flow
+
+        outcome = asyncio.run(
+            resume_run(
+                "run-1",
+                store=store,
+                github=_FakeGithub(),
+                merge_store=_FakeMergeStore(),
+                settings=_retry_settings(tmp_path),
+                approval_port=_FakeApprovalPort(None),
+                flow_factory=factory,
+            )
+        )
+
+        assert outcome.exit_code == 0, state
+        assert outcome.refused is False
+        assert len(flow.requests) == 1
+        assert flow.requests[0].source_ref == "retry:run-1"
+        # 分派到 retry 也不改写父记录。
+        assert (
+            tmp_path / "runs" / "run-1.json"
+        ).read_text(encoding="utf-8") == before
     assert adapters == []
 
 
@@ -354,6 +397,7 @@ def _retry_settings(tmp_path: Path) -> SimpleNamespace:
     settings.change_agent_verify_command = "python -m pytest -q"
     settings.change_agent_base_branch = "main"
     settings.change_agent_model = "test-model"
+    settings.delivery_topology = "single"
     settings.delivery_max_steps = 40
     settings.delivery_max_tokens = 400_000
     settings.change_agent_verify_timeout_s = 900.0
@@ -483,6 +527,40 @@ def test_resume_refuses_push_failed_without_building_flow(
     assert outcome.exit_code == 2
     assert outcome.refused is True
     assert "PR may already exist" in outcome.reason
+    assert (
+        tmp_path / "runs" / "run-1.json"
+    ).read_text(encoding="utf-8") == before
+
+
+def test_resume_refuses_non_single_topology_without_building_flow(
+    tmp_path: Path,
+) -> None:
+    parent = _failed_run(FailureCode.VERIFY_FAILED)
+    store = DeliveryRunStore(tmp_path / "runs")
+    asyncio.run(_save(store, parent))
+    before = (tmp_path / "runs" / "run-1.json").read_text(encoding="utf-8")
+    settings = _retry_settings(tmp_path)
+    settings.delivery_topology = "verified"
+
+    def forbidden_factory(**kwargs):
+        raise AssertionError("flow must not be built for refused retries")
+
+    outcome = asyncio.run(
+        resume_run(
+            "run-1",
+            store=store,
+            github=_FakeGithub(),
+            merge_store=_FakeMergeStore(),
+            settings=settings,
+            approval_port=_FakeApprovalPort(None),
+            flow_factory=forbidden_factory,
+        )
+    )
+
+    assert outcome.exit_code == 2
+    assert outcome.refused is True
+    assert "single topology" in outcome.reason
+    assert not (tmp_path / "runs" / "run-2.json").exists()
     assert (
         tmp_path / "runs" / "run-1.json"
     ).read_text(encoding="utf-8") == before
