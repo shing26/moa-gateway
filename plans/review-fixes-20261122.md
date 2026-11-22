@@ -108,3 +108,35 @@ diff 内，但与本单 F3 是同一个 smell。
 记录理由：全仓清零不是本单目标；用一个已冻结的黄金路径去换一个 smell 清零，
 代价是确定性回归，不划算。`app/cli.py:668` 的字符串集合作为已知 smell 保留，
 若将来要清，应先让测试替身可哈希或改用真实状态对象，另立一单。
+
+## 9. 签收记录（2026-11-22）
+
+**所有者书面签收**：用户消息「签收」（2026-11-22，指 PR #124）。
+
+**合并**：PR #124 → `main`，merge commit
+`60cab6bb564209dab1f647a88bd07f3fadd123fa`，2026-11-22T05:16:08Z。
+
+**验收证据**
+
+- 实现 HEAD：`3a7d4cc844ad4f8068a1b85283b53502349db487`
+  （`b23274a` 契约 → `64cc8e8` 实现 → `cb2415b` 修正案 1 → `38f9b5d` 修正案 2
+  → `d759fc6` 枚举化 → `3c36a0f` 修正案 3 → `3a7d4cc` 回滚）；`git status --short` 空。
+- `test_delivery_cli.py` 34 passed；`test_delivery_resume.py` +
+  `test_delivery_retry.py` 30 passed；`tests/unit` 全量 `2281 passed / 6 skipped`；
+  ruff `All checks passed!`（均为独立 Verifier 亲跑）。
+- F1–F6 按修正案 3 口径全 PASS；无 P0/P1。
+- `app/cli.py` 相对 `3e73207` 仅 `cmd_delivery_resume` docstring 一行；
+  `cmd_delivery_run` 逐字一致。`wal.py`、retry 白名单/拒绝面/provenance/审批门零改动。
+- GitHub CI：`test` / `integration` 绿，`docker` skipped。
+
+**人审四问**
+
+1. **是否在冻结契约范围内？** 是。8 个文件全部在 Allowed paths（含修正案 1 放开的
+   `tests/unit/test_delivery_retry.py`，仅 fixture 字段）。
+2. **证据是否绑定 HEAD 且可复跑？** 是。四组命令由独立 Verifier 重跑；
+   中途两次纠偏（修正案 2 枚举化引入回归、修正案 3 回滚）均有 Verifier 证据留痕。
+3. **是否有未声明行为变化？** 无。语义除 F3/F4 外零变化；F3 最终口径限定
+   `retry.py`（修正案 3）；`cmd_delivery_run` 行为逐字一致。
+4. **残余是否如实记录并接受？** 是。`app/cli.py:668` 的字符串集合作为已知 smell
+   保留并记录；64KB 尾窗限制写入 audit 契约 §7；两条原始 review 发现均闭环
+   （F2 覆盖补回、F1 文档纠偏）。
