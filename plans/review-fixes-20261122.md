@@ -91,3 +91,20 @@ diff 内，但与本单 F3 是同一个 smell。
 行为必须逐字等价（`waiting_ci` / `ready_for_push_approval` → 0，其余 → 1）。
 `cmd_delivery_run` 其余行保持零改动。F3 的验收口径统一为：`app/` 与 `apps/`
 运行代码中不再有 `state.value in {` 字符串集合。
+
+## 8. 修正案 3（2026-11-22，主会话冻结）
+
+**触发**：修正案 2 的 `app/cli.py:669` 枚举化被 Verifier 判定回归——
+`test_cmd_delivery_run_wires_delivery_runtime` 用 `SimpleNamespace(value="waiting_ci")`
+做替身，`SimpleNamespace` 不可哈希，`run.state in {枚举}` 抛
+`TypeError: unhashable type`，V2 确定性失败。
+
+**裁决**：**回滚** `cmd_delivery_run` 的退出码表达式与新增 import，恢复原文
+`run.state.value in {"waiting_ci", "ready_for_push_approval"}`。F3 的验收口径
+回到契约原文：**仅 `retry.py`**（`_exit_code_for` 用 `DeliveryRunState` 成员，
+`retry` 的 `run` 是真实 `DeliveryRun`，无替身问题）。`app/cli.py` 恢复为
+`cmd_delivery_resume` docstring 单处改动。
+
+记录理由：全仓清零不是本单目标；用一个已冻结的黄金路径去换一个 smell 清零，
+代价是确定性回归，不划算。`app/cli.py:668` 的字符串集合作为已知 smell 保留，
+若将来要清，应先让测试替身可哈希或改用真实状态对象，另立一单。
