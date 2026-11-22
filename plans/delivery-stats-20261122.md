@@ -66,3 +66,18 @@ V3  $env:PYTHONPATH='.'; .venv/Scripts/python.exe -m ruff check .
 - 把解析失败静默跳过（必须计入 `unreadable`）。
 - 把 `null` 比率写成 `0`（0% 与"没有数据"必须可区分）。
 - 触碰 Allowed paths 之外的模块。
+
+## 6. 签收记录（2026-11-23）
+
+**所有者书面签收**：用户消息「签收 #126 #127 #128 #129」（2026-11-23）。
+
+**合并**：PR #126 → `main`，merge commit
+`d82a3f0128d6ca651bbd9335e89991e2faa56ce1`。
+
+**验收证据**：独立 Verifier `ACCEPT_WITH_NITS`。V1 `8 passed`；V2
+`2289 passed, 6 skipped`；V3 `All checks passed!`；真实 192 条记录冒烟
+`runs=192 delivered=9 failed=122 in_flight=61 completion=6.87%`，交叉校验一致。
+GitHub CI `test` / `integration` 绿，`docker` skipped。
+
+**残余（非阻塞，如实记录）**：T4 单测只覆盖 naive 时间字符串；`tokens` 总和含
+in-flight、均值分母为终态数（契约字面口径）；p50/p90 为 nearest-rank。
