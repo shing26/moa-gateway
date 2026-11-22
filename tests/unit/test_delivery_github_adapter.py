@@ -125,6 +125,34 @@ async def test_preparer_maps_verified_change_into_port_result(tmp_path: Path) ->
     assert pipeline.prepare_calls == 1
 
 
+class FakeGateFailedPipeline(FakePipeline):
+    async def prepare_bundle(self, request):
+        self.prepare_calls += 1
+        return ChangeResult(
+            status=ChangeStatus.GATE_FAILED,
+            bundle=_bundle(),
+            message="门禁未通过: tests/unit/x.py:F401 unused import",
+        )
+
+
+@pytest.mark.asyncio
+async def test_preparer_maps_gate_failure_into_port_result(tmp_path: Path) -> None:
+    pipeline = FakeGateFailedPipeline(tmp_path)
+    adapter = GitHubChangeAdapter(pipeline=pipeline, merge_store=MergeStore())
+
+    result = await adapter.prepare(
+        workspace=tmp_path,
+        request=_request(),
+        policy=DeliveryPolicy(verify_command=("pytest",)),
+    )
+
+    assert result.status is PreparationStatus.GATE_FAILED
+    assert result.bundle is not None
+    assert result.bundle.bundle_hash == _bundle().bundle_hash
+    assert result.verification is None
+    assert "F401" in result.message
+
+
 @pytest.mark.asyncio
 async def test_preparer_uses_bundle_full_output_hash(tmp_path: Path) -> None:
     full_hash = "f" * 64
