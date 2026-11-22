@@ -55,3 +55,17 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 - 修改 `RESUMABLE_FAILURE_CODES` / `RETRY_STATES`（本单不改续跑白名单）。
 - 弱化或删除既有断言；改变 `VERIFY_FAILED` 的终态。
 - 触碰 Allowed paths 之外的模块。
+
+## 6. 签收记录（2026-11-23）
+
+**所有者书面签收**：用户消息「签收 #126 #127 #128 #129」（2026-11-23）。
+
+**合并**：PR #127 → `main`，merge commit
+`3d1ecbe9f10c68e41c86f71101bfb5366b22314a`。
+
+**验收证据**：独立 Verifier `ACCEPT`。V1 `37 passed`；V2
+`2284 passed, 6 skipped`；V3 `All checks passed!`；T1–T5 全 PASS；
+`RESUMABLE_FAILURE_CODES` / `RETRY_STATES` 零改动。GitHub CI 绿。
+
+**事故来源**：`dlv-8c25c14fcd264867852cf4420cf364e3` 被
+`tests/unit/test_delivery_retry.py:F401` 拦下后归为 `needs_human + infra_error`。

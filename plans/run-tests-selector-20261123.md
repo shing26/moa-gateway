@@ -54,3 +54,17 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 - 通过 schema 静默把空 selector 变成别的默认路径（必须明确拒绝）。
 - 影响 bench / 非交付调用方的既有行为。
 - 触碰 Allowed paths 之外的模块。
+
+## 6. 签收记录（2026-11-23）
+
+**所有者书面签收**：用户消息「签收 #126 #127 #128 #129」（2026-11-23）。
+
+**合并**：PR #129 → `main`，merge commit
+`1b2b71fc71f3dc07c022db3d1b2fdc95fe2ca8e3`。
+
+**验收证据**：独立 Verifier `ACCEPT`。V1 `76 passed`；V2
+`2287 passed, 6 skipped`；V3 `All checks passed!`；U1–U6 全 PASS；
+空/空白 selector 在创建验证副本与执行命令之前被拒绝（探针文件不存在）。
+GitHub CI 绿。
+
+**残余（非阻塞）**：系统提示的必填语义只有源码证据，暂无自动化断言。

@@ -58,3 +58,18 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 - 让门禁使用快车道命令；或让快车道影响 `DeliveryPolicy`。
 - 在 `fast_verify_command` 损坏时静默回退。
 - 触碰 Allowed paths 之外的模块。
+
+## 6. 签收记录（2026-11-23）
+
+**所有者书面签收**：用户消息「签收 #126 #127 #128 #129」（2026-11-23）。
+
+**合并**：PR #128 → `main`，merge commit
+`f8f215e2b49fae42a63bf8574730b7e8f8778a58`。
+
+**验收证据**：独立 Verifier `ACCEPT_WITH_NITS`。V1 `88 passed`；V2
+`2285 passed, 6 skipped`；V3 `All checks passed!`；T1–T6 全 PASS；
+`DeliveryPolicy` 仍收全量命令，只有 `ProductionImplementer` 用快车道。
+GitHub CI 绿。
+
+**残余（非阻塞）**：空 selector 时 `python -m pytest -q` 会收集 `tests/` 全部
+用例（已由 PR #129 的 selector 必填守卫闭合）；T2/T3 接线当时只有静态行号证据。
