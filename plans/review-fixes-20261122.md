@@ -80,3 +80,14 @@ Allowed paths 内。
 **裁决**：允许改动 `tests/unit/test_delivery_retry.py`，**仅限**为该 fixture 补
 `delivery_topology` 字段（及 F4 新增用例如落在该文件）。不得改该文件既有断言。
 其余条款不变。
+
+## 7. 修正案 2（2026-11-22，主会话冻结）
+
+**触发**：Verifier 按「全仓 `state.value in {…}` 清零」口径判定不可合并，剩余命中
+`app/cli.py:668`（`cmd_delivery_run` 的退出码表达式）。该行是既有代码、不在本次
+diff 内，但与本单 F3 是同一个 smell。
+
+**裁决**：允许 `app/cli.py:668` 把字符串集合改为 `DeliveryRunState` 成员集合，
+行为必须逐字等价（`waiting_ci` / `ready_for_push_approval` → 0，其余 → 1）。
+`cmd_delivery_run` 其余行保持零改动。F3 的验收口径统一为：`app/` 与 `apps/`
+运行代码中不再有 `state.value in {` 字符串集合。
