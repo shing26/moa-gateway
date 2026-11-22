@@ -122,3 +122,18 @@ V3  $env:PYTHONPATH='.'; .venv/Scripts/python.exe -m ruff check .
 4. **残余是否如实记录并接受？** 是。4 条 P2（delivery→cli 反向依赖、过期锁
    静默抢占无警告、`flow_factory` 测试注入缝、CLI 打印无 CLI 层测试）
    全部记录在验收报告，不阻塞。
+
+## 9. 修正案 1（2026-11-22）
+
+review（`caebef5...3e73207`）后补记三条实现事实，不改 §4/§5 既有验收条款：
+
+- **`flow_factory` 测试注入缝**：`retry_failed_run(..., flow_factory=...)` 允许
+  测试传入以 `request` / `policy` / `store` 关键字构造的 fake flow，并
+  `await flow.run(request)`；生产路径 `flow_factory is None` 时仍走
+  `_run_real_flow` 的真实执行栈。
+- **`CHANGE_AGENT_MODEL` 为空 → exit 2**：与 `delivery run` 一致，续跑前检查
+  模型配置；空值拒绝且不建新 run。
+- **topology 改 settings 来源**：`DeliveryPolicy.topology` 取
+  `settings.delivery_topology`，与 `delivery run` 同源；非 `single` 时
+  fail-closed（exit 2，不建新 run）。原实现取 `parent.topology`，会继承父记录
+  的历史 topology，既可能绕过当前配置只支持 single 的限制，也无法反映配置变更。

@@ -3,8 +3,10 @@
 推送门禁长在 ``delivery run`` 的进程里；进程死了（会话重启、终端关闭、崩溃），
 ``ready_for_push_approval`` 的记录就搁浅了——管线没有回去的路。这里把恢复路径
 收编成一等命令，只做三件事：按记录核对冻结证据、把人拉回同一个门禁前、走同一条
-已审计的 publish。它绝不重跑实现者、绝不从工作区反推变更包——变更包只能来自
-记录，工作区重新落地只是为了通过 publisher 自己的 ``_assert_bundle_current``。
+已审计的 publish。门禁重入与合并对齐只复用记录，不重跑实现者、也不从工作区反推
+变更包；``FAILED`` / ``BUDGET_EXHAUSTED`` 命中可续跑失败码时另行分派给
+``retry_failed_run``，由它新开一单并重跑实现者。变更包始终只能来自记录，工作区
+重新落地只是为了通过 publisher 自己的 ``_assert_bundle_current``。
 """
 
 from __future__ import annotations

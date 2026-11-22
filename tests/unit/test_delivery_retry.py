@@ -73,6 +73,7 @@ def _settings(tmp_path: Path) -> SimpleNamespace:
         change_agent_verify_command="python -m pytest -q",
         change_agent_base_branch="main",
         change_agent_model="test-model",
+        delivery_topology="single",
         delivery_max_steps=40,
         delivery_max_tokens=400_000,
         change_agent_verify_timeout_s=900.0,
