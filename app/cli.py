@@ -492,7 +492,6 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
     from apps.code_review_pipeline.delivery.models import (
         DeliveryPolicy,
         DeliveryRequest,
-        DeliveryRunState,
     )
     from apps.code_review_pipeline.delivery.repo_profile import (
         RepoProfileError,
@@ -666,7 +665,7 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
             print(f"pr        : {run.push.pull_request.url}")
             print(f"head_sha  : {run.push.pull_request.head_sha}")
         print(f"record    : {settings.delivery_run_record_dir}/{run.run_id}.json")
-        return 0 if run.state in {DeliveryRunState.WAITING_CI, DeliveryRunState.READY_FOR_PUSH_APPROVAL} else 1
+        return 0 if run.state.value in {"waiting_ci", "ready_for_push_approval"} else 1
     finally:
         lock.release()
 
