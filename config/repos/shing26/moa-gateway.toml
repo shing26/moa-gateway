@@ -6,4 +6,7 @@
 # 的 build_verify_env 注释）。`python` 由 harness 解析成**启动 agent 的**venv 解释器；
 # 写相对路径或本机绝对路径都会在任何一次真实交付里直接失败。
 verify_command = "python -m pytest tests/unit -q"
+# 实现器迭代用的窄命令：run_tests(selector=...) 会追加到它后面。
+# 确定性门禁仍用上面的全量 verify_command，两者不能混用。
+fast_verify_command = "python -m pytest -q"
 base_branch = "main"

@@ -544,6 +544,10 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
         f"verify command: {' '.join(verify_command)} "
         f"(source: {resolved.verify_source})"
     )
+    print(
+        f"fast verify  : {' '.join(resolved.fast_verify_command)} "
+        f"(source: {resolved.fast_verify_source})"
+    )
     if not settings.github_token:
         print("GITHUB_TOKEN 未配置", file=sys.stderr)
         return 2
@@ -638,7 +642,7 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
                         policy=policy,
                         implementer=ProductionImplementer(
                             llm=llm,
-                            verify_command=verify_command,
+                            verify_command=resolved.fast_verify_command,
                             command_timeout_s=settings.change_agent_verify_timeout_s,
                         ),
                         preparer=adapter,
@@ -690,6 +694,42 @@ def cmd_delivery_view(args: argparse.Namespace) -> int:
 
     current = asyncio.run(read())
     print(json.dumps(current.to_dict(), ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_delivery_stats(args: argparse.Namespace) -> int:
+    """Summarize persisted delivery runs without mutating the run store."""
+    from datetime import date
+
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.stats import (
+        collect_stats,
+        format_stats,
+    )
+
+    raw_since = getattr(args, "since", None)
+    since = None
+    if raw_since:
+        try:
+            since = date.fromisoformat(raw_since)
+        except ValueError:
+            print(
+                f"--since 需要 YYYY-MM-DD 格式: {raw_since!r}",
+                file=sys.stderr,
+            )
+            return 2
+
+    stats = collect_stats(settings.delivery_run_record_dir, since=since)
+    if getattr(args, "json", False):
+        print(json.dumps(stats, ensure_ascii=False, indent=2))
+    else:
+        print(
+            format_stats(
+                stats,
+                directory=settings.delivery_run_record_dir,
+                since=since,
+            )
+        )
     return 0
 
 
@@ -1009,6 +1049,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     delivery_view.add_argument("--run-id", required=True)
     delivery_view.set_defaults(func=cmd_delivery_view)
+
+    delivery_stats = delivery_sub.add_parser(
+        "stats",
+        help="只读聚合交付记录：成功率、token、时长、失败码、续跑",
+    )
+    delivery_stats.add_argument("--json", action="store_true")
+    delivery_stats.add_argument("--since", default=None, metavar="YYYY-MM-DD")
+    delivery_stats.set_defaults(func=cmd_delivery_stats)
 
     delivery_resume = delivery_sub.add_parser(
         "resume",

@@ -38,6 +38,7 @@ class RepoProfile:
     """一份解析成功的仓库档案。"""
 
     verify_command: tuple[str, ...]
+    fast_verify_command: tuple[str, ...]
     base_branch: str
 
 
@@ -50,6 +51,7 @@ class ResolvedDeliveryConfig:
     """
 
     verify_command: tuple[str, ...]
+    fast_verify_command: tuple[str, ...]
     base_branch: str
     profile_path: Path | None
 
@@ -58,6 +60,12 @@ class ResolvedDeliveryConfig:
         if self.profile_path is not None:
             return f"profile {_display_path(self.profile_path)}"
         return "env CHANGE_AGENT_VERIFY_COMMAND"
+
+    @property
+    def fast_verify_source(self) -> str:
+        if self.profile_path is not None:
+            return f"profile {_display_path(self.profile_path)}"
+        return "derived from verify_command"
 
     @property
     def base_source(self) -> str:
@@ -132,6 +140,25 @@ def _load_repo_profile(repo: str, root: Path | str) -> tuple[RepoProfile | None,
     if not verify_command:
         raise RepoProfileError(f"仓库档案 verify_command 不能为空: {path}")
 
+    raw_fast = data.get("fast_verify_command")
+    if raw_fast is None:
+        fast_verify_command = verify_command
+    else:
+        if not isinstance(raw_fast, str):
+            raise RepoProfileError(
+                f"仓库档案 fast_verify_command 必须是字符串: {path}"
+            )
+        try:
+            fast_verify_command = verify_command_from_env(raw_fast)
+        except ValueError as exc:
+            raise RepoProfileError(
+                f"仓库档案 fast_verify_command 无法按 shell 语义拆分: {path}: {exc}"
+            ) from exc
+        if not fast_verify_command:
+            raise RepoProfileError(
+                f"仓库档案 fast_verify_command 不能为空: {path}"
+            )
+
     raw_base = data.get("base_branch", DEFAULT_BASE_BRANCH)
     if not isinstance(raw_base, str) or not raw_base.strip():
         raise RepoProfileError(f"仓库档案 base_branch 必须是非空字符串: {path}")
@@ -139,6 +166,7 @@ def _load_repo_profile(repo: str, root: Path | str) -> tuple[RepoProfile | None,
     return (
         RepoProfile(
             verify_command=verify_command,
+            fast_verify_command=fast_verify_command,
             base_branch=raw_base.strip(),
         ),
         path,
@@ -175,14 +203,17 @@ def resolve_delivery_config(
     if profile is not None:
         return ResolvedDeliveryConfig(
             verify_command=profile.verify_command,
+            fast_verify_command=profile.fast_verify_command,
             base_branch=profile.base_branch,
             profile_path=path,
         )
 
     from apps.code_review_pipeline.change.pipeline import verify_command_from_env
 
+    verify_command = verify_command_from_env(env_verify_command)
     return ResolvedDeliveryConfig(
-        verify_command=verify_command_from_env(env_verify_command),
+        verify_command=verify_command,
+        fast_verify_command=verify_command,
         base_branch=(env_base_branch or "").strip() or DEFAULT_BASE_BRANCH,
         profile_path=None,
     )

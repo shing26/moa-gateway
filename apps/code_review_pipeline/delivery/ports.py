@@ -21,6 +21,7 @@ from apps.code_review_pipeline.delivery.models import (
 class PreparationStatus(str, Enum):
     READY = "ready"
     VERIFY_FAILED = "verify_failed"
+    GATE_FAILED = "gate_failed"
     NO_CHANGES = "no_changes"
     INVALID = "invalid"
 

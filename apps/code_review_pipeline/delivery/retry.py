@@ -211,7 +211,12 @@ async def retry_failed_run(
             flow = flow_factory(request=request, policy=policy, store=store)
             run = await flow.run(request)
         else:
-            run = await _run_real_flow(request, policy, settings=settings)
+            run = await _run_real_flow(
+                request,
+                policy,
+                settings=settings,
+                fast_verify_command=resolved.fast_verify_command,
+            )
     except RetryBlocked as exc:
         return _refused(run_id, str(exc))
     finally:
@@ -228,6 +233,7 @@ async def _run_real_flow(
     policy: DeliveryPolicy,
     *,
     settings: Any,
+    fast_verify_command: tuple[str, ...] | None = None,
 ) -> DeliveryRun:
     """与 cmd_delivery_run 同构的真实执行栈；宁可重复也不动黄金路径。"""
     from app.agents.provider import LLMClient, LLMConfig
@@ -297,7 +303,7 @@ async def _run_real_flow(
                     policy=policy,
                     implementer=ProductionImplementer(
                         llm=llm,
-                        verify_command=policy.verify_command,
+                        verify_command=fast_verify_command or policy.verify_command,
                         command_timeout_s=settings.change_agent_verify_timeout_s,
                     ),
                     preparer=adapter,
