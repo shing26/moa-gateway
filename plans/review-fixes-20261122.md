@@ -69,3 +69,14 @@ V3  $env:PYTHONPATH='.'; .venv/Scripts/python.exe -m ruff check .
 - 改 `retry.py` 的续跑语义（白名单、拒绝面、provenance、审批门）——只做 F3/F4。
 - 改 `wal.py` 实现（64KB 只记录，不修）。
 - 改既有断言换通过；新增 skip/xfail；触碰清单外模块。
+
+## 6. 修正案 1（2026-11-22，主会话冻结）
+
+**触发**：实现方申报 F4 的必要连带——`retry.py` 改读 `settings.delivery_topology`
+后，`tests/unit/test_delivery_retry.py` 的 `SimpleNamespace` fixture 必须补
+`delivery_topology="single"`，否则既有成功用例抛 `AttributeError`。该文件原不在
+Allowed paths 内。
+
+**裁决**：允许改动 `tests/unit/test_delivery_retry.py`，**仅限**为该 fixture 补
+`delivery_topology` 字段（及 F4 新增用例如落在该文件）。不得改该文件既有断言。
+其余条款不变。
