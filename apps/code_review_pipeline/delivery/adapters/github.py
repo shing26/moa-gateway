@@ -127,6 +127,13 @@ class GitHubChangeAdapter:
                 verification=None,
                 message=result.message,
             )
+        if result.status is ChangeStatus.GATE_FAILED:
+            return ChangePreparation(
+                status=PreparationStatus.GATE_FAILED,
+                bundle=result.bundle,
+                verification=None,
+                message=result.message,
+            )
         return ChangePreparation(
             status=PreparationStatus.INVALID,
             bundle=result.bundle,

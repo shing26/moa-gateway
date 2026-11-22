@@ -697,6 +697,42 @@ def cmd_delivery_view(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_delivery_stats(args: argparse.Namespace) -> int:
+    """Summarize persisted delivery runs without mutating the run store."""
+    from datetime import date
+
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.stats import (
+        collect_stats,
+        format_stats,
+    )
+
+    raw_since = getattr(args, "since", None)
+    since = None
+    if raw_since:
+        try:
+            since = date.fromisoformat(raw_since)
+        except ValueError:
+            print(
+                f"--since 需要 YYYY-MM-DD 格式: {raw_since!r}",
+                file=sys.stderr,
+            )
+            return 2
+
+    stats = collect_stats(settings.delivery_run_record_dir, since=since)
+    if getattr(args, "json", False):
+        print(json.dumps(stats, ensure_ascii=False, indent=2))
+    else:
+        print(
+            format_stats(
+                stats,
+                directory=settings.delivery_run_record_dir,
+                since=since,
+            )
+        )
+    return 0
+
+
 def cmd_delivery_preflight(args: argparse.Namespace) -> int:
     """开工前自检。
 
@@ -1013,6 +1049,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     delivery_view.add_argument("--run-id", required=True)
     delivery_view.set_defaults(func=cmd_delivery_view)
+
+    delivery_stats = delivery_sub.add_parser(
+        "stats",
+        help="只读聚合交付记录：成功率、token、时长、失败码、续跑",
+    )
+    delivery_stats.add_argument("--json", action="store_true")
+    delivery_stats.add_argument("--since", default=None, metavar="YYYY-MM-DD")
+    delivery_stats.set_defaults(func=cmd_delivery_stats)
 
     delivery_resume = delivery_sub.add_parser(
         "resume",

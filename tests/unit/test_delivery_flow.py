@@ -542,6 +542,67 @@ async def test_second_verify_failure_stops_without_a_third_implementer(
 
 
 @pytest.mark.asyncio
+async def test_gate_failure_uses_one_revision_and_passes_feedback(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle()
+    implementer = FakeImplementer([_attempt(), _attempt(summary="removed import")])
+    preparer = FakePreparer(
+        [
+            ChangePreparation(
+                status=PreparationStatus.GATE_FAILED,
+                bundle=bundle,
+                verification=None,
+                message="门禁未通过: tests/unit/x.py:F401 unused import",
+            ),
+            ChangePreparation(
+                status=PreparationStatus.READY,
+                bundle=bundle,
+                verification=_verification(),
+            ),
+        ]
+    )
+    flow, _, _, _ = _flow(tmp_path, implementer=implementer, preparer=preparer)
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.WAITING_CI
+    assert len(run.attempts) == 2
+    assert implementer.feedback[0] == ""
+    assert implementer.feedback[1].startswith("门禁未通过")
+    assert "F401" in implementer.feedback[1]
+    assert preparer.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_repeated_gate_failure_stops_as_verify_failed(
+    tmp_path: Path,
+) -> None:
+    gate_failed = ChangePreparation(
+        status=PreparationStatus.GATE_FAILED,
+        bundle=_bundle(),
+        verification=None,
+        message="门禁未通过: tests/unit/x.py:F401 unused import",
+    )
+    implementer = FakeImplementer([_attempt(), _attempt(summary="still broken")])
+    flow, _, _, publisher = _flow(
+        tmp_path,
+        implementer=implementer,
+        preparer=FakePreparer([gate_failed, gate_failed]),
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.NEEDS_HUMAN
+    assert run.failure == FailureInfo(
+        FailureCode.VERIFY_FAILED,
+        "门禁未通过: tests/unit/x.py:F401 unused import",
+    )
+    assert len(run.attempts) == 2
+    assert publisher.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_human_rejection_stops_before_publish(tmp_path: Path) -> None:
     bundle = _bundle()
     approval = FakeApproval(None)
