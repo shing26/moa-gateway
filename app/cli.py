@@ -544,6 +544,10 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
         f"verify command: {' '.join(verify_command)} "
         f"(source: {resolved.verify_source})"
     )
+    print(
+        f"fast verify  : {' '.join(resolved.fast_verify_command)} "
+        f"(source: {resolved.fast_verify_source})"
+    )
     if not settings.github_token:
         print("GITHUB_TOKEN 未配置", file=sys.stderr)
         return 2
@@ -638,7 +642,7 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
                         policy=policy,
                         implementer=ProductionImplementer(
                             llm=llm,
-                            verify_command=verify_command,
+                            verify_command=resolved.fast_verify_command,
                             command_timeout_s=settings.change_agent_verify_timeout_s,
                         ),
                         preparer=adapter,
