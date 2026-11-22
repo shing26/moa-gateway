@@ -471,6 +471,7 @@ def build_toolset(
     verify_command: Sequence[str],
     limits: ToolLimits | None = None,
     names: Sequence[str] | None = None,
+    require_test_selector: bool = False,
 ) -> ToolRegistry:
     """造一个**绑定到该工作区**的工具集。
 
@@ -485,6 +486,7 @@ def build_toolset(
             verify_command=verify_command,
             limits=limits,
             names=names,
+            require_test_selector=require_test_selector,
         )
 
     registry = ToolRegistry(bind_workspace, aliases=_TOOL_ALIASES)
@@ -700,6 +702,12 @@ def build_toolset(
         return "\n".join(hits)
 
     async def run_tests(selector: str = "") -> str:
+        if require_test_selector and not selector.strip():
+            raise ValueError(
+                "selector 必填：传入测试文件或 ::测试名（例如 "
+                "tests/unit/test_x.py 或 tests/unit/test_x.py::test_name）；"
+                "留空会跑全量，已禁止——全量门禁由交付流水线单独执行"
+            )
         tokens, reason = parse_selector(selector)
         if reason is not None:
             raise ValueError(reason)
@@ -850,13 +858,25 @@ def build_toolset(
             description=(
                 "运行本任务的验证命令并返回输出。基底命令由任务固定，"
                 "只能通过 selector 追加筛选（如某个测试文件、::某测试、-k 表达式）。"
+                + (
+                    " selector 必填：留空会跑全量，已被拒绝。"
+                    if require_test_selector
+                    else ""
+                )
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "selector": {
                         "type": "string",
-                        "description": "追加的筛选参数，例如 tests/unit/test_x.py 或 -k login",
+                        "description": (
+                            "追加的筛选参数，例如 tests/unit/test_x.py 或 -k login"
+                            + (
+                                "。必填：留空会跑全量测试"
+                                if require_test_selector
+                                else ""
+                            )
+                        ),
                     }
                 },
             },
