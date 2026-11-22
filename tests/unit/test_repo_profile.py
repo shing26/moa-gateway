@@ -139,6 +139,7 @@ def test_load_repo_profile_parses_fields(tmp_path: Path) -> None:
 
     assert profile == RepoProfile(
         verify_command=("python", "-m", "pytest", "-q"),
+        fast_verify_command=("python", "-m", "pytest", "-q"),
         base_branch="trunk",
     )
 
@@ -150,6 +151,77 @@ def test_base_branch_defaults_to_main(tmp_path: Path) -> None:
 
     assert profile is not None
     assert profile.base_branch == DEFAULT_BASE_BRANCH == "main"
+
+
+def test_fast_verify_falls_back_to_verify_command(tmp_path: Path) -> None:
+    _write_profile(
+        tmp_path, body='verify_command = "python -m pytest tests/unit -q"\n'
+    )
+
+    profile = load_repo_profile("owner/name", tmp_path)
+
+    assert profile is not None
+    assert profile.fast_verify_command == profile.verify_command == (
+        "python",
+        "-m",
+        "pytest",
+        "tests/unit",
+        "-q",
+    )
+
+
+def test_fast_verify_command_is_parsed_with_the_same_shlex_semantics(
+    tmp_path: Path,
+) -> None:
+    _write_profile(
+        tmp_path,
+        body=(
+            'verify_command = "python -m pytest tests/unit -q"\n'
+            'fast_verify_command = "python -m pytest -q"\n'
+        ),
+    )
+
+    profile = load_repo_profile("owner/name", tmp_path)
+
+    assert profile is not None
+    assert profile.verify_command == (
+        "python",
+        "-m",
+        "pytest",
+        "tests/unit",
+        "-q",
+    )
+    assert profile.fast_verify_command == ("python", "-m", "pytest", "-q")
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [
+        (
+            (
+                'verify_command = "python -m pytest -q"\n'
+                'fast_verify_command = "   "\n'
+            ),
+            "fast_verify_command 不能为空",
+        ),
+        (
+            (
+                'verify_command = "python -m pytest -q"\n'
+                "fast_verify_command = [1]\n"
+            ),
+            "fast_verify_command 必须是字符串",
+        ),
+    ],
+)
+def test_corrupt_fast_verify_fails_closed(
+    tmp_path: Path, body: str, reason: str
+) -> None:
+    _write_profile(tmp_path, body=body)
+
+    with pytest.raises(RepoProfileError) as exc:
+        load_repo_profile("owner/name", tmp_path)
+
+    assert reason in str(exc.value)
 
 
 def test_missing_profile_returns_none(tmp_path: Path) -> None:
@@ -228,6 +300,7 @@ def test_profile_wins_over_environment(tmp_path: Path) -> None:
     assert resolved.base_branch == "trunk"
     assert resolved.profile_path is not None
     assert resolved.verify_source.startswith("profile ")
+    assert resolved.fast_verify_command == resolved.verify_command
     assert resolved.base_source.startswith("profile ")
 
 
@@ -261,6 +334,8 @@ def test_missing_profile_falls_back_to_environment(tmp_path: Path) -> None:
     assert resolved.base_branch == "release/line"
     assert resolved.profile_path is None
     assert resolved.verify_source == "env CHANGE_AGENT_VERIFY_COMMAND"
+    assert resolved.fast_verify_command == resolved.verify_command
+    assert resolved.fast_verify_source == "derived from verify_command"
     assert resolved.base_source == "env CHANGE_AGENT_BASE_BRANCH"
 
 
@@ -432,6 +507,7 @@ def test_delivery_run_prints_profile_source(
     assert cmd_delivery_run(args) == 2
     captured = capsys.readouterr()
     assert "verify command: python -m pytest -q (source: profile " in captured.out
+    assert "fast verify  : python -m pytest -q (source: profile " in captured.out
     assert "name.toml" in captured.out
     # 档案优先：环境变量那套没有被使用。
     assert "env-command" not in captured.out
