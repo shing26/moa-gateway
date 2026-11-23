@@ -10,10 +10,17 @@
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
 from apps.code_review_pipeline.merge_preflight import (
+    MERGE_WORKER_HEARTBEAT_KEY,
     hitl_store_is_shared,
     merge_channel_problems,
     merge_channel_readiness,
+    read_worker_heartbeat_age_s,
 )
 
 
@@ -83,6 +90,7 @@ def test_all_prerequisites_met_has_no_problems() -> None:
             channel="oc_abc",
             feishu_configured=True,
             hitl_shared=True,
+            worker_heartbeat_age_s=1.0,
         )
         == []
     )
@@ -93,6 +101,7 @@ def test_missing_channel_is_reported() -> None:
         channel="",
         feishu_configured=True,
         hitl_shared=True,
+        worker_heartbeat_age_s=1.0,
     )
     assert len(problems) == 1
     assert "CODE_REVIEW_MERGE_CHANNEL" in problems[0]
@@ -103,6 +112,7 @@ def test_missing_feishu_credentials_are_reported() -> None:
         channel="oc_abc",
         feishu_configured=False,
         hitl_shared=True,
+        worker_heartbeat_age_s=1.0,
     )
     assert len(problems) == 1
     assert "FEISHU_APP_ID" in problems[0]
@@ -115,6 +125,7 @@ def test_unshared_hitl_store_is_reported() -> None:
         channel="oc_abc",
         feishu_configured=True,
         hitl_shared=False,
+        worker_heartbeat_age_s=1.0,
     )
     assert len(problems) == 1
     assert "Redis" in problems[0]
@@ -126,6 +137,7 @@ def test_multiple_problems_are_all_reported() -> None:
         channel="",
         feishu_configured=False,
         hitl_shared=False,
+        worker_heartbeat_age_s=1.0,
     )
     assert len(problems) == 3
 
@@ -138,6 +150,7 @@ def test_readiness_is_silent_when_channel_disabled() -> None:
             channel="",
             feishu_configured=False,
             session_store=_FakeSessionStore(None),
+            worker_heartbeat_age_s=None,
         )
         == []
     )
@@ -149,6 +162,7 @@ def test_readiness_reports_problems_when_enabled() -> None:
         channel="",
         feishu_configured=False,
         session_store=_FakeSessionStore(_FakeStorage(using_memory=True)),
+        worker_heartbeat_age_s=1.0,
     )
     assert len(problems) == 3
 
@@ -160,6 +174,132 @@ def test_readiness_clean_when_everything_present() -> None:
             channel="oc_abc",
             feishu_configured=True,
             session_store=_FakeSessionStore(_FakeStorage(using_memory=False)),
+            worker_heartbeat_age_s=1.0,
         )
         == []
+    )
+
+
+def test_missing_worker_heartbeat_is_reported_with_start_command() -> None:
+    """T4：通道开着但 worker 没起来——这是静默失败，必须点名启动命令。"""
+    problems = merge_channel_problems(
+        channel="oc_abc",
+        feishu_configured=True,
+        hitl_shared=True,
+        worker_heartbeat_age_s=None,
+    )
+
+    assert len(problems) == 1
+    assert "python -m app.merge_worker" in problems[0]
+
+
+def test_fresh_worker_heartbeat_is_not_reported() -> None:
+    """T4：心跳新鲜时不多报一条。"""
+    problems = merge_channel_problems(
+        channel="oc_abc",
+        feishu_configured=True,
+        hitl_shared=True,
+        worker_heartbeat_age_s=1.0,
+    )
+
+    assert not any("app.merge_worker" in problem for problem in problems)
+    assert problems == []
+
+
+def test_stale_worker_heartbeat_is_reported() -> None:
+    """T4：心跳过期等价于 worker 卡住/停止，同样要报。"""
+    problems = merge_channel_problems(
+        channel="oc_abc",
+        feishu_configured=True,
+        hitl_shared=True,
+        worker_heartbeat_age_s=10_000.0,
+    )
+
+    assert len(problems) == 1
+    assert "python -m app.merge_worker" in problems[0]
+
+
+def test_readiness_is_silent_when_channel_disabled_even_without_heartbeat() -> None:
+    """通道关闭时不报心跳问题（默认部署日志保持干净）。"""
+    assert (
+        merge_channel_readiness(
+            enabled=False,
+            channel="",
+            feishu_configured=False,
+            session_store=_FakeSessionStore(None),
+            worker_heartbeat_age_s=None,
+        )
+        == []
+    )
+
+
+class _HeartbeatClient:
+    def __init__(self, value: object) -> None:
+        self.value = value
+        self.keys: list[str] = []
+
+    async def get(self, key: str) -> object:
+        self.keys.append(key)
+        return self.value
+
+
+@pytest.mark.asyncio
+async def test_read_heartbeat_age_from_json() -> None:
+    now = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+    client = _HeartbeatClient(
+        json.dumps(
+            {
+                "pid": 123,
+                "interval_s": 60.0,
+                "at": (now - timedelta(seconds=12)).isoformat(),
+            }
+        )
+    )
+
+    age = await read_worker_heartbeat_age_s(client=client, now=now)
+
+    assert age == 12.0
+    assert client.keys == [MERGE_WORKER_HEARTBEAT_KEY]
+
+
+@pytest.mark.asyncio
+async def test_read_heartbeat_age_accepts_z_suffix() -> None:
+    now = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+    client = _HeartbeatClient(
+        json.dumps({"pid": 1, "interval_s": 60.0, "at": "2026-11-24T11:59:00Z"})
+    )
+
+    assert await read_worker_heartbeat_age_s(client=client, now=now) == 60.0
+
+
+@pytest.mark.asyncio
+async def test_missing_heartbeat_returns_none() -> None:
+    assert (
+        await read_worker_heartbeat_age_s(client=_HeartbeatClient(None), now=datetime.now(UTC))
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_malformed_heartbeat_returns_none() -> None:
+    assert (
+        await read_worker_heartbeat_age_s(
+            client=_HeartbeatClient("not json"), now=datetime.now(UTC)
+        )
+        is None
+    )
+
+
+class _ExplodingHeartbeatClient:
+    async def get(self, key: str) -> object:
+        raise ConnectionError("redis unavailable")
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_read_failure_returns_none_and_never_raises() -> None:
+    assert (
+        await read_worker_heartbeat_age_s(
+            client=_ExplodingHeartbeatClient(), now=datetime.now(UTC)
+        )
+        is None
     )

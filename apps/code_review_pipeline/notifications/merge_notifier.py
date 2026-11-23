@@ -14,8 +14,8 @@ import logging
 import time
 from typing import Any
 
+from app import deps
 from app.channels.feishu_cards import ApprovalCard, FeishuCardSender
-from app.deps import _card_sender as _global_card_sender
 from app.deps import engine as _global_engine
 from app.engine import HitlRequest
 from apps.code_review_pipeline.merge_store import MergeRecord
@@ -44,6 +44,17 @@ class MergeNotifier:
             else _global_engine.session_store
         )
 
+    def _resolve_card_sender(self) -> FeishuCardSender | None:
+        """显式注入优先；否则在**调用时**读 ``app.deps._card_sender``。
+
+        不能把 ``app.deps._card_sender`` 在导入期绑成别名：``init_feishu()`` 在
+        导入之后才赋值，别名会永远停在 ``None``，于是 webhook 进程里每张
+        PR 打开卡片都被静默跳过。
+        """
+        if self._card_sender is not None:
+            return self._card_sender
+        return getattr(deps, "_card_sender", None)
+
     async def send_approval_card(self, record: MergeRecord) -> bool:
         """CI 绿时发审批卡片。"""
         if not self._default_target:
@@ -54,7 +65,7 @@ class MergeNotifier:
             )
             return False
 
-        card_sender = self._card_sender or _global_card_sender
+        card_sender = self._resolve_card_sender()
         if card_sender is None:
             logger.warning("feishu card sender not initialized; skip merge card")
             return False
@@ -85,7 +96,7 @@ class MergeNotifier:
             )
             return False
 
-        card_sender = self._card_sender or _global_card_sender
+        card_sender = self._resolve_card_sender()
         if card_sender is None:
             logger.warning("feishu card sender not initialized; skip CI failure card")
             return False
@@ -114,7 +125,7 @@ class MergeNotifier:
                 record.task_key,
             )
             return False
-        card_sender = self._card_sender or _global_card_sender
+        card_sender = self._resolve_card_sender()
         if card_sender is None:
             logger.warning("feishu card sender not initialized; skip PR opened card")
             return False

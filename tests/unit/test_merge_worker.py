@@ -43,6 +43,21 @@ class _OrderedCommentApproval:
         return ()
 
 
+class _CountingHeartbeat:
+    def __init__(self, events: list[str] | None = None) -> None:
+        self.calls = 0
+        self._events = events
+
+    async def __call__(self) -> None:
+        self.calls += 1
+        if self._events is not None:
+            self._events.append("heartbeat")
+
+
+async def _noop_heartbeat() -> None:
+    return None
+
+
 @pytest.mark.asyncio
 async def test_comment_approval_runs_after_ci_poll_and_card() -> None:
     events: list[str] = []
@@ -61,9 +76,63 @@ async def test_comment_approval_runs_after_ci_poll_and_card() -> None:
         github=_OrderedGitHub(events),
         notifier=_OrderedNotifier(events),  # type: ignore[arg-type]
         comment_approval=_OrderedCommentApproval(events),
+        heartbeat=_noop_heartbeat,
     )
 
     await worker._run_once()  # noqa: SLF001 - 单测直接驱动一轮
 
     assert events == ["ci", "card", "comment"]
     assert store.list_open()[0].state == MergeState.AWAITING_APPROVAL.value
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_is_written_once_at_end_of_successful_round() -> None:
+    """T1：一轮成功后写一次心跳，且写在评论审批之后（证明整轮真的跑完）。"""
+    events: list[str] = []
+    heartbeat = _CountingHeartbeat(events)
+    worker = MergeWorker(
+        store=MergeStore(),
+        github=_OrderedGitHub(events),
+        notifier=_OrderedNotifier(events),  # type: ignore[arg-type]
+        comment_approval=_OrderedCommentApproval(events),
+        heartbeat=heartbeat,
+    )
+
+    await worker._run_once()  # noqa: SLF001 - 单测直接驱动一轮
+
+    assert heartbeat.calls == 1
+    assert events[-1] == "heartbeat"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_failure_is_logged_but_does_not_break_round(caplog) -> None:
+    """T1：心跳写失败只告警，轮询结果与卡片照常，异常不外泄。"""
+    events: list[str] = []
+
+    async def failing_heartbeat() -> None:
+        raise ConnectionError("redis down")
+
+    store = MergeStore()
+    store.save(
+        MergeRecord(
+            repo="owner/repo",
+            pr_number=8,
+            head_sha="sha8",
+            state=MergeState.WATCHING.value,
+            bundle_hash="abc123",
+        )
+    )
+    worker = MergeWorker(
+        store=store,
+        github=_OrderedGitHub(events),
+        notifier=_OrderedNotifier(events),  # type: ignore[arg-type]
+        comment_approval=_OrderedCommentApproval(events),
+        heartbeat=failing_heartbeat,
+    )
+
+    with caplog.at_level("WARNING", logger="moa.merge_worker"):
+        await worker._run_once()  # noqa: SLF001 - 单测直接驱动一轮
+
+    assert events == ["ci", "card", "comment"]
+    assert store.list_open()[0].state == MergeState.AWAITING_APPROVAL.value
+    assert "heartbeat write failed" in caplog.text

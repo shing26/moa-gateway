@@ -64,6 +64,34 @@ def _audit_chain_check() -> dict[str, str]:
         }
     return {"check": "ok", "detail": f"{name} 链完整（{chained} 行带链）"}
 
+
+async def _merge_worker_check() -> str:
+    """合并 worker 的三态检查：``disabled`` / ``running`` / ``degraded: ...``。
+
+    合并通道关闭是合法部署（``disabled`` 健康）；开启后心跳缺失或过期才降级。
+    这里**绝不向外抛异常**：``/healthz`` 是附加能力，不该因为 Redis 抖动 5xx。
+    """
+    try:
+        if not settings.code_review_merge_enabled:
+            return "disabled"
+        from apps.code_review_pipeline.merge_preflight import (
+            read_worker_heartbeat_age_s,
+            worker_heartbeat_max_age_s,
+        )
+
+        age = await read_worker_heartbeat_age_s()
+        if age is None:
+            return "degraded: merge worker 心跳缺失（python -m app.merge_worker 未启动）"
+        max_age = worker_heartbeat_max_age_s()
+        if age > max_age:
+            return (
+                f"degraded: merge worker 心跳过期（{age:.0f}s > {max_age:.0f}s）"
+            )
+        return "running"
+    except Exception as exc:  # noqa: BLE001 - 健康探针任意异常都降级为字符串，healthz 不能 500
+        return f"degraded: merge worker 检查失败：{str(exc)[:60]}"
+
+
 @router.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "version": "0.1.0"}
@@ -102,9 +130,21 @@ async def healthz() -> dict[str, object]:
         checks["vectordb"] = str(vector_info.get("backend", "unknown"))
     check_chain = _audit_chain_check()
     checks["audit_chain"] = check_chain["check"]
+    # 合并 worker 是独立进程（ADR-021）：通道开着但进程没起时，卡片永远不来。
+    # disabled/running 都算健康；degraded 会把整体 status 拉下来。
+    checks["merge_worker"] = await _merge_worker_check()
     # "memory" 是受支持的零配置模式，与 redis 的 fallback_memory 同级；
     # 只有 "degraded: ..." 才代表配置与实际不符，需要告警。
-    healthy_values = {"connected", "ok", "healthy", "fallback_memory", "memory", "postgres"}
+    healthy_values = {
+        "connected",
+        "ok",
+        "healthy",
+        "fallback_memory",
+        "memory",
+        "postgres",
+        "running",
+        "disabled",
+    }
     all_healthy = all(v in healthy_values for v in checks.values())
     # 引擎不是健康项（没有"坏值"），所以放在 checks 之外，避免污染
     # all_healthy 的取值集合。

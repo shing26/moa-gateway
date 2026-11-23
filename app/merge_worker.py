@@ -12,8 +12,12 @@ CI 红时发失败信息卡片。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import os
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 
 from app.config import settings
 from app.deps import delivery_run_store, merge_store
@@ -21,11 +25,42 @@ from apps.code_review_pipeline.delivery.audit import WalDeliveryAudit
 from apps.code_review_pipeline.merge_comment_approval import (
     build_comment_approval_poller,
 )
+from apps.code_review_pipeline.merge_preflight import MERGE_WORKER_HEARTBEAT_KEY
 from apps.code_review_pipeline.merge_poller import MergePoller
 from apps.code_review_pipeline.notifications.merge_notifier import MergeNotifier
 from apps.code_review_pipeline.routing.github_provider import build_github_client
 
 logger = logging.getLogger("moa.merge_worker")
+
+Heartbeat = Callable[[], Awaitable[None]]
+
+
+def build_redis_heartbeat(
+    interval_s: float, *, redis_url: str | None = None
+) -> Heartbeat:
+    """默认心跳：每轮写一次 Redis 键，带 TTL，供 ``/healthz`` 与启动自检读。"""
+    ttl_s = max(60, math.ceil(3 * float(interval_s)))
+
+    async def heartbeat() -> None:
+        from redis.asyncio import Redis
+
+        client = Redis.from_url(
+            redis_url or settings.redis_url,
+            socket_timeout=5.0,
+            decode_responses=True,
+            protocol=2,
+        )
+        try:
+            payload = {
+                "pid": os.getpid(),
+                "interval_s": float(interval_s),
+                "at": datetime.now(UTC).isoformat(),
+            }
+            await client.set(MERGE_WORKER_HEARTBEAT_KEY, json.dumps(payload), ex=ttl_s)
+        finally:
+            await client.aclose()
+
+    return heartbeat
 
 
 class MergeWorker:
@@ -41,12 +76,14 @@ class MergeWorker:
         audit=None,
         interval_s: float = 60.0,
         comment_approval=None,
+        heartbeat: Heartbeat | None = None,
     ) -> None:
         self._store = store
         self._github = github
         self._notifier = notifier
         self._interval_s = interval_s
         self._comment_approval = comment_approval
+        self._heartbeat = heartbeat or build_redis_heartbeat(interval_s)
         self._poller = MergePoller(
             store,
             github,
@@ -96,6 +133,14 @@ class MergeWorker:
         # 连一次评论 API 都不会调用。
         if self._comment_approval is not None:
             await self._comment_approval.poll_once()
+        # 心跳写在轮询末尾：它证明的是"这一轮真的跑完了"，而不是"进程还活着"。
+        # 写失败只告警——Redis 抖动不该让合并通道停摆（下一轮会重试）。
+        try:
+            await self._heartbeat()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - 心跳是附加信号：写失败不得中断轮询
+            logger.warning("merge worker heartbeat write failed", exc_info=True)
 
 
 def build_worker() -> MergeWorker:
