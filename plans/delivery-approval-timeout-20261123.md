@@ -94,6 +94,22 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 - 改动审批身份校验、bundle 绑定、`MergeExecutor` 语义。
 - 新增依赖；关闭 lint / 放宽断言换通过。
 
-## 7. 签收记录
+## 7. 签收记录（2026-11-24）
 
-（待所有者书面签收）
+**所有者书面签收**：用户消息「签收#132」（2026-11-24）。
+
+**合并**：PR #132 → `main`，merge commit
+`5ff1a7865433f4c7c2488425b998dd8ee521037a`。
+
+**验收证据**：独立 Verifier `ACCEPT`。V1 `127 passed`；V2
+`2309 passed, 6 skipped`；V3 `All checks passed!`；T1–T7 全 PASS，无 P0/P1。
+GitHub CI：`test` / `integration` 绿，`docker` skipped。
+
+**实测确认（2026-11-23 → 11-24）**：`dlv-ced2cc69a7984332acffc931b6a9ad8a`
+在修复前的超时仍被记成 `rejected`；修复合并后，`dlv-effee4ed01d64e0fa2c6ef8e867325ba`
+的审批卡由人工在 30 分钟窗口内批准，进入 `PUSHING` → `WAITING_CI` → 合并，
+未再触发超时路径。超时路径本身的证据仍来自 T1/T2/T5 的单元测试。
+
+**残余（非阻塞）**：审批卡与合并卡分别由 CLI 进程与独立进程
+`python -m app.merge_worker` 发出；后者当时未被启动，导致 CI 转绿后长时间没有
+审批卡。该运维缺口另立契约处理，不属于本次改动。
