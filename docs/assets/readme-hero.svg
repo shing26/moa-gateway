@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="380" viewBox="0 0 1280 380" role="img" aria-labelledby="title desc">
+  <title id="title">MoA Gateway — 受治理的仓库交付 Agent</title>
+  <desc id="desc">交付请求进入后，由 Agent 在隔离工作区完成修改与验证，再经过人工审批与哈希链审计，最后产出可复核的 PR。三道门禁：验证、审批、审计。</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0A1119"/>
+      <stop offset="0.55" stop-color="#0B1520"/>
+      <stop offset="1" stop-color="#0A1721"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.78" cy="0.18" r="0.62">
+      <stop offset="0" stop-color="#2DD4BF" stop-opacity="0.20"/>
+      <stop offset="0.55" stop-color="#2DD4BF" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#2DD4BF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2DD4BF"/>
+      <stop offset="1" stop-color="#38BDF8"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2DD4BF" stop-opacity="0.65"/>
+      <stop offset="1" stop-color="#2DD4BF" stop-opacity="0.05"/>
+    </linearGradient>
+    <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse">
+      <circle cx="1.2" cy="1.2" r="1.1" fill="#7DD3FC" fill-opacity="0.10"/>
+    </pattern>
+  </defs>
+
+  <rect width="1280" height="380" rx="18" fill="url(#bg)"/>
+  <rect width="1280" height="380" rx="18" fill="url(#glow)"/>
+  <rect width="1280" height="380" rx="18" fill="url(#dots)"/>
+  <rect x="0.75" y="0.75" width="1278.5" height="378.5" rx="17.5" fill="none" stroke="#2DD4BF" stroke-opacity="0.16"/>
+
+  <g transform="translate(64 58)">
+    <g transform="translate(0 4)">
+      <rect width="40" height="40" rx="11" fill="#0E2A31" stroke="#2DD4BF" stroke-opacity="0.45"/>
+      <path d="M11 12.5v15M11 12.5h8M11 20h7M11 27.5h8" stroke="url(#accent)" stroke-width="2.2" stroke-linecap="round" fill="none"/>
+      <path d="M24 12.5h5M24 27.5h5" stroke="#2DD4BF" stroke-opacity="0.55" stroke-width="2.2" stroke-linecap="round"/>
+      <circle cx="33" cy="20" r="2.4" fill="#5EEAD4"/>
+    </g>
+    <text x="54" y="21" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif" font-size="12.5" font-weight="700" letter-spacing="4.6" fill="#5EEAD4">MOA GATEWAY</text>
+    <text x="54" y="39" font-family="ui-monospace,'Cascadia Code',Consolas,monospace" font-size="10.5" letter-spacing="1.2" fill="#64748B">GOVERNED REPOSITORY DELIVERY</text>
+
+    <text x="0" y="112" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif" font-size="44" font-weight="700" fill="#F8FAFC" letter-spacing="0.5">受治理的仓库交付 Agent</text>
+    <text x="0" y="154" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif" font-size="18.5" fill="#A8B6C6">Agent 把仓库变更做完，推送、CI 与合并仍须人批准；</text>
+    <text x="0" y="184" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif" font-size="18.5" fill="#A8B6C6">每一步都留下可复核、可质证的证据。</text>
+
+    <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif" font-size="12.5">
+      <rect x="0" y="214" width="202" height="34" rx="17" fill="#0F2A31" stroke="#2DD4BF" stroke-opacity="0.28"/>
+      <text x="18" y="236" fill="#99F6E4">验证 → 审批 → 推送</text>
+      <rect x="214" y="214" width="250" height="34" rx="17" fill="#0F2233" stroke="#38BDF8" stroke-opacity="0.24"/>
+      <text x="232" y="236" fill="#BAE6FD">DeliveryRequest → DeliveryRun</text>
+      <rect x="476" y="214" width="152" height="34" rx="17" fill="#14202B" stroke="#94A3B8" stroke-opacity="0.22"/>
+      <text x="494" y="236" fill="#CBD5E1">审计链可质证</text>
+    </g>
+
+    <text x="0" y="296" font-family="ui-monospace,'Cascadia Code',Consolas,monospace" font-size="11" letter-spacing="0.6" fill="#526273">Python 3.12 · FastAPI · FSM + LangGraph parity · pgvector · Redis</text>
+  </g>
+
+  <g transform="translate(824 56)">
+    <rect x="0" y="0" width="392" height="268" rx="16" fill="#0C1922" fill-opacity="0.82" stroke="#7DD3FC" stroke-opacity="0.16"/>
+    <rect x="0.5" y="0.5" width="391" height="267" rx="15.5" fill="none" stroke="#2DD4BF" stroke-opacity="0.10"/>
+    <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif">
+      <text x="24" y="34" font-size="11.5" font-weight="700" letter-spacing="2.4" fill="#5EEAD4">DELIVERY GATE</text>
+      <text x="24" y="56" font-size="12" fill="#64748B">默认路径：单 Implementer，人审放行</text>
+
+      <line x1="24" y1="74" x2="368" y2="74" stroke="#334155" stroke-opacity="0.55"/>
+      <path d="M350 108v124" stroke="url(#line)" stroke-width="1.4"/>
+
+      <g transform="translate(24 96)">
+        <text x="0" y="14" font-family="ui-monospace,'Cascadia Code',Consolas,monospace" font-size="11" fill="#2DD4BF">01</text>
+        <text x="34" y="14" font-size="14" font-weight="600" fill="#E2E8F0">验证</text>
+        <text x="34" y="34" font-size="11.5" fill="#8294A6">bundle 哈希 · 确定性 verify · fail-closed</text>
+        <circle cx="350" cy="12" r="4" fill="#2DD4BF"/>
+      </g>
+      <g transform="translate(24 158)">
+        <text x="0" y="14" font-family="ui-monospace,'Cascadia Code',Consolas,monospace" font-size="11" fill="#38BDF8">02</text>
+        <text x="34" y="14" font-size="14" font-weight="600" fill="#E2E8F0">审批</text>
+        <text x="34" y="34" font-size="11.5" fill="#8294A6">TTY · 飞书卡片 · GitHub 评论，三条通道</text>
+        <circle cx="350" cy="12" r="4" fill="#38BDF8"/>
+      </g>
+      <g transform="translate(24 220)">
+        <text x="0" y="14" font-family="ui-monospace,'Cascadia Code',Consolas,monospace" font-size="11" fill="#FBBF24">03</text>
+        <text x="34" y="14" font-size="14" font-weight="600" fill="#E2E8F0">审计</text>
+        <text x="34" y="34" font-size="11.5" fill="#8294A6">哈希链 WAL · 四方对账 · 可定位首个改动</text>
+        <circle cx="350" cy="12" r="4" fill="#FBBF24"/>
+      </g>
+    </g>
+  </g>
+
+  <g transform="translate(824 336)">
+    <rect x="0" y="0" width="392" height="28" rx="14" fill="#0F2A31" fill-opacity="0.55"/>
+    <text x="16" y="18" font-family="ui-monospace,'Cascadia Code',Consolas,monospace" font-size="10.5" letter-spacing="1.4" fill="#67E8F9">HUMAN-IN-THE-LOOP BY DEFAULT</text>
+  </g>
+</svg>
