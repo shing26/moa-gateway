@@ -252,6 +252,7 @@ class FailureCode(str, Enum):
     VERIFIER_REVISE_EXHAUSTED = "verifier_revise_exhausted"
     BUNDLE_CHANGED = "bundle_changed"
     APPROVAL_REJECTED = "approval_rejected"
+    APPROVAL_TIMED_OUT = "approval_timed_out"
     PUSH_FAILED = "push_failed"
     CI_FAILED = "ci_failed"
     MERGE_SHA_MISMATCH = "merge_sha_mismatch"

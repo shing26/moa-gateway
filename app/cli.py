@@ -492,6 +492,7 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
     from apps.code_review_pipeline.delivery.models import (
         DeliveryPolicy,
         DeliveryRequest,
+        FailureCode,
     )
     from apps.code_review_pipeline.delivery.repo_profile import (
         RepoProfileError,
@@ -669,7 +670,16 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
             print(f"pr        : {run.push.pull_request.url}")
             print(f"head_sha  : {run.push.pull_request.head_sha}")
         print(f"record    : {settings.delivery_run_record_dir}/{run.run_id}.json")
-        return 0 if run.state.value in {"waiting_ci", "ready_for_push_approval"} else 1
+        if (
+            run.failure is not None
+            and run.failure.code is FailureCode.APPROVAL_TIMED_OUT
+        ):
+            print(f"resume    : delivery resume --run-id {run.run_id}")
+        if run.state.value == "waiting_ci":
+            return 0
+        if run.state.value == "ready_for_push_approval" and run.failure is None:
+            return 0
+        return 1
     finally:
         lock.release()
 

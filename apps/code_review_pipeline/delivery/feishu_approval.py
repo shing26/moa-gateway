@@ -6,7 +6,8 @@
 
 * CLI 仍在 ``READY_FOR_PUSH_APPROVAL`` 等待；
 * 批准 → 返回 ``ChangeApproval``，由 CLI 用操作者 PAT 推送；
-* 拒绝 / 超时 / 不可用 → 返回 ``None``，既有 flow 落 ``REJECTED``。
+* 拒绝 → 返回 ``None``，既有 flow 落 ``REJECTED``；
+* 等待窗口到期 → 抛 ``PushApprovalTimedOut``，超时不是人的决定。
 
 跨进程靠 Redis：CLI 写 pending 记录并发卡，飞书回调原子认领后写 decision，
 CLI 轮询 decision。Redis 降级为进程内存时拒绝启用——跨进程看不见的审批
@@ -26,6 +27,7 @@ from typing import Any, Awaitable, Callable
 
 from app.engine import HitlRequest
 from app.middleware.auth import insecure_mode_enabled
+from apps.code_review_pipeline.delivery.ports import PushApprovalTimedOut
 
 logger = logging.getLogger("moa.delivery.feishu_approval")
 
@@ -318,7 +320,10 @@ class FeishuPushApprovalPort:
             logger.warning(
                 "feishu push approval timed out run_id=%s hitl_id=%s", run_id, hitl_id
             )
-            return None
+            raise PushApprovalTimedOut(
+                f"feishu push approval timed out after {timeout_s}s "
+                f"run_id={run_id} hitl_id={hitl_id}"
+            )
 
         # 回调已原子认领 pending；这里再清一次是幂等的（超时路径也走同一句）。
         self._session_store.remove_hitl(hitl_id)

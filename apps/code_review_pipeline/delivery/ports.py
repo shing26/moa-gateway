@@ -30,6 +30,10 @@ class BundleChanged(RuntimeError):
     """The concrete publisher detected a workspace/bundle mismatch."""
 
 
+class PushApprovalTimedOut(RuntimeError):
+    """The approval port's wait window expired before any decision arrived."""
+
+
 class PushRecoveryRequired(RuntimeError):
     """The PR exists, but merge registration failed after the remote write."""
 
