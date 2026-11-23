@@ -67,6 +67,9 @@ tests/unit/test_health_merge_worker.py
 plans/delivery-merge-worker-health-20261124.md
 ```
 
+> **修订 1（2026-11-24，Verifier P1 追加）**：允许路径追加 `.env.template`，
+> 仅用于把 `--profile merge` 的旧启动说明改成默认启动。原始冻结内容不变。
+
 ## 4. 验收标准
 
 - **T1 心跳写入**：`MergeWorker._run_once()` 成功后调用心跳一次；心跳抛异常
@@ -106,3 +109,31 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 ## 7. 签收记录
 
 （待所有者书面签收）
+
+## 8. 修订 1：部署可用性（Verifier P1）
+
+独立 Verifier 在 `be92e82` 上判 `ACCEPT_WITH_NITS`，指出两个 P1。它们不改变
+T1–T7 的结论，但会让「默认 `up -d` 就能收到审批卡」这个目的落空，所以合并前
+必须闭合：
+
+1. **worker 默认崩溃循环**：compose 给 `merge-worker` 注入
+   `GITHUB_TOKEN: ""`，`build_worker()` 直接抛
+   `RuntimeError: GITHUB_TOKEN is required for Code Review Pipeline`，而
+   `restart: unless-stopped` 会把它变成无限重启。
+   要求：缺 token 时容器**一次性退出**并留下清晰错误（`restart: "no"`），
+   不制造重启风暴；其余情况下仍随 compose 常驻。
+2. **网关侧看不到合并通道**：gateway 服务未注入
+   `CODE_REVIEW_MERGE_ENABLED` / `CODE_REVIEW_MERGE_POLL_INTERVAL_S`，
+   默认读 `false`，于是 `/healthz` 恒为 `disabled`，worker 缺失永不被暴露。
+   要求：gateway 与 `merge-worker` 两个服务注入同一组
+   `CODE_REVIEW_MERGE_ENABLED`、`CODE_REVIEW_MERGE_POLL_INTERVAL_S`，
+   保证健康阈值与 worker 实际间隔一致。
+3. `.env.template` 中 `--profile merge` 的说明改为默认启动。
+
+**追加验收（T8）**：
+
+- `docker compose -f docker-compose.dev.yml config` 中，gateway 与 merge-worker
+  的 `CODE_REVIEW_MERGE_ENABLED` / `CODE_REVIEW_MERGE_POLL_INTERVAL_S` 取值一致；
+- `merge-worker` 的 `restart` 不为 `unless-stopped`（避免缺 token 时重启风暴）；
+- `.env.template` 不再出现 `--profile merge`；
+- T1–T7 全部仍然通过（不改既有实现语义）。
