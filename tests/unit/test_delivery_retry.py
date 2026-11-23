@@ -262,6 +262,32 @@ def test_retry_refuses_states_outside_retry_set(tmp_path: Path) -> None:
     assert store.saved == []
 
 
+def test_retry_refuses_approval_timed_out_record(tmp_path: Path) -> None:
+    """T6：超时记录留在 ready_for_push_approval，retry 不得开新单。"""
+    parent = _run(
+        state=DeliveryRunState.READY_FOR_PUSH_APPROVAL,
+        code=FailureCode.APPROVAL_TIMED_OUT,
+    )
+    store = _FakeStore(parent)
+
+    outcome = asyncio.run(
+        retry_failed_run(
+            "run-1",
+            store=store,
+            settings=_settings(tmp_path),
+            flow_factory=_forbidden_factory,
+        )
+    )
+
+    assert outcome.exit_code == 2
+    assert outcome.refused is True
+    assert outcome.run is None
+    assert "retry accepts only" in outcome.reason
+    # 没有新 DeliveryRun，父记录也一个字节没改。
+    assert store.saved == []
+    assert parent.state is DeliveryRunState.READY_FOR_PUSH_APPROVAL
+
+
 def test_retry_refuses_when_verify_command_resolves_empty(
     tmp_path: Path,
 ) -> None:

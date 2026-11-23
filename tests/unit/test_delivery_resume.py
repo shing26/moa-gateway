@@ -34,6 +34,7 @@ from apps.code_review_pipeline.delivery.resume import (
     _apply_recorded_patch,
     resume_run,
 )
+from apps.code_review_pipeline.delivery.ports import PushApprovalTimedOut
 from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
 from apps.code_review_pipeline.delivery.workspace import (
     GitHubWorkspaceProvisioner,
@@ -639,6 +640,88 @@ def test_non_tty_denial_leaves_record_ready_for_push_approval(
     assert (tmp_path / "runs" / "run-1.json").read_text(encoding="utf-8") == before
     assert _record_state(tmp_path) == "ready_for_push_approval"
     # 门禁在这一步之前就结束了：publisher 根本没被构造出来。
+    assert adapters == []
+
+
+def test_resume_after_timeout_can_push_once_approved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T5：超时记录仍可 resume；批准后进 PUSHING 并调用 publisher。"""
+    adapters = _wire_fakes(monkeypatch)
+    store = DeliveryRunStore(tmp_path / "runs")
+    bundle = _recorded_bundle(tmp_path)
+    timed_out = replace(
+        _run(bundle=bundle),
+        failure=FailureInfo(FailureCode.APPROVAL_TIMED_OUT, "window expired"),
+    )
+    asyncio.run(_save(store, timed_out))
+    approval = ChangeApproval(
+        approver="alice",
+        trace_id=bundle.trace_id,
+        bundle_hash=bundle.bundle_hash,
+        run_id="run-1",
+    )
+
+    outcome = asyncio.run(
+        resume_run(
+            "run-1",
+            store=store,
+            github=_FakeGithub(),
+            merge_store=_FakeMergeStore(),
+            settings=_settings(tmp_path),
+            approval_port=_FakeApprovalPort(approval),
+        )
+    )
+
+    assert outcome.exit_code == 0
+    assert len(adapters) == 1
+    assert len(adapters[0].calls) == 1
+    persisted = store.load("run-1")
+    assert persisted.state is DeliveryRunState.WAITING_CI
+    assert persisted.push is not None
+    assert persisted.failure is None
+
+
+def test_resume_timeout_again_persists_failure_without_publishing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T5：再次超时仍非零退出，状态不变，publisher 未被调用。"""
+    adapters = _wire_fakes(monkeypatch)
+    store = DeliveryRunStore(tmp_path / "runs")
+    bundle = _recorded_bundle(tmp_path)
+    timed_out = replace(
+        _run(bundle=bundle),
+        failure=FailureInfo(FailureCode.APPROVAL_TIMED_OUT, "window expired"),
+    )
+    asyncio.run(_save(store, timed_out))
+
+    class _TimingOutPort:
+        async def request(self, *, run_id: str, bundle: ChangeBundle):
+            raise PushApprovalTimedOut("approval window expired again")
+
+    outcome = asyncio.run(
+        resume_run(
+            "run-1",
+            store=store,
+            github=_FakeGithub(),
+            merge_store=_FakeMergeStore(),
+            settings=_settings(tmp_path),
+            approval_port=_TimingOutPort(),
+        )
+    )
+
+    assert outcome.exit_code != 0
+    assert outcome.refused is False
+    assert "delivery resume --run-id run-1" in outcome.reason
+    persisted = store.load("run-1")
+    assert persisted.state is DeliveryRunState.READY_FOR_PUSH_APPROVAL
+    assert persisted.failure is not None
+    assert persisted.failure.code is FailureCode.APPROVAL_TIMED_OUT
+    assert persisted.push is None
+    assert _record_state(tmp_path) == "ready_for_push_approval"
+    # publisher 在超时之后才构造，因此一个都没建。
     assert adapters == []
 
 

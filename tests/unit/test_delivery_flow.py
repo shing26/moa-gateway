@@ -28,6 +28,7 @@ from apps.code_review_pipeline.delivery.ports import (
     BundleChanged,
     ChangePreparation,
     PreparationStatus,
+    PushApprovalTimedOut,
     PushRecoveryRequired,
 )
 
@@ -658,6 +659,49 @@ async def test_approval_transport_failure_needs_human_retry(tmp_path: Path) -> N
     assert run.failure.code is FailureCode.INFRA_ERROR
     assert "approval service unavailable" in run.failure.message
     assert publisher.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_push_approval_timeout_stays_ready_for_push_approval(
+    tmp_path: Path,
+) -> None:
+    """T2：超时 ≠ 拒绝；记录原地记 approval_timed_out，不进 REJECTED。"""
+
+    class TimedOutApproval(FakeApproval):
+        async def request(self, *, run_id: str, bundle: ChangeBundle):
+            raise PushApprovalTimedOut("approval window expired")
+
+    bundle = _bundle()
+    flow, recorder, audit, publisher = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt()]),
+        preparer=FakePreparer(
+            [
+                ChangePreparation(
+                    status=PreparationStatus.READY,
+                    bundle=bundle,
+                    verification=_verification(),
+                )
+            ]
+        ),
+        approval=TimedOutApproval(None),
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.READY_FOR_PUSH_APPROVAL
+    assert run.failure is not None
+    assert run.failure.code is FailureCode.APPROVAL_TIMED_OUT
+    assert run.bundle == bundle
+    assert publisher.calls == 0
+    assert ("ready_for_push_approval", "rejected") not in audit.transitions
+    idx = audit.transitions.index(
+        ("ready_for_push_approval", "ready_for_push_approval")
+    )
+    detail = audit.details[idx]
+    assert detail["action"] == "failure"
+    assert detail["code"] == FailureCode.APPROVAL_TIMED_OUT.value
+    assert recorder.runs[-1] == run
 
 
 @pytest.mark.parametrize("returned_run_id", ["", "run-other"])

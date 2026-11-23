@@ -492,6 +492,143 @@ def test_cmd_delivery_run_wires_delivery_runtime(
     assert captured["github_closed"] is True
 
 
+def _wire_delivery_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run: SimpleNamespace,
+) -> None:
+    from app.agents import provider
+    from app.config import settings
+    from apps.code_review_pipeline import merge_store as merge_store_module
+    from apps.code_review_pipeline.delivery import flow as flow_module
+    from apps.code_review_pipeline.delivery import workspace as workspace_module
+    from apps.code_review_pipeline.delivery.adapters import github as github_adapter_module
+    from apps.code_review_pipeline.delivery.adapters import (
+        production_agent as production_agent_module,
+    )
+    from apps.code_review_pipeline.routing import github_provider
+
+    class FakeConfig:
+        def __init__(self) -> None:
+            self.model = ""
+
+        @classmethod
+        def from_env(cls, prefix: str) -> "FakeConfig":
+            return cls()
+
+    class FakeLLM:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        async def aclose(self) -> None:
+            return None
+
+    class FakeGitHub:
+        async def aclose(self) -> None:
+            return None
+
+    class FakeProvisioner:
+        def __init__(self, *, github) -> None:
+            pass
+
+        async def materialize(self, *, repo, base_sha, destination):
+            destination.mkdir(parents=True)
+            return destination
+
+    class FakeImplementer:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+    class FakeAdapter:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+    class FakeFlow:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def run(self, request):
+            return run
+
+    merge_store = merge_store_module.PostgresMergeStore(
+        dsn="postgresql://unused",
+        _psycopg=object(),
+    )
+    monkeypatch.setattr(provider, "LLMConfig", FakeConfig)
+    monkeypatch.setattr(provider, "LLMClient", FakeLLM)
+    monkeypatch.setattr(github_provider, "build_github_client", FakeGitHub)
+    monkeypatch.setattr(
+        workspace_module, "GitHubWorkspaceProvisioner", FakeProvisioner
+    )
+    monkeypatch.setattr(flow_module, "DeliveryFlow", FakeFlow)
+    monkeypatch.setattr(
+        production_agent_module, "ProductionImplementer", FakeImplementer
+    )
+    monkeypatch.setattr(github_adapter_module, "GitHubChangeAdapter", FakeAdapter)
+    monkeypatch.setattr(
+        merge_store_module, "build_merge_store", lambda: merge_store
+    )
+    monkeypatch.setattr(settings, "change_agent_push_enabled", True)
+    monkeypatch.setattr(settings, "change_agent_model", "test-model")
+    monkeypatch.setattr(
+        settings, "change_agent_verify_command", "python -m pytest -q"
+    )
+    monkeypatch.setattr(settings, "github_token", "token")
+    monkeypatch.setattr(settings, "delivery_topology", "single")
+    monkeypatch.setattr(settings, "delivery_max_steps", 12)
+    monkeypatch.setattr(settings, "delivery_max_tokens", 3456)
+    monkeypatch.setattr(settings, "delivery_run_record_dir", str(tmp_path / "runs"))
+    monkeypatch.setattr(settings, "change_agent_base_branch", "main")
+    monkeypatch.setattr(settings, "change_agent_verify_timeout_s", 1500.0)
+
+
+@pytest.mark.parametrize(
+    ("state", "failure", "expected", "prints_resume"),
+    [
+        ("waiting_ci", None, 0, False),
+        ("ready_for_push_approval", None, 0, False),
+        (
+            "ready_for_push_approval",
+            "approval_timed_out",
+            1,
+            True,
+        ),
+    ],
+)
+def test_cmd_delivery_run_exit_code_matches_resumable_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+    failure: str | None,
+    expected: int,
+    prints_resume: bool,
+) -> None:
+    """T4：超时记录退出非零并提示 resume；既有 0 退出路径不变。"""
+    from apps.code_review_pipeline.delivery.models import FailureCode, FailureInfo
+
+    run = SimpleNamespace(
+        run_id="run-1",
+        state=SimpleNamespace(value=state),
+        failure=(
+            FailureInfo(FailureCode(failure), "approval window expired")
+            if failure
+            else None
+        ),
+        push=None,
+    )
+    _wire_delivery_run(tmp_path, monkeypatch, run)
+    args = build_parser().parse_args([*_delivery_argv(), "--trace-id", "trace-cli"])
+    _apply_delivery_defaults(args)
+
+    assert cmd_delivery_run(args) == expected
+    output = capsys.readouterr().out
+    if prints_resume:
+        assert "resume    : delivery resume --run-id run-1" in output
+    else:
+        assert "resume    :" not in output
+
+
 def test_cmd_ci_triage_collects_and_writes_only_local_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

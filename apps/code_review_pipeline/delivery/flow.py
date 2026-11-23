@@ -26,6 +26,7 @@ from apps.code_review_pipeline.delivery.ports import (
     ImplementerPort,
     PreparationStatus,
     PushApprovalPort,
+    PushApprovalTimedOut,
     PushRecoveryRequired,
     RunRecorderPort,
 )
@@ -362,6 +363,16 @@ class DeliveryFlow:
                 run_id=run.run_id,
                 bundle=run.bundle,
             )
+        except PushApprovalTimedOut:
+            # 超时不是人的决定：bundle 仍冻结有效，记录留在原地等待 resume。
+            return await self._record_failure_in_place(
+                run,
+                FailureInfo(
+                    FailureCode.APPROVAL_TIMED_OUT,
+                    "push approval timed out; nothing pushed; "
+                    f"resume with delivery resume --run-id {run.run_id}",
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 - 推送审批失败直接终结为 NEEDS_HUMAN，不会继续推送
             return await self._finish(
                 run,
@@ -485,6 +496,30 @@ class DeliveryFlow:
             self._policy.max_steps - tool_steps,
             self._policy.max_tokens - run.usage.total_tokens,
         )
+
+    async def _record_failure_in_place(
+        self,
+        run: DeliveryRun,
+        failure: FailureInfo,
+    ) -> DeliveryRun:
+        """在 READY_FOR_PUSH_APPROVAL 原地记失败，不改状态。
+
+        状态机不允许自转移，而超时必须保留「bundle 仍有效、可 resume」的
+        记录形状，所以这里只写 failure + 审计，不调用 ``_move``。
+        """
+        updated = replace(run, failure=failure, updated_at=self._clock())
+        await self._recorder.save(updated)
+        await self._audit.record(
+            run=updated,
+            previous=run.state,
+            current=run.state,
+            detail={
+                "action": "failure",
+                "code": failure.code.value,
+                "message": failure.message,
+            },
+        )
+        return updated
 
     async def _finish(
         self,

@@ -18,6 +18,7 @@ from apps.code_review_pipeline.delivery.feishu_approval import (
     read_decision,
     write_decision,
 )
+from apps.code_review_pipeline.delivery.ports import PushApprovalTimedOut
 
 
 class FakeStorage:
@@ -253,7 +254,8 @@ def test_request_returns_none_on_reject() -> None:
     assert store.get_hitl("hitl-1") is None
 
 
-def test_request_times_out_and_cleans_pending() -> None:
+def test_request_times_out_raises_and_cleans_pending() -> None:
+    """T1：等待到期是超时信号，不是 None，也不写 decision。"""
     store = SessionStore(storage=FakeStorage())
     sender = FakeCardSender()
     clock = SimpleNamespace(now=1000.0)
@@ -278,8 +280,11 @@ def test_request_times_out_and_cleans_pending() -> None:
         await _wait_for_card(sender)
         return await task
 
-    assert asyncio.run(scenario()) is None
+    with pytest.raises(PushApprovalTimedOut, match="timed out"):
+        asyncio.run(scenario())
     assert store.get_hitl("hitl-1") is None
+    # 超时不是人的决定：decision key 从未被写入。
+    assert read_decision(store, "hitl-1") is None
 
 
 def test_card_send_failure_removes_pending_and_raises() -> None:

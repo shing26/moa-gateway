@@ -34,6 +34,7 @@ from apps.code_review_pipeline.delivery.models import (
 )
 from apps.code_review_pipeline.delivery.ports import (
     BundleChanged,
+    PushApprovalTimedOut,
     PushRecoveryRequired,
 )
 from apps.code_review_pipeline.delivery.retry import RETRY_STATES, retry_failed_run
@@ -170,6 +171,23 @@ async def resume_run(
             exit_code=1,
             reason="approval denied; nothing pushed",
         )
+    except PushApprovalTimedOut:
+        # 超时不是拒绝：记录留在可 resume 的门禁状态，只落失败码。
+        failure = FailureInfo(
+            FailureCode.APPROVAL_TIMED_OUT,
+            "push approval timed out; nothing pushed; "
+            f"resume with delivery resume --run-id {run.run_id}",
+        )
+        persisted = replace(run, failure=failure, updated_at=_utcnow())
+        await store.save(persisted)
+        return ResumeOutcome(
+            run=persisted,
+            exit_code=1,
+            reason=(
+                "approval timed out; nothing pushed; "
+                f"run: delivery resume --run-id {persisted.run_id}"
+            ),
+        )
     except ResumeRefused as exc:
         return ResumeOutcome(run=run, exit_code=2, refused=True, reason=str(exc))
     except (subprocess.CalledProcessError, OSError) as exc:
@@ -247,7 +265,13 @@ async def _reenter_push_gate(
         # 2d：与 DeliveryFlow 同一条已审计 publish（内含 _assert_bundle_current
         # 兜底与合并登记），状态写入也按 _move 的形状落盘。
         assert_transition(run.state, DeliveryRunState.PUSHING)
-        run = replace(run, state=DeliveryRunState.PUSHING, updated_at=_utcnow())
+        # 批准已到手：上一次的超时失败码不再是这条记录的现状。
+        run = replace(
+            run,
+            state=DeliveryRunState.PUSHING,
+            failure=None,
+            updated_at=_utcnow(),
+        )
         await store.save(run)
         pipeline = ChangePipeline(
             github=github,
