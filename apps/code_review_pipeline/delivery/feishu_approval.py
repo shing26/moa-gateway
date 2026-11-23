@@ -1,7 +1,8 @@
 """飞书远程推送审批（A1）。
 
-推送审批此前只有终端端口（``app.cli.TerminalPushApprovalPort``）：非 TTY、
-服务器或 CI 上一律拒绝，第三个人无法在终端外批准。本模块把同一条
+推送审批此前只有终端端口
+（``apps.code_review_pipeline.delivery.approval_port.TerminalPushApprovalPort``）：
+非 TTY、服务器或 CI 上一律拒绝，第三个人无法在终端外批准。本模块把同一条
 ``PushApprovalPort`` 协议接到飞书上，但**不改变交付流程语义**：
 
 * CLI 仍在 ``READY_FOR_PUSH_APPROVAL`` 等待；

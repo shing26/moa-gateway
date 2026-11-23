@@ -26,6 +26,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from apps.code_review_pipeline.delivery.approval_port import (
+    TerminalPushApprovalPort,
+    build_push_approval_port as _build_push_approval_port,
+)
+
 
 def _identity_from_task_key(task_key: str) -> tuple[str, int, str]:
     """``owner/repo#42@sha`` -> ``(repo, 42, sha)``。
@@ -309,146 +314,6 @@ def cmd_demo_approve(args: argparse.Namespace) -> int:
     return 0
 
 
-class TerminalPushApprovalPort:
-    """终端推送审批闸门（A2）：approver ≠ token 主人，fail-closed。
-
-    操作者身份 = ``GITHUB_TOKEN`` 的登录名，用 ``get_authenticated_login()``
-    从 API 读——终端里自称的 approver 永远不可验证，能验证的只有 token 主人。
-    白名单语义与 ``app/middleware/auth.py:approver_gate_error`` 同一套三态：
-    配了 ``GITHUB_APPROVER_LOGINS`` 只放行白名单成员且 ≠ token 主人；空白名单
-    只在显式 ``GATEWAY_ALLOW_INSECURE=1`` 时放行（并标记 gate=insecure*）；
-    空白名单且无 insecure 一律拒绝——不能回到门全开。比较全部大小写不敏感。
-
-    ``get_authenticated_login()`` 失败（网络/凭证）会**抛异常**：那是身份读取的
-    infra 故障，``DeliveryFlow`` 会把它映射成 ``NEEDS_HUMAN``/``INFRA_ERROR``；
-    吞成 ``None`` 会伪装成「人拒绝了」，放行更是绝对禁止。非 TTY / EOF 的既有
-    拒绝路径原样保留（``None`` → ``REJECTED``）。拒绝时向终端打印稳定原因码
-    （``self_approval`` / ``not_allowlisted``）；审批输入内容不进任何日志。
-    """
-
-    def __init__(self, github: Any) -> None:
-        self._github = github
-
-    async def request(self, *, run_id: str, bundle) -> Any:
-        from app.config import settings
-        from app.middleware.auth import insecure_mode_enabled
-        from apps.code_review_pipeline.change.pipeline import ChangeApproval
-
-        print(f"run_id   : {run_id}")
-        print(f"branch   : {bundle.branch}")
-        print(f"bundle   : {bundle.bundle_hash}")
-        print(f"patch    : {bundle.patch_hash}")
-        print(f"verify   : exit={bundle.verify_exit_code}")
-        # `isatty()` alone is not enough. A child spawned with stdin bound to
-        # DEVNULL/NUL reports `isatty() == True` on this machine's Windows
-        # Python, so the guard below lets it through and `input()` then raises
-        # EOFError - which the flow maps to `infra_error`/`needs_human`, not the
-        # `rejected` a denied gate must produce. Both no-stdin and non-TTY deny
-        # here; an EOF while prompting denies below. Nothing may raise.
-        try:
-            interactive = sys.stdin is not None and sys.stdin.isatty()
-        except (ValueError, OSError):
-            # Probing stdin can fail on its own: a closed file raises
-            # `ValueError: I/O operation on closed file`. A gate that cannot
-            # confirm an interactive operator must deny - raising would be
-            # mapped to `infra_error`. Only these two: Ctrl-C must still
-            # propagate rather than be turned into a denial.
-            interactive = False
-        if not interactive:
-            print("non-interactive stdin; push approval denied")
-            return None
-        try:
-            operator = (await asyncio.to_thread(input, "approver: ")).strip()
-            answer = (
-                await asyncio.to_thread(
-                    input,
-                    "type APPROVE to push this exact bundle: ",
-                )
-            ).strip()
-        except EOFError:
-            print("stdin closed; push approval denied")
-            return None
-        if not operator or answer != "APPROVE":
-            return None
-        # token 主人是唯一可验证的身份。读取失败必须上抛（flow 映射
-        # INFRA_ERROR），不得吞成 None——那会把 infra 故障记成「人拒绝了」。
-        operator_login = str(await self._github.get_authenticated_login())
-        allowlist = settings.github_approver_logins
-        insecure = insecure_mode_enabled(os.getenv("GATEWAY_ALLOW_INSECURE"))
-        approver = operator.lower()
-        login = operator_login.lower()
-        gate = ""
-        if approver == login:
-            # 自审批：白名单模式和裸拒绝模式下都拒绝；只有显式 insecure 的
-            # 逃生口放行，且 gate 如实标记 insecure_self_approval。
-            if allowlist or not insecure:
-                print("push approval denied: self_approval")
-                return None
-            gate = "insecure_self_approval"
-        elif allowlist:
-            if approver not in {item.lower() for item in allowlist}:
-                print("push approval denied: not_allowlisted")
-                return None
-            gate = "allowlist"
-        elif insecure:
-            gate = "insecure"
-        else:
-            # 空白名单且无 insecure：拒绝。这是 2026-09-28 修的 fail-closed
-            # 姿势在终端通道上的对齐（见 approver_gate_error）。
-            print("push approval denied: not_allowlisted")
-            return None
-        return ChangeApproval(
-            approver=operator,
-            trace_id=bundle.trace_id,
-            bundle_hash=bundle.bundle_hash,
-            run_id=run_id,
-            channel="terminal",
-            identity_verified=False,
-            operator_login=operator_login,
-            gate=gate,
-        )
-
-
-def _build_push_approval_port(github: Any) -> Any:
-    """按配置选择推送审批通道（A1）：默认终端，显式开启才走飞书。"""
-    from app.config import settings
-
-    if not settings.feishu_push_approval_enabled:
-        return TerminalPushApprovalPort(github=github)
-
-    from app.channels.feishu_auth import FeishuAuthConfig, FeishuTokenProvider
-    from app.channels.feishu_cards import FeishuCardSender
-    from app.engine import RedisHitlStorage, SessionStore
-    from apps.code_review_pipeline.delivery.feishu_approval import (
-        FeishuPushApprovalPort,
-    )
-    from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
-
-    print(
-        "push approval: feishu "
-        f"(timeout={settings.feishu_push_approval_timeout_s}s)",
-        file=sys.stderr,
-    )
-    auth = FeishuTokenProvider(
-        FeishuAuthConfig(
-            app_id=settings.feishu_app_id,
-            app_secret=settings.feishu_app_secret,
-        )
-    )
-    return FeishuPushApprovalPort(
-        card_sender=FeishuCardSender(auth),
-        session_store=SessionStore(
-            storage=RedisHitlStorage(
-                url=settings.redis_url,
-                enable_fallback=settings.redis_enable_fallback,
-            )
-        ),
-        run_store=DeliveryRunStore(settings.delivery_run_record_dir),
-        github=github,
-        settings_obj=settings,
-    )
-
-
 def _delivery_repo_profile_root() -> Path:
     """档案目录。相对路径按**部署仓库根**解析，而不是当前工作目录。
 
@@ -670,7 +535,11 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
             print(f"pr        : {run.push.pull_request.url}")
             print(f"head_sha  : {run.push.pull_request.head_sha}")
         print(f"record    : {settings.delivery_run_record_dir}/{run.run_id}.json")
-        if (
+        if run.state.value in {"failed", "budget_exhausted"}:
+            print(f"resume    : delivery resume --run-id {run.run_id}")
+        elif run.state.value == "needs_human":
+            print(f"view      : delivery view --run-id {run.run_id}")
+        elif (
             run.failure is not None
             and run.failure.code is FailureCode.APPROVAL_TIMED_OUT
         ):
@@ -682,6 +551,54 @@ def cmd_delivery_run(args: argparse.Namespace) -> int:
         return 1
     finally:
         lock.release()
+
+
+def _one_line(value: Any) -> str:
+    return " ".join(str(value).split())
+
+
+def _stdout_is_tty() -> bool:
+    try:
+        return bool(sys.stdout.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _print_delivery_view_summary(run: Any) -> None:
+    """TTY 下把摘要写到 stderr；stdout 始终只留给机器可读 JSON。"""
+    out = sys.stderr
+    print(f"run_id   : {run.run_id}", file=out)
+    print(f"state    : {run.state.value}", file=out)
+    failure = run.failure
+    if failure is None:
+        print("failure  : -", file=out)
+    else:
+        message = _one_line(failure.message) or "-"
+        print(f"failure  : {failure.code.value} - {message}", file=out)
+    push = run.push
+    if push is None:
+        print("pr       : -", file=out)
+        print("head_sha : -", file=out)
+    else:
+        pr = push.pull_request
+        print(f"pr       : #{pr.number} {pr.url}", file=out)
+        print(f"head_sha : {pr.head_sha}", file=out)
+    merge = run.merge
+    if merge is None:
+        print("ci       : -", file=out)
+        print("merge    : -", file=out)
+        return
+    failing = [
+        _one_line(item.get("name", ""))
+        for item in merge.ci_failing[:5]
+        if item.get("name")
+    ]
+    ci_line = merge.ci_state or "-"
+    if failing:
+        ci_line = f"{ci_line} failing: {', '.join(failing)}"
+    print(f"ci       : {ci_line}", file=out)
+    merged_sha = merge.merged_sha or "-"
+    print(f"merge    : {merge.state} merged_sha={merged_sha}", file=out)
 
 
 def cmd_delivery_view(args: argparse.Namespace) -> int:
@@ -703,6 +620,8 @@ def cmd_delivery_view(args: argparse.Namespace) -> int:
                 await close()
 
     current = asyncio.run(read())
+    if _stdout_is_tty():
+        _print_delivery_view_summary(current)
     print(json.dumps(current.to_dict(), ensure_ascii=False, indent=2))
     return 0
 

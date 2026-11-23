@@ -244,13 +244,15 @@ async def _run_real_flow(
 ) -> DeliveryRun:
     """与 cmd_delivery_run 同构的真实执行栈；宁可重复也不动黄金路径。"""
     from app.agents.provider import LLMClient, LLMConfig
-    from app.cli import _build_push_approval_port
     from apps.code_review_pipeline.change.pipeline import ChangePipeline
     from apps.code_review_pipeline.delivery.adapters.github import (
         GitHubChangeAdapter,
     )
     from apps.code_review_pipeline.delivery.adapters.production_agent import (
         ProductionImplementer,
+    )
+    from apps.code_review_pipeline.delivery.approval_port import (
+        build_push_approval_port,
     )
     from apps.code_review_pipeline.delivery.audit import WalDeliveryAudit
     from apps.code_review_pipeline.delivery.flow import DeliveryFlow
@@ -314,7 +316,7 @@ async def _run_real_flow(
                         command_timeout_s=settings.change_agent_verify_timeout_s,
                     ),
                     preparer=adapter,
-                    approval=_build_push_approval_port(github),
+                    approval=build_push_approval_port(github),
                     publisher=adapter,
                     recorder=DeliveryRunStore(
                         settings.delivery_run_record_dir
