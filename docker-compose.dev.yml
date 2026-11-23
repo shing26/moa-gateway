@@ -58,6 +58,10 @@ services:
       - CODE_REVIEW_PUBLISH_LEASE_SECONDS=${CODE_REVIEW_PUBLISH_LEASE_SECONDS:-120}
       - CODE_REVIEW_FEISHU_CHANNEL=${CODE_REVIEW_FEISHU_CHANNEL:-}
       - CODE_REVIEW_PUBLISH_DRY_RUN=${CODE_REVIEW_PUBLISH_DRY_RUN:-1}
+      # 与 merge-worker 取同一组变量/默认值：网关的 /healthz 阈值必须与 worker
+      # 实际轮询间隔一致，否则心跳刚写就被判过期（或停了也不降级）。
+      - CODE_REVIEW_MERGE_ENABLED=${CODE_REVIEW_MERGE_ENABLED:-1}
+      - CODE_REVIEW_MERGE_POLL_INTERVAL_S=${CODE_REVIEW_MERGE_POLL_INTERVAL_S:-60}
       - FEISHU_APP_ID=${FEISHU_APP_ID:-}
       - FEISHU_APP_SECRET=${FEISHU_APP_SECRET:-}
       - WEBHOOK_AUTH_TOKEN=${WEBHOOK_AUTH_TOKEN:-}
@@ -141,7 +145,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - VECTOR_DB_DSN=postgresql://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
       - CODE_REVIEW_DATABASE_URL=postgresql://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
-      - CODE_REVIEW_MERGE_ENABLED=1
+      - CODE_REVIEW_MERGE_ENABLED=${CODE_REVIEW_MERGE_ENABLED:-1}
       - CODE_REVIEW_MERGE_CHANNEL=${CODE_REVIEW_MERGE_CHANNEL:-}
       - CODE_REVIEW_MERGE_POLL_INTERVAL_S=${CODE_REVIEW_MERGE_POLL_INTERVAL_S:-60}
       # 建表归网关；worker 只是消费者（与 app.worker 同一理由）。
@@ -155,7 +159,9 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    restart: unless-stopped
+    # 缺 GITHUB_TOKEN 时 build_worker() 会 fail-fast 退出；不能配 restart 策略，
+    # 否则 "没配 token" 会变成无限重启风暴，而不是一条清晰的错误。
+    restart: "no"
 
   omniroute:
     image: diegosouzapw/omniroute:latest

@@ -123,6 +123,17 @@ def _compose_service() -> dict:
     return compose["services"]["merge-worker"]
 
 
+def _service_env(service: dict) -> dict[str, str]:
+    environment = service["environment"]
+    if isinstance(environment, dict):
+        return {str(key): str(value) for key, value in environment.items()}
+    pairs: dict[str, str] = {}
+    for entry in environment:
+        key, _, value = str(entry).partition("=")
+        pairs[key] = value
+    return pairs
+
+
 def test_compose_has_default_merge_worker_service() -> None:
     """T6：默认 `up -d` 就要包含该进程，所以不能挂在 profile 下。"""
     service = _compose_service()
@@ -141,3 +152,35 @@ def test_compose_merge_worker_waits_for_redis_and_postgres() -> None:
     assert {"redis", "postgres"} <= set(depends_on)
     assert depends_on["redis"]["condition"] == "service_healthy"
     assert depends_on["postgres"]["condition"] == "service_healthy"
+
+
+def test_gateway_and_merge_worker_share_merge_channel_settings() -> None:
+    """T8：网关的 /healthz 阈值必须与 worker 实际轮询间隔来自同一组变量。"""
+    compose = yaml.safe_load(
+        (PROJECT_ROOT / "docker-compose.dev.yml").read_text(encoding="utf-8")
+    )
+    gateway_env = _service_env(compose["services"]["gateway"])
+    worker_env = _service_env(compose["services"]["merge-worker"])
+
+    for key in (
+        "CODE_REVIEW_MERGE_ENABLED",
+        "CODE_REVIEW_MERGE_POLL_INTERVAL_S",
+    ):
+        assert key in gateway_env
+        assert key in worker_env
+        assert gateway_env[key] == worker_env[key]
+
+
+def test_merge_worker_exits_instead_of_restart_looping() -> None:
+    """T8：缺 GITHUB_TOKEN 时 worker fail-fast；不能配成无限重启。"""
+    restart = _compose_service()["restart"]
+
+    assert restart != "unless-stopped"
+    assert restart == "no"
+
+
+def test_env_template_documents_default_merge_worker_start() -> None:
+    """T8：说明里不再让用户额外加 --profile merge。"""
+    template = (PROJECT_ROOT / ".env.template").read_text(encoding="utf-8")
+
+    assert "--profile merge" not in template
