@@ -58,6 +58,10 @@ services:
       - CODE_REVIEW_PUBLISH_LEASE_SECONDS=${CODE_REVIEW_PUBLISH_LEASE_SECONDS:-120}
       - CODE_REVIEW_FEISHU_CHANNEL=${CODE_REVIEW_FEISHU_CHANNEL:-}
       - CODE_REVIEW_PUBLISH_DRY_RUN=${CODE_REVIEW_PUBLISH_DRY_RUN:-1}
+      # 与 merge-worker 取同一组变量/默认值：网关的 /healthz 阈值必须与 worker
+      # 实际轮询间隔一致，否则心跳刚写就被判过期（或停了也不降级）。
+      - CODE_REVIEW_MERGE_ENABLED=${CODE_REVIEW_MERGE_ENABLED:-1}
+      - CODE_REVIEW_MERGE_POLL_INTERVAL_S=${CODE_REVIEW_MERGE_POLL_INTERVAL_S:-60}
       - FEISHU_APP_ID=${FEISHU_APP_ID:-}
       - FEISHU_APP_SECRET=${FEISHU_APP_SECRET:-}
       - WEBHOOK_AUTH_TOKEN=${WEBHOOK_AUTH_TOKEN:-}
@@ -125,15 +129,15 @@ services:
   # 合并通道的 worker（ADR-021）：轮询 PR 的 CI 状态，绿了推审批卡片。
   #
   # 单独一个进程而不是塞进网关：合并通道与请求路径的失败域不同，且它需要
-  # CODE_REVIEW_MERGE_ENABLED=1 才该存在。用 profile 隔离，默认 `up -d` 不会
-  # 起它；要用时 `docker compose -f docker-compose.dev.yml --profile merge up -d`。
+  # CODE_REVIEW_MERGE_ENABLED=1 才该存在。不设 profile：默认
+  # `docker compose -f docker-compose.dev.yml up -d` 就包含该进程——"进程忘了起"
+  # 正是 2026-11-23 那次审批卡永远不来的根因。
   #
   # 与网关共用同一个 Postgres（merge_store）与 Redis（HITL 待批记录）——少了
   # 任何一个，通道会静默不生效：worker 建的记录网关看不见，或卡片点了"已失效"。
   # 网关启动时会自检这两条并在日志里报出来。
-  merge_worker:
+  merge-worker:
     build: .
-    profiles: ["merge"]
     command: ["python", "-m", "app.merge_worker"]
     environment:
       - ENV=dev
@@ -141,7 +145,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - VECTOR_DB_DSN=postgresql://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
       - CODE_REVIEW_DATABASE_URL=postgresql://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
-      - CODE_REVIEW_MERGE_ENABLED=1
+      - CODE_REVIEW_MERGE_ENABLED=${CODE_REVIEW_MERGE_ENABLED:-1}
       - CODE_REVIEW_MERGE_CHANNEL=${CODE_REVIEW_MERGE_CHANNEL:-}
       - CODE_REVIEW_MERGE_POLL_INTERVAL_S=${CODE_REVIEW_MERGE_POLL_INTERVAL_S:-60}
       # 建表归网关；worker 只是消费者（与 app.worker 同一理由）。
@@ -155,7 +159,9 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    restart: unless-stopped
+    # 缺 GITHUB_TOKEN 时 build_worker() 会 fail-fast 退出；不能配 restart 策略，
+    # 否则 "没配 token" 会变成无限重启风暴，而不是一条清晰的错误。
+    restart: "no"
 
   omniroute:
     image: diegosouzapw/omniroute:latest

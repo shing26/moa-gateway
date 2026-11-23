@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from app import deps
 from app.channels.feishu_cards import ApprovalCard
 from apps.code_review_pipeline.merge_state import MergeState
 from apps.code_review_pipeline.merge_store import MergeRecord
@@ -190,3 +191,76 @@ async def test_no_card_sent_without_target() -> None:
 
     assert not ok
     assert len(sender.sent_cards) == 0
+
+
+@pytest.mark.asyncio
+async def test_notifier_reads_deps_card_sender_at_call_time(monkeypatch) -> None:
+    """T5：导入期别名会绑死 None；调用时读取才能拿到 init_feishu 之后的值。"""
+    sender = _FakeCardSender()
+    monkeypatch.setattr(deps, "_card_sender", sender)
+    notifier = MergeNotifier(default_target="chat_123")
+
+    ok = await notifier.send_pr_opened_card(
+        _make_record(), title="t", url="https://example.test/pr/1"
+    )
+
+    assert ok
+    assert len(sender.sent_cards) == 1
+
+
+@pytest.mark.asyncio
+async def test_init_feishu_then_new_notifier_uses_global_sender(monkeypatch) -> None:
+    """T5：init_feishu() 之后新建的 notifier（未注入）能拿到全局 sender。"""
+    sender = _FakeCardSender()
+    monkeypatch.setattr(deps, "_card_sender", None)
+    monkeypatch.setattr(deps, "_feishu_config", None)
+    monkeypatch.setattr(deps.settings, "feishu_app_id", "app_id")
+    monkeypatch.setattr(deps.settings, "feishu_app_secret", "app_secret")
+    monkeypatch.setattr(deps, "FeishuCardSender", lambda _auth: sender)
+
+    class _PipelineStub:
+        def set_card_sender(self, _card_sender) -> None:
+            return None
+
+    monkeypatch.setattr(deps, "pipeline", _PipelineStub())
+    deps.init_feishu()
+
+    notifier = MergeNotifier(default_target="chat_123")
+    ok = await notifier.send_pr_opened_card(
+        _make_record(), title="t", url="https://example.test/pr/2"
+    )
+
+    assert ok
+    assert sender.sent_cards
+
+
+@pytest.mark.asyncio
+async def test_explicit_card_sender_wins_over_deps_global(monkeypatch) -> None:
+    """T5：显式注入优先。"""
+    explicit = _FakeCardSender()
+    global_sender = _FakeCardSender()
+    monkeypatch.setattr(deps, "_card_sender", global_sender)
+    notifier = MergeNotifier(card_sender=explicit, default_target="chat_123")
+
+    ok = await notifier.send_pr_opened_card(
+        _make_record(), title="t", url="https://example.test/pr/3"
+    )
+
+    assert ok
+    assert len(explicit.sent_cards) == 1
+    assert global_sender.sent_cards == []
+
+
+@pytest.mark.asyncio
+async def test_no_sender_skips_with_warning_without_raising(monkeypatch, caplog) -> None:
+    """T5：app.deps._card_sender 为 None 时跳过并记 warning，不抛异常。"""
+    monkeypatch.setattr(deps, "_card_sender", None)
+    notifier = MergeNotifier(default_target="chat_123")
+
+    with caplog.at_level("WARNING", logger="moa.merge_notifier"):
+        ok = await notifier.send_pr_opened_card(
+            _make_record(), title="t", url="https://example.test/pr/4"
+        )
+
+    assert not ok
+    assert "card sender not initialized" in caplog.text
