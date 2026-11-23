@@ -44,12 +44,16 @@
 
 ### T3 `delivery view` 可读摘要
 
-1. **stdout 是 TTY 时**，在 JSON 之前打印摘要块：
+1. **stdout 是 TTY 时**，把摘要块写到 **stderr**（stdout 保持纯 JSON）：
    `run_id` / `state` / `failure`（code + message）/ `pr`（#号 + URL）/
    `head_sha` / `ci`（状态 + 失败检查名，最多 5 个）/ `merge`（state + merged_sha）。
-2. **stdout 非 TTY（管道/测试）时行为不变**：只输出 JSON，保证
-   `json.loads(stdout)` 仍成立。
+2. **stdout 非 TTY（管道/测试）时不打印摘要**：`json.loads(stdout)` 恒成立。
 3. JSON 内容与字段顺序不变。
+
+> **修订 1（2026-11-24，Verifier REJECT 后）**：原设计把摘要写在 JSON 之前，
+> 一旦 `failure.message` 含 `{`，「从第一个 `{` 解析」就失效（Verifier 已复现）。
+> 改为「人看的摘要走 stderr、机器看的 JSON 独占 stdout」，既保住脚本契约，也
+> 不再依赖任何分隔符约定。
 
 ## 2. 允许路径（Allowed paths）
 
@@ -70,8 +74,9 @@ plans/delivery-cli-finish-20261124.md
   导入；端口行为不回归（既有拒绝/放行测试全绿）。
 - **T2** 三种终态各打印对应提示，其他状态不打印；退出码与 #132 的规则一致
   （`waiting_ci`=0、无 failure 的 `ready_for_push_approval`=0、其余=1）。
-- **T3** 非 TTY 输出仍是纯 JSON（既有测试不改）；TTY 下有摘要且包含
-  `/pull/`、head_sha、失败检查名；摘要不影响 JSON 解析（以第一个 `{` 起始）。
+- **T3** stdout 在任何情况下都是纯 JSON（`json.loads(stdout)` 恒成立，
+  包括 `failure.message` 含 `{`）；TTY 时 stderr 摘要包含 `/pull/`、head_sha、
+  失败检查名；非 TTY 时 stderr 无摘要。
 - **T4** 不新增依赖；不删弱化断言；`ruff check .` 全绿。
 
 ## 4. 验证命令
@@ -81,6 +86,12 @@ V1  $env:PYTHONPATH='.'; python -m pytest tests/unit/test_delivery_cli.py tests/
 V2  $env:PYTHONPATH='.'; python -m pytest tests/unit -q
 V3  $env:PYTHONPATH='.'; python -m ruff check .
 ```
+
+> **修订 2（2026-11-24）**：`python` 一律指仓库 venv 解释器
+> `D:\HermesData\moa-gateway\.venv\Scripts\python.exe`（Python 3.13）。
+> 用系统/Anaconda 的 bare `python` 会因 bench 子进程 `isolated_env` 白名单不含
+> `APPDATA` 而看不到 user site，产生 14 个与本分支无关的
+> `ModuleNotFoundError: No module named 'fastapi'`。V2 必须在项目 venv 下执行。
 
 ## 5. 禁止
 
