@@ -373,3 +373,55 @@ def test_retry_maps_failed_new_run_to_exit_1(tmp_path: Path) -> None:
 
     assert outcome.exit_code == 1
     assert outcome.run is new_run
+
+
+def test_retry_prints_warning_when_stale_lock_replaced(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from apps.code_review_pipeline.delivery.lockfile import StaleLockReplaced, LockInfo
+    from apps.code_review_pipeline.delivery import retry
+
+    parent = _run()
+    store = _FakeStore(parent)
+    new_run = replace(
+        parent,
+        run_id="run-2",
+        state=DeliveryRunState.WAITING_CI,
+        failure=None,
+    )
+    flow = _FakeFlow(new_run)
+
+    # Monkeypatch retry.acquire to return StaleLockReplaced
+    original_acquire = retry.acquire
+
+    def fake_acquire(path):
+        holder = LockInfo(
+            pid=12345,
+            started_at="2026-11-21T10:00:00+00:00",
+            host="test-host",
+        )
+        # StaleLockReplaced expects path, info (current), previous
+        current = LockInfo(
+            pid=os.getpid(),
+            started_at="2026-11-21T10:00:01+00:00",
+            host="test-host",
+        )
+        return StaleLockReplaced(path, current, holder)
+
+    retry.acquire = fake_acquire
+    try:
+        outcome = _retry_request(tmp_path, store, flow)
+    finally:
+        retry.acquire = original_acquire
+
+    # Assert the warning appears in stderr
+    stderr = capsys.readouterr().err
+    expected = (
+        "warning: replaced stale lock held by pid=12345 "
+        "started_at=2026-11-21T10:00:00+00:00 host=test-host"
+    )
+    assert expected in stderr
+
+    # Assert retry still proceeds (exit_code 0 for WAITING_CI)
+    assert outcome.exit_code == 0
+    assert outcome.run is new_run

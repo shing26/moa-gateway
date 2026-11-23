@@ -13,13 +13,14 @@ CI / MERGE 类失败（已有 PR，走 ci-triage）、APPROVAL_REJECTED（人的
 
 from __future__ import annotations
 
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from apps.code_review_pipeline.delivery.lockfile import acquire, read_holder
+from apps.code_review_pipeline.delivery.lockfile import acquire, read_holder, StaleLockReplaced
 from apps.code_review_pipeline.delivery.models import (
     DeliveryPolicy,
     DeliveryRequest,
@@ -195,6 +196,12 @@ async def retry_failed_run(
         / f"delivery-{request.repo.replace('/', '-')}.lock"
     )
     lock = acquire(lock_path)
+    if isinstance(lock, StaleLockReplaced):
+        print(
+            f"warning: replaced stale lock held by pid={lock.previous.pid} "
+            f"started_at={lock.previous.started_at} host={lock.previous.host}",
+            file=sys.stderr,
+        )
     if lock is None:
         holder = read_holder(lock_path)
         if holder is not None:
