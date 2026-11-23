@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -627,6 +628,151 @@ def test_cmd_delivery_run_exit_code_matches_resumable_state(
         assert "resume    : delivery resume --run-id run-1" in output
     else:
         assert "resume    :" not in output
+
+
+@pytest.mark.parametrize(
+    ("state", "failure", "expected_exit", "hint"),
+    [
+        (
+            "failed",
+            "verify_failed",
+            1,
+            "resume    : delivery resume --run-id run-1",
+        ),
+        (
+            "budget_exhausted",
+            "infra_error",
+            1,
+            "resume    : delivery resume --run-id run-1",
+        ),
+        (
+            "needs_human",
+            "infra_error",
+            1,
+            "view      : delivery view --run-id run-1",
+        ),
+        ("merged", None, 1, None),
+    ],
+)
+def test_cmd_delivery_run_prints_next_step_for_terminal_states(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    state: str,
+    failure: str | None,
+    expected_exit: int,
+    hint: str | None,
+) -> None:
+    """T2：failed/budget_exhausted 提示 resume，needs_human 提示 view。"""
+    from apps.code_review_pipeline.delivery.models import FailureCode, FailureInfo
+
+    run = SimpleNamespace(
+        run_id="run-1",
+        state=SimpleNamespace(value=state),
+        failure=(
+            FailureInfo(FailureCode(failure), "boom") if failure is not None else None
+        ),
+        push=None,
+    )
+    _wire_delivery_run(tmp_path, monkeypatch, run)
+    args = build_parser().parse_args([*_delivery_argv(), "--trace-id", "trace-cli"])
+    _apply_delivery_defaults(args)
+
+    assert cmd_delivery_run(args) == expected_exit
+
+    output = capsys.readouterr().out
+    if hint is None:
+        assert "resume    :" not in output
+        assert "view      :" not in output
+    else:
+        assert hint in output
+        other = "view      :" if hint.startswith("resume") else "resume    :"
+        assert other not in output
+
+
+def test_cmd_delivery_view_prints_tty_summary_before_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """T3：TTY 下先打印人读摘要，JSON 仍从第一个 ``{`` 可解析。"""
+    from app.config import settings
+    from apps.code_review_pipeline.change.refs import PullRequestRef
+    from apps.code_review_pipeline.delivery.models import (
+        DeliveryRunState,
+        FailureCode,
+        FailureInfo,
+        PushOutcome,
+    )
+    from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
+    from apps.code_review_pipeline.merge_state import MergeState
+    from apps.code_review_pipeline.merge_store import MergeRecord, MergeStore
+    from tests.unit.test_delivery_store import _run
+
+    store = DeliveryRunStore(tmp_path / "runs")
+    merges = MergeStore()
+    head_sha = "b" * 40
+    push = PushOutcome(
+        branch="moa/fix-trace-1",
+        commit_sha=head_sha,
+        pull_request=PullRequestRef(
+            number=9,
+            url="https://github.com/owner/name/pull/9",
+            head_sha=head_sha,
+        ),
+    )
+    run = replace(
+        _run(DeliveryRunState.WAITING_CI),
+        push=push,
+        failure=FailureInfo(FailureCode.CI_FAILED, "checks failed"),
+        merge=MergeRecord(repo="owner/name", pr_number=9, head_sha=head_sha),
+    )
+    asyncio.run(store.save(run))
+    merges.save(
+        MergeRecord(
+            repo="owner/name",
+            pr_number=9,
+            head_sha=head_sha,
+            state=MergeState.MERGED.value,
+            ci_state="failure",
+            ci_failing=tuple(
+                {"name": f"check-{index}"} for index in range(6)
+            ),
+            merged_sha="c" * 40,
+        )
+    )
+    monkeypatch.setattr(settings, "delivery_run_record_dir", str(tmp_path / "runs"))
+    monkeypatch.setattr(
+        "apps.code_review_pipeline.merge_store.build_merge_store",
+        lambda: merges,
+    )
+
+    class TtyStdout:
+        def __init__(self, target) -> None:
+            self._target = target
+
+        def write(self, text: str) -> int:
+            return self._target.write(text)
+
+        def flush(self) -> None:
+            self._target.flush()
+
+        def isatty(self) -> bool:
+            return True
+
+    monkeypatch.setattr(sys, "stdout", TtyStdout(sys.stdout))
+
+    assert cmd_delivery_view(SimpleNamespace(run_id="run-1")) == 0
+
+    output = capsys.readouterr().out
+    summary = output[: output.index("{")]
+    assert "https://github.com/owner/name/pull/9" in summary
+    assert head_sha in summary
+    assert "check-0" in summary
+    assert "check-4" in summary
+    assert "check-5" not in summary
+    parsed = json.loads(output[output.index("{") :])
+    assert parsed["merge"]["merged_sha"] == "c" * 40
 
 
 def test_cmd_ci_triage_collects_and_writes_only_local_artifacts(
