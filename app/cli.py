@@ -565,27 +565,28 @@ def _stdout_is_tty() -> bool:
 
 
 def _print_delivery_view_summary(run: Any) -> None:
-    """终端里先给人读摘要；非 TTY 不调用，机器可读输出仍是纯 JSON。"""
-    print(f"run_id   : {run.run_id}")
-    print(f"state    : {run.state.value}")
+    """TTY 下把摘要写到 stderr；stdout 始终只留给机器可读 JSON。"""
+    out = sys.stderr
+    print(f"run_id   : {run.run_id}", file=out)
+    print(f"state    : {run.state.value}", file=out)
     failure = run.failure
     if failure is None:
-        print("failure  : -")
+        print("failure  : -", file=out)
     else:
         message = _one_line(failure.message) or "-"
-        print(f"failure  : {failure.code.value} - {message}")
+        print(f"failure  : {failure.code.value} - {message}", file=out)
     push = run.push
     if push is None:
-        print("pr       : -")
-        print("head_sha : -")
+        print("pr       : -", file=out)
+        print("head_sha : -", file=out)
     else:
         pr = push.pull_request
-        print(f"pr       : #{pr.number} {pr.url}")
-        print(f"head_sha : {pr.head_sha}")
+        print(f"pr       : #{pr.number} {pr.url}", file=out)
+        print(f"head_sha : {pr.head_sha}", file=out)
     merge = run.merge
     if merge is None:
-        print("ci       : -")
-        print("merge    : -")
+        print("ci       : -", file=out)
+        print("merge    : -", file=out)
         return
     failing = [
         _one_line(item.get("name", ""))
@@ -595,9 +596,9 @@ def _print_delivery_view_summary(run: Any) -> None:
     ci_line = merge.ci_state or "-"
     if failing:
         ci_line = f"{ci_line} failing: {', '.join(failing)}"
-    print(f"ci       : {ci_line}")
+    print(f"ci       : {ci_line}", file=out)
     merged_sha = merge.merged_sha or "-"
-    print(f"merge    : {merge.state} merged_sha={merged_sha}")
+    print(f"merge    : {merge.state} merged_sha={merged_sha}", file=out)
 
 
 def cmd_delivery_view(args: argparse.Namespace) -> int:

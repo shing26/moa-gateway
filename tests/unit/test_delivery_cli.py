@@ -195,9 +195,11 @@ def test_cmd_delivery_view_prints_latest_merge_state(
 
     assert cmd_delivery_view(SimpleNamespace(run_id="run-1")) == 0
 
-    output = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
     assert output["merge"]["state"] == "merged"
     assert output["merge"]["merged_sha"] == "c" * 40
+    assert "run_id   :" not in captured.err
 
 
 def test_delivery_defaults_use_settings_and_wire_run_command(
@@ -690,12 +692,18 @@ def test_cmd_delivery_run_prints_next_step_for_terminal_states(
         assert other not in output
 
 
-def test_cmd_delivery_view_prints_tty_summary_before_json(
+@pytest.mark.parametrize(
+    "failure_message",
+    ["checks failed", 'tool failed with {"a": 1}'],
+    ids=["plain", "contains-json-brace"],
+)
+def test_cmd_delivery_view_prints_tty_summary_to_stderr(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    failure_message: str,
 ) -> None:
-    """T3：TTY 下先打印人读摘要，JSON 仍从第一个 ``{`` 可解析。"""
+    """T3：TTY 摘要走 stderr，stdout 在任何 message 下都可 json.loads。"""
     from app.config import settings
     from apps.code_review_pipeline.change.refs import PullRequestRef
     from apps.code_review_pipeline.delivery.models import (
@@ -724,7 +732,7 @@ def test_cmd_delivery_view_prints_tty_summary_before_json(
     run = replace(
         _run(DeliveryRunState.WAITING_CI),
         push=push,
-        failure=FailureInfo(FailureCode.CI_FAILED, "checks failed"),
+        failure=FailureInfo(FailureCode.CI_FAILED, failure_message),
         merge=MergeRecord(repo="owner/name", pr_number=9, head_sha=head_sha),
     )
     asyncio.run(store.save(run))
@@ -764,14 +772,18 @@ def test_cmd_delivery_view_prints_tty_summary_before_json(
 
     assert cmd_delivery_view(SimpleNamespace(run_id="run-1")) == 0
 
-    output = capsys.readouterr().out
-    summary = output[: output.index("{")]
+    captured = capsys.readouterr()
+    summary = captured.err
+    assert "run_id   : run-1" in summary
     assert "https://github.com/owner/name/pull/9" in summary
     assert head_sha in summary
     assert "check-0" in summary
     assert "check-4" in summary
     assert "check-5" not in summary
-    parsed = json.loads(output[output.index("{") :])
+    assert failure_message in summary
+    assert captured.out.lstrip().startswith("{")
+    parsed = json.loads(captured.out)
+    assert parsed["failure"]["message"] == failure_message
     assert parsed["merge"]["merged_sha"] == "c" * 40
 
 
