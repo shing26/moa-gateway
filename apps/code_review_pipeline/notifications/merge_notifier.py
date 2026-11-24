@@ -27,6 +27,7 @@ _RESOLVED_KINDS = {
     "merged": "merge_resolved_merged",
     "superseded": "merge_resolved_superseded",
     "failed": "merge_resolved_failed",
+    "rejected": "notification",
 }
 
 
@@ -262,6 +263,9 @@ class MergeNotifier:
         if outcome == "merged":
             sha = (detail or record.merged_sha or record.head_sha)[:12]
             return f"✅ 已合并 {sha}（审批人 {record.approver or '未知'}）"
+        if outcome == "rejected":
+            approver = record.approver or detail or "未知"
+            return f"🚫 已拒绝（审批人 {approver}）"
         if outcome == "superseded":
             return (
                 f"⚠️ 本卡已作废：PR head 变了（{record.head_sha[:12]}）；"

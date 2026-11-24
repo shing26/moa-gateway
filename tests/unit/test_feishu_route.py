@@ -11,6 +11,9 @@ from app.deps import pipeline
 from app.main import app
 from app.pipeline import PipelineResult
 import app.routes.feishu as feishu_route
+from apps.code_review_pipeline.merge_state import MergeAction, MergeState
+from apps.code_review_pipeline.merge_store import MergeRecord, MergeStore
+from apps.code_review_pipeline.routing.github_client import MergeOutcome
 
 
 class FakeFeishuAdapter:
@@ -245,3 +248,241 @@ def test_feishu_no_adapter_still_returns_ok(monkeypatch) -> None:
         res = client.post("/feishu/event", json=_event("hello"))
         assert res.status_code == 200
         assert res.json() == {"msg": "ok"}
+
+
+class _RecordingMergeNotifier:
+    def __init__(self, *, raises: bool = False) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+        self.raises = raises
+
+    async def send_resolved_card(
+        self, record, outcome: str, detail: str = ""
+    ) -> bool:
+        self.calls.append((record.task_key, outcome, detail))
+        if self.raises:
+            raise RuntimeError("feishu down")
+        return True
+
+
+class _FakeMergeExecutor:
+    def __init__(self, outcome: MergeOutcome, on_execute) -> None:
+        self._outcome = outcome
+        self._on_execute = on_execute
+
+    async def execute(self, hitl_id: str, action: str, operator: str) -> MergeOutcome:
+        self._on_execute(hitl_id, action, operator)
+        return self._outcome
+
+
+def _merge_record(
+    *, card_message_id: str = "om_card_1"
+) -> MergeRecord:
+    return MergeRecord(
+        repo="owner/repo",
+        pr_number=42,
+        head_sha="abc123",
+        state=MergeState.AWAITING_APPROVAL.value,
+        card_message_id=card_message_id,
+    )
+
+
+async def _drive_merge_approval(
+    monkeypatch,
+    outcome: MergeOutcome,
+    notifier: _RecordingMergeNotifier,
+    *,
+    record: MergeRecord | None = None,
+    after_execute=None,
+    hitl_id: str | None = None,
+) -> tuple:
+    store = MergeStore()
+    if record is not None:
+        store.save(record)
+
+    def _apply_outcome(_hitl_id: str, _action: str, operator: str) -> None:
+        if record is None:
+            return
+        if outcome.merged:
+            store.transition(
+                record.identity,
+                MergeAction.APPROVE,
+                at="t",
+                approver=operator,
+            )
+            store.transition(
+                record.identity,
+                MergeAction.COMPLETE,
+                at="t",
+                merged_sha=outcome.sha,
+            )
+        elif outcome.status == "rejected":
+            store.transition(
+                record.identity,
+                MergeAction.REJECT,
+                at="t",
+                approver=operator,
+            )
+        else:
+            store.transition(
+                record.identity,
+                MergeAction.FAIL,
+                at="t",
+                failure_reason=outcome.message,
+            )
+
+    async def _noop_send(*_args, **_kwargs) -> None:
+        return None
+
+    async def _noop_audit(**_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(feishu_route, "merge_store", store)
+    monkeypatch.setattr(feishu_route, "build_github_client", lambda: object())
+    monkeypatch.setattr(
+        feishu_route,
+        "MergeExecutor",
+        lambda *_args, **_kwargs: _FakeMergeExecutor(
+            outcome, after_execute or _apply_outcome
+        ),
+    )
+    monkeypatch.setattr(feishu_route, "_merge_notifier", lambda: notifier)
+    monkeypatch.setattr(feishu_route, "_safe_send", _noop_send)
+    monkeypatch.setattr(
+        "apps.code_review_pipeline.task_audit.record_human_decision", _noop_audit
+    )
+
+    task_key = hitl_id or (
+        record.task_key if record is not None else "owner/repo#42@abc123"
+    )
+    response = await feishu_route._handle_merge_approval(
+        hitl_id=task_key,
+        action="approve",
+        operator_id="ou_operator",
+        session_id="oc_chat",
+        trace_id=task_key,
+    )
+    return response, store
+
+
+@pytest.mark.asyncio
+async def test_merge_approval_merged_resolves_card(monkeypatch) -> None:
+    """F1：合并成功后按最新记录调用一次 merged 改卡。"""
+    record = _merge_record()
+    notifier = _RecordingMergeNotifier()
+    outcome = MergeOutcome(merged=True, status="merged", sha="deadbeefcafe")
+
+    response, _store = await _drive_merge_approval(
+        monkeypatch, outcome, notifier, record=record
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.body) == {
+        "trace_id": record.task_key,
+        "status": "merged",
+        "sha": "deadbeefcafe",
+    }
+    assert notifier.calls == [(record.task_key, "merged", "deadbeefcafe")]
+
+
+@pytest.mark.asyncio
+async def test_merge_approval_rejected_resolves_card(monkeypatch) -> None:
+    """F2：拒绝后调用 rejected 改卡，detail 是操作者身份。"""
+    record = _merge_record()
+    notifier = _RecordingMergeNotifier()
+    outcome = MergeOutcome(merged=False, status="rejected", message="已拒绝")
+
+    response, _store = await _drive_merge_approval(
+        monkeypatch, outcome, notifier, record=record
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["status"] == "rejected"
+    assert notifier.calls == [(record.task_key, "rejected", "ou_operator")]
+
+
+@pytest.mark.asyncio
+async def test_merge_approval_failure_resolves_card(monkeypatch) -> None:
+    """F3：error / not_mergeable 走 failed 改卡，detail 是原始失败原因。"""
+    record = _merge_record()
+    notifier = _RecordingMergeNotifier()
+    outcome = MergeOutcome(
+        merged=False, status="not_mergeable", message="merge conflict on main"
+    )
+
+    response, _store = await _drive_merge_approval(
+        monkeypatch, outcome, notifier, record=record
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["status"] == "not_mergeable"
+    assert notifier.calls == [
+        (record.task_key, "failed", "merge conflict on main")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_merge_approval_missing_record_still_returns_response(
+    monkeypatch,
+) -> None:
+    """F4：执行后记录不存在只跳过改卡，审批响应不受影响。"""
+    notifier = _RecordingMergeNotifier()
+    outcome = MergeOutcome(merged=True, status="merged", sha="deadbeefcafe")
+
+    response, _store = await _drive_merge_approval(
+        monkeypatch,
+        outcome,
+        notifier,
+        record=None,
+        after_execute=lambda *_args: None,
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["status"] == "merged"
+    assert notifier.calls == []
+
+
+@pytest.mark.asyncio
+async def test_merge_approval_resolve_exception_does_not_change_response(
+    monkeypatch,
+) -> None:
+    """F4：改卡抛异常只告警，不 500、不改合并结论。"""
+    record = _merge_record()
+    notifier = _RecordingMergeNotifier(raises=True)
+    outcome = MergeOutcome(merged=True, status="merged", sha="deadbeefcafe")
+
+    response, _store = await _drive_merge_approval(
+        monkeypatch, outcome, notifier, record=record
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["status"] == "merged"
+    assert notifier.calls == [(record.task_key, "merged", "deadbeefcafe")]
+
+
+def test_parse_merge_identity_uses_last_separators() -> None:
+    """F3：只按最后一个 @ 与最后一个 # 切分。"""
+    assert feishu_route._parse_merge_identity(
+        "owner/repo#old#42@abc123"
+    ) == ("owner/repo#old", 42, "abc123")
+    assert feishu_route._parse_merge_identity("not-a-task-key") is None
+
+
+@pytest.mark.asyncio
+async def test_merge_approval_unparseable_hitl_id_skips_card(
+    monkeypatch,
+) -> None:
+    """F3：hitl_id 解析失败时跳过改卡，响应照常。"""
+    notifier = _RecordingMergeNotifier()
+    outcome = MergeOutcome(merged=True, status="merged", sha="deadbeefcafe")
+
+    response, _store = await _drive_merge_approval(
+        monkeypatch,
+        outcome,
+        notifier,
+        record=None,
+        after_execute=lambda *_args: None,
+        hitl_id="not-a-task-key",
+    )
+
+    assert response.status_code == 200
+    assert notifier.calls == []

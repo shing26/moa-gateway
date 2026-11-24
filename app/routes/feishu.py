@@ -37,6 +37,7 @@ from apps.code_review_pipeline.delivery.feishu_approval import (
     write_decision,
 )
 from apps.code_review_pipeline.merge_executor import MergeExecutor
+from apps.code_review_pipeline.notifications.merge_notifier import MergeNotifier
 from apps.code_review_pipeline.routing.github_provider import build_github_client
 
 
@@ -834,6 +835,8 @@ async def _handle_merge_approval(
     except Exception:  # noqa: BLE001 - 人工决策审计：审计旁路任意失败只记录，不影响合并结果
         logger.exception("failed to record human decision for %s", hitl_id)
 
+    await _resolve_merge_card(hitl_id, outcome, operator_id)
+
     if outcome.merged:
         logger.info("merge approval done: %s merged as %s", hitl_id, outcome.sha)
         await _safe_send(
@@ -861,3 +864,59 @@ async def _handle_merge_approval(
         "status": outcome.status,
         "message": outcome.message,
     })
+
+
+def _merge_notifier() -> MergeNotifier:
+    return MergeNotifier(
+        default_target=settings.code_review_merge_channel or None
+    )
+
+
+def _parse_merge_identity(hitl_id: str) -> tuple[str, int, str] | None:
+    """Parse ``owner/repo#123@sha`` using the **last** ``@`` and ``#``."""
+    head, at_sep, sha = hitl_id.rpartition("@")
+    repo, hash_sep, pr_str = head.rpartition("#")
+    if (
+        not at_sep
+        or not hash_sep
+        or not repo
+        or not pr_str
+        or not sha
+        or not pr_str.isdigit()
+    ):
+        logger.warning("cannot parse merge identity from hitl_id=%s", hitl_id)
+        return None
+    return repo, int(pr_str), sha
+
+
+async def _resolve_merge_card(
+    hitl_id: str, outcome: Any, operator_id: str
+) -> None:
+    """Retire the approval card after the decision. Display-only, never raises."""
+    identity = _parse_merge_identity(hitl_id)
+    if identity is None:
+        return
+    try:
+        record = merge_store.get(identity)
+    except Exception:  # noqa: BLE001 - 改卡前的读记录失败只告警，不影响审批结果
+        logger.warning(
+            "failed to read merge record for %s", hitl_id, exc_info=True
+        )
+        return
+    if record is None:
+        logger.warning("no merge record for %s; skip resolved card", hitl_id)
+        return
+
+    if outcome.merged:
+        resolved, detail = "merged", outcome.sha
+    elif outcome.status == "rejected":
+        resolved, detail = "rejected", operator_id
+    else:
+        resolved, detail = "failed", outcome.message
+
+    try:
+        await _merge_notifier().send_resolved_card(record, resolved, detail)
+    except Exception:  # noqa: BLE001 - 改卡是展示层：异常只告警，不改变审批响应
+        logger.warning(
+            "failed to resolve merge card for %s", hitl_id, exc_info=True
+        )

@@ -445,6 +445,26 @@ async def test_resolved_card_without_message_id_sends_nothing() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rejected_resolved_card_text_and_no_buttons() -> None:
+    """F2：拒绝终态文案含 🚫 已拒绝，且卡片没有审批按钮。"""
+    record = _make_record(
+        state=MergeState.REJECTED.value,
+        card_message_id="om_old",
+        approver="alice",
+    )
+    sender = _ResolvedCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    ok = await notifier.send_resolved_card(record, "rejected", "ou_alice")
+
+    assert ok
+    assert len(sender.updates) == 1
+    _message_id, card = sender.updates[0]
+    assert "🚫 已拒绝（审批人 alice）" in _card_text(card)
+    assert not _has_action_buttons(card)
+
+
+@pytest.mark.asyncio
 async def test_resolved_card_update_exception_only_warns(caplog) -> None:
     """T3：update_card 抛异常只告警，不向外抛。"""
     sender = _ResolvedCardSender(raises=True)
