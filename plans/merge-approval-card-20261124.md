@@ -112,4 +112,21 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 
 ## 6. 签收记录
 
-（待所有者书面签收）
+**所有者书面签收**：用户消息「签收 #139」（2026-11-24）。
+
+**合并**：PR #139 → `main`，merge commit
+`c41d29f5ac15fea08991ca6238bcb420662feae1`。
+
+**验收证据**：独立 Verifier 最终 `ACCEPT`（HEAD `a8ef13f`），T1–T4 全 PASS，
+P0/P1 无。V1 `91 passed`；V2 `2373 passed, 6 skipped`；V3
+`All checks passed!`。首轮 Verifier `REJECT` 的 P1（`set_card_message_id`
+多写 `updated_at`）已按契约收紧，复核 SQL 的 SET 子句恰好为
+`card_message_id = %s`。GitHub CI：`test` / `integration` 绿，`docker`
+skipped。
+
+**运行时确认**：合并后 8083 网关与 `python -m app.merge_worker` 已重启到
+`c41d29f`，`/healthz` 返回 `merge_worker: running`。
+
+**待验（诚实记录）**：T1 的富化卡片要等下一张真实审批卡出现才算端到端
+走通；#139 自己合并时，卡片仍由旧 worker 发出，所以本单的线上卡片证据
+只有「旧三行」。
