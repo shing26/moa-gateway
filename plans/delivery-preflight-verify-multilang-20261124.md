@@ -66,4 +66,15 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 
 ## 6. 签收记录
 
-（待所有者书面签收）
+**所有者书面指令**：2026-11-24 消息「先收再改卡片」——先收口本单，再做合并
+审批卡的信息设计改造。
+
+**验收证据**（独立 Verifier，HEAD `884d664`）：
+
+- V1 `61 passed`；V2 `2349 passed, 6 skipped`；V3 `All checks passed!`
+- T1–T4 全 PASS；探测仍在空临时目录、fail-closed 未放宽
+- 真实冒烟：`delivery preflight --repo shing26/OpsShield` 的 `verify` 项
+  `blocked → ok`，detail 为 `程序 …\mvn.CMD 可启动`；
+  旧形状 `mvn -c "import sys"` 复现 exit 1，新形状 `mvn --version` exit 0
+
+**合并**：PR #137 → `main`（merge commit 见本文件后续修订）。
