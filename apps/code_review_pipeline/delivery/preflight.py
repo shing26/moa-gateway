@@ -18,6 +18,7 @@ Workflows 写权限。诊断落在最贵的一步之后，代价是两次完整�
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
 import tempfile
@@ -41,10 +42,20 @@ _DETAIL_LIMIT = 300
 #: 探测子进程的启动超时。超时与文案共用同一常量，避免两处漂移。
 _VERIFY_PROBE_TIMEOUT_SECONDS = 30
 
+#: 按解释器形状探测的 Python 启动器。``--version`` 只能证明程序在，``-c`` 还能
+#: 证明这个解释器能 import 标准库，是更强的证据。
+_PYTHON_LAUNCHERS = frozenset({"python", "python3", "py"})
+
 
 def _short(exc: BaseException) -> str:
     text = str(exc).strip() or exc.__class__.__name__
     return text[:_DETAIL_LIMIT]
+
+
+def _is_python_launcher(program: str) -> bool:
+    """判断 argv[0] 是否是 Python 解释器（去 ``.exe``、大小写不敏感）。"""
+    name = os.path.basename(program).lower()
+    return name.removesuffix(".exe") in _PYTHON_LAUNCHERS
 
 
 @dataclass(frozen=True)
@@ -220,7 +231,14 @@ async def _check_verify(
     try:
         env = build_verify_env(workspace)
         argv = resolve_program(list(verify_command), env)
-        probe = [argv[0], "-c", "import sys; print(sys.version)"]
+        if _is_python_launcher(argv[0]):
+            probe = [argv[0], "-c", "import sys; print(sys.version)"]
+            probe_kind = "解释器"
+        else:
+            # 非 Python 的 verify 命令（mvn / gradle / npm / go）没有 ``-c`` 语义，
+            # 用通用的 ``--version`` 只确认程序能启动。
+            probe = [argv[0], "--version"]
+            probe_kind = "程序"
         try:
             result = await asyncio.to_thread(
                 subprocess.run,
@@ -237,7 +255,7 @@ async def _check_verify(
                 "verify",
                 STATUS_BLOCKED,
                 f"探测 {argv[0]!r} 启动超时（>{_VERIFY_PROBE_TIMEOUT_SECONDS} 秒），"
-                "无法确认解释器可用",
+                f"无法确认{probe_kind}可用",
             )
         except OSError as exc:
             return PreflightCheck(
@@ -255,7 +273,7 @@ async def _check_verify(
         return PreflightCheck(
             "verify",
             STATUS_OK,
-            f"解释器 {argv[0]} 可启动",
+            f"{probe_kind} {argv[0]} 可启动",
         )
     finally:
         shutil.rmtree(workspace, ignore_errors=True)

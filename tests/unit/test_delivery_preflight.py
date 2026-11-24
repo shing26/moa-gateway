@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+from pathlib import Path
 
 import httpx
 import pytest
@@ -80,6 +82,38 @@ def _ok_handler(*, permissions_push: bool = True, tree_status: int = 201, tree_b
         raise AssertionError(f"unexpected request: {request.method} {path}")
 
     return handler
+
+
+def _record_probes(
+    monkeypatch, *, stdout: str = "", returncode: int = 0
+) -> list[list[str]]:
+    """把探测子进程换成记录 argv 的桩，T1 用它断言探测形状。"""
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(preflight_module.subprocess, "run", fake_run)
+    return calls
+
+
+def _write_fake_tool(tmp_path: Path, *, exit_code: int) -> str:
+    """写一个与 Python 无关的可执行桩，验证 ``--version`` 分支真的走子进程。"""
+    if os.name == "nt":
+        path = tmp_path / "stub-tool.cmd"
+        path.write_text(
+            f"@echo off\r\necho stub-tool 1.2.3\r\nexit /b {exit_code}\r\n",
+            encoding="ascii",
+        )
+    else:
+        path = tmp_path / "stub-tool"
+        path.write_text(
+            f"#!/bin/sh\necho 'stub-tool 1.2.3'\nexit {exit_code}\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+    return str(path)
 
 
 @pytest.fixture
@@ -226,6 +260,76 @@ async def test_verify_bare_python_ok(fake_store) -> None:
     verify = next(check for check in report.checks if check.name == "verify")
     assert verify.status == STATUS_OK
     assert report.ok is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("launcher", ["python", "python3", "py", "PYTHON.EXE"])
+async def test_verify_python_launchers_probe_with_dash_c(
+    fake_store, monkeypatch, launcher
+) -> None:
+    calls = _record_probes(monkeypatch, stdout="3.12.0\n")
+    monkeypatch.setattr(
+        preflight_module, "resolve_program", lambda argv, env: list(argv)
+    )
+
+    report = await run_preflight(
+        REPO,
+        github=_client(_ok_handler()),
+        merge_store=fake_store(),
+        verify_command=(launcher, "-m", "pytest"),
+    )
+
+    verify = next(check for check in report.checks if check.name == "verify")
+    assert verify.status == STATUS_OK
+    assert calls == [[launcher, "-c", "import sys; print(sys.version)"]]
+
+
+@pytest.mark.asyncio
+async def test_verify_non_python_program_probes_with_version_flag(
+    fake_store, monkeypatch, tmp_path
+) -> None:
+    stub = _write_fake_tool(tmp_path, exit_code=0)
+    real_run = subprocess.run
+    calls: list[list[str]] = []
+
+    def spy_run(argv, **kwargs):
+        calls.append(list(argv))
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(preflight_module.subprocess, "run", spy_run)
+
+    report = await run_preflight(
+        REPO,
+        github=_client(_ok_handler()),
+        merge_store=fake_store(),
+        verify_command=(stub,),
+    )
+
+    verify = next(check for check in report.checks if check.name == "verify")
+    assert verify.status == STATUS_OK
+    assert Path(stub).name in verify.detail
+    assert calls == [[stub, "--version"]]
+    assert report.ok is True
+
+
+@pytest.mark.asyncio
+async def test_verify_non_python_nonzero_exit_blocks_with_output(
+    fake_store, tmp_path
+) -> None:
+    stub = _write_fake_tool(tmp_path, exit_code=3)
+
+    report = await run_preflight(
+        REPO,
+        github=_client(_ok_handler()),
+        merge_store=fake_store(),
+        verify_command=(stub,),
+    )
+
+    verify = next(check for check in report.checks if check.name == "verify")
+    assert verify.status == STATUS_BLOCKED
+    assert Path(stub).name in verify.detail
+    assert "stub-tool 1.2.3" in verify.detail
+    assert report.ok is False
 
 
 @pytest.mark.asyncio
