@@ -108,7 +108,20 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 
 ## 7. 签收记录
 
-（待所有者书面签收）
+**所有者书面签收**：用户消息「签收 #134 #135」（2026-11-24）。
+
+**合并**：PR #135 → `main`，merge commit
+`cb32179cdc13ec9072d4a2a0ea02ba93d5cb0818`。
+
+**验收证据**：独立 Verifier `ACCEPT`（HEAD `718d5eb`），T1–T8 全 PASS，
+无 P0/P1。V1 `59 passed`；V2 `2334 passed, 6 skipped`；V3
+`All checks passed!`。`docker compose config` 中 gateway 与 merge-worker 的
+`CODE_REVIEW_MERGE_ENABLED` / `CODE_REVIEW_MERGE_POLL_INTERVAL_S` 取值一致，
+`merge-worker.restart=no`，`.env.template` 不再出现 `--profile merge`。
+
+**上线状态（2026-11-24 收口核实）**：代码已合并，但 8083 网关与
+`python -m app.merge_worker` 仍运行旧代码，`/healthz` 尚无
+`merge_worker` 三态；需重启两者后才算真正上线。
 
 ## 8. 修订 1：部署可用性（Verifier P1）
 
