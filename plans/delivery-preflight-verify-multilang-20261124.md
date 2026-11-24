@@ -77,4 +77,5 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
   `blocked → ok`，detail 为 `程序 …\mvn.CMD 可启动`；
   旧形状 `mvn -c "import sys"` 复现 exit 1，新形状 `mvn --version` exit 0
 
-**合并**：PR #137 → `main`（merge commit 见本文件后续修订）。
+**合并**：PR #137 → `main`，merge commit
+`fda9be40fa6b1cccba5ba8b7b1cb0aefdad47067`。
