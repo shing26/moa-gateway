@@ -124,3 +124,33 @@ Unicode 复现现在只告警返回 `None`。V1 `63 passed`；V2
 **残余（已知并接受）**：`rejected` 终态复用 `notification` kind（标题
 「通知」/蓝色），不是拒绝专用红色终态卡；契约只约束文案与无按钮。真实
 「拒绝」路径仍只有单测覆盖，无线上样本。
+
+## 7. 修订 1：端到端改卡证据（2026-11-25 03:43）
+
+上文「运行时复核（02:05，未通过）」的后续：根因不在本单代码，而是
+Docker Desktop 自动更新失败导致 Postgres/Redis 容器停机，网关退化为内存
+Redis、`vectordb` 连接池超时，worker 心跳也随之消失。容器恢复、两个进程
+重启到 `1efb152` 后复测通过。
+
+**生产路径证据链（PR #142，真实飞书审批）**：
+
+| 环节 | 证据 |
+|---|---|
+| 记录创建 | 网关停机期间 #142 的 `opened` webhook 返回 500；用「关闭→重开」补触发 `reopened`，记录落 `watching` |
+| 审批卡 | worker 发卡后，Postgres 中 `state=awaiting_approval`、`card_message_id=om_x100b7f6a3ae518a4`（**T2 的单列写回在生产库真实验证**） |
+| 批准 + 合并 | 03:43:02 `PUT /pulls/142/merge` 200；`merging -> merged (complete)`；merge sha `fce63a1bb67c02599197c3f2177bc4f0bc2ecf7a` |
+| 就地改卡 | 03:43:03.999 `moa.merge_notifier resolved card updated for ... (merged)`（`update_card` 返回 ok） |
+| 落库终态 | `state=merged`、`approver=ou_ae3e5cc009fae3462147e15e8c271602`、`merged_sha=fce63a1bb67c`、`card_message_id` 仍为该卡 |
+
+这条路径正是 #139 T3 缺失的那一段：旧实现在 PR `closed` webhook 里找
+`list_open()`，通道内合并时记录已终态，永远查不到；现在改卡挂在
+`_handle_merge_approval` 的决定点，`terminated=0` 不再是漏改卡的理由。
+
+**未覆盖**：`rejected` 与 `superseded` 仍只有单测，无线上样本。
+
+## 8. 新发现的缺口（不属本单，待立契）
+
+`PostgresMergeStore` 只在 `self._conn is None` 时建连，容器重启或网络中断
+后不会重连。实测：Postgres 容器重启后 worker 每轮抛
+`OperationalError: the connection is closed`，空转直到进程重启。本次靠重启
+进程绕过，未在代码层修复。
