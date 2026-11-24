@@ -401,23 +401,28 @@ async def test_merge_approval_rejected_resolves_card(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_merge_approval_failure_resolves_card(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        ("error", "github read failed"),
+        ("not_mergeable", "merge conflict on main"),
+    ],
+)
+async def test_merge_approval_failure_resolves_card(
+    monkeypatch, status: str, message: str
+) -> None:
     """F3：error / not_mergeable 走 failed 改卡，detail 是原始失败原因。"""
     record = _merge_record()
     notifier = _RecordingMergeNotifier()
-    outcome = MergeOutcome(
-        merged=False, status="not_mergeable", message="merge conflict on main"
-    )
+    outcome = MergeOutcome(merged=False, status=status, message=message)
 
     response, _store = await _drive_merge_approval(
         monkeypatch, outcome, notifier, record=record
     )
 
     assert response.status_code == 200
-    assert json.loads(response.body)["status"] == "not_mergeable"
-    assert notifier.calls == [
-        (record.task_key, "failed", "merge conflict on main")
-    ]
+    assert json.loads(response.body)["status"] == status
+    assert notifier.calls == [(record.task_key, "failed", message)]
 
 
 @pytest.mark.asyncio
@@ -465,6 +470,13 @@ def test_parse_merge_identity_uses_last_separators() -> None:
         "owner/repo#old#42@abc123"
     ) == ("owner/repo#old", 42, "abc123")
     assert feishu_route._parse_merge_identity("not-a-task-key") is None
+
+
+def test_parse_merge_identity_unicode_digit_only_warns(caplog) -> None:
+    """P2：Unicode 上标数字不能让 int() 抛异常，只告警并返回 None。"""
+    with caplog.at_level("WARNING", logger="moa.routes.feishu"):
+        assert feishu_route._parse_merge_identity("owner/repo#²@abc123") is None
+    assert "cannot parse merge identity" in caplog.text
 
 
 @pytest.mark.asyncio

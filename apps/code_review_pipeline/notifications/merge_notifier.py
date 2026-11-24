@@ -127,7 +127,7 @@ class MergeNotifier:
         """
         message_id = record.card_message_id
         if not message_id:
-            logger.info(
+            logger.warning(
                 "no card message id for %s; skip resolved card", record.task_key
             )
             return False

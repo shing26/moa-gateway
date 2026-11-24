@@ -886,7 +886,12 @@ def _parse_merge_identity(hitl_id: str) -> tuple[str, int, str] | None:
     ):
         logger.warning("cannot parse merge identity from hitl_id=%s", hitl_id)
         return None
-    return repo, int(pr_str), sha
+    try:
+        pr_number = int(pr_str)
+    except ValueError:
+        logger.warning("cannot parse merge identity from hitl_id=%s", hitl_id)
+        return None
+    return repo, pr_number, sha
 
 
 async def _resolve_merge_card(
