@@ -18,22 +18,39 @@ _HITL_TITLES = {
     "notification": "Agent Gateway - 通知",
     "merge_approval": "Agent Gateway - PR 合并审批",
     "merge_ci_failure": "Agent Gateway - CI 未通过",
+    "merge_resolved_merged": "Agent Gateway - PR 已合并",
+    "merge_resolved_superseded": "Agent Gateway - 审批卡已作废",
+    "merge_resolved_failed": "Agent Gateway - 合并失败",
 }
 _HITL_TEMPLATES = {
     "failure_escalation": "red",
     "notification": "blue",
     "merge_ci_failure": "red",
+    "merge_resolved_merged": "green",
+    "merge_resolved_superseded": "orange",
+    "merge_resolved_failed": "red",
 }
 _HITL_OUTPUT_LABELS = {
     "failure_escalation": "失败详情",
     "notification": "详情",
     "merge_ci_failure": "失败详情",
+    "merge_resolved_merged": "结果",
+    "merge_resolved_superseded": "状态",
+    "merge_resolved_failed": "状态",
 }
 # 只有真的接了审批闭环的卡片才该有按钮。"notification" 用于**没有审批落地**的链路
 # （如 PR 审查报告）：那条路径从不 store_hitl，渲染审批按钮等于承诺一个点了必然
 # 失效的动作（2026-09-23 修正）。"merge_ci_failure" 同理：CI 红时没有可批准的东西，
 # 人只能去看日志（2026-10-09 修正——此前失败卡片也渲染了批准/拒绝）。
-_NO_ACTION_KINDS = frozenset({"notification", "merge_ci_failure"})
+_NO_ACTION_KINDS = frozenset(
+    {
+        "notification",
+        "merge_ci_failure",
+        "merge_resolved_merged",
+        "merge_resolved_superseded",
+        "merge_resolved_failed",
+    }
+)
 
 
 @dataclass
@@ -120,7 +137,13 @@ class FeishuCardSender:
         self._auth = auth
         self.timeout = timeout
 
-    async def send_card(self, card: ApprovalCard) -> bool:
+    async def send_card_with_id(self, card: ApprovalCard) -> str:
+        """Send an interactive card and return its message id.
+
+        Returns ``""`` when the card was not sent (wrong channel, transport error,
+        or a Feishu business error). Callers that only need success should use
+        :meth:`send_card`, which keeps the historical bool contract.
+        """
         # 渠道守卫（2026-10-02）。**与 FeishuChannelAdapter.send 的同名判断对齐**——
         # 那个适配器有一句 `if message.channel != "feishu": return False`，而这里
         # 没有，于是结构上就允许"把 web 渠道的卡片发去飞书"。
@@ -145,7 +168,7 @@ class FeishuCardSender:
                 card.channel,
                 card.session_id,
             )
-            return False
+            return ""
         try:
             token = await self._auth.get_token()
             payload = card.to_message_payload()
@@ -162,17 +185,22 @@ class FeishuCardSender:
                 data = resp.json()
                 if data.get("code") != 0:
                     logger.error("feishu card send failed: %s", data)
-                    return False
+                    return ""
                 logger.info("feishu approval card sent session=%s", card.session_id)
-                return True
+                message_id = (data.get("data") or {}).get("message_id")
+                return str(message_id or "")
         except httpx.HTTPStatusError as exc:
             # 飞书对畸形请求体/参数返回 HTTP 4xx，错误原因在响应体里，必须记下来才能定位
             body = exc.response.text[:500] if exc.response is not None else ""
             logger.error("feishu card send http error: %s body=%s", exc, body)
-            return False
+            return ""
         except Exception as exc:  # noqa: BLE001 - 发卡通知：任意传输/解析异常转 False，审批卡片失败不拖垮请求
             logger.exception("feishu card send error: %s", exc)
-            return False
+            return ""
+
+    async def send_card(self, card: ApprovalCard) -> bool:
+        """Backwards-compatible bool wrapper around :meth:`send_card_with_id`."""
+        return bool(await self.send_card_with_id(card))
 
     async def update_card(self, message_id: str, card: Any) -> bool:
         """Replace an existing interactive card in place."""

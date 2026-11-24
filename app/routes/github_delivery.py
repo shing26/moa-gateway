@@ -106,7 +106,7 @@ async def github_delivery_webhook(request: Request) -> JSONResponse:
         return await _on_opened(repo, pr_number, head_sha, pr)
     if action == "synchronize":
         return await _on_synchronize(repo, pr_number, head_sha)
-    return _on_closed(repo, pr_number, pr)
+    return await _on_closed(repo, pr_number, pr)
 
 
 async def _on_opened(
@@ -149,6 +149,9 @@ async def _on_synchronize(repo: str, pr_number: int, head_sha: str) -> JSONRespo
         transitions=tuple(initial_transition(_now_iso())),
     )
     merge_store.save(record)
+    notifier = _notifier()
+    for old in superseded:
+        await _notify_resolved(notifier, old, "superseded")
     logger.info(
         "delivery webhook: new head %s#%s@%s (superseded=%d)",
         repo,
@@ -166,19 +169,32 @@ async def _on_synchronize(repo: str, pr_number: int, head_sha: str) -> JSONRespo
     )
 
 
-def _on_closed(repo: str, pr_number: int, pr: dict[str, Any]) -> JSONResponse:
+async def _on_closed(
+    repo: str, pr_number: int, pr: dict[str, Any]
+) -> JSONResponse:
     merged = bool(pr.get("merged", False))
     closed = _open_records_for(repo, pr_number)
+    notifier = _notifier()
     for record in closed:
-        merge_store.transition(
+        reason = (
+            "PR 已在 GitHub 侧合并，未经本通道审批" if merged
+            else "PR 已在 GitHub 侧关闭，未经本通道审批"
+        )
+        updated = merge_store.transition(
             record.identity,
             MergeAction.FAIL,
             at=_now_iso(),
-            failure_reason=(
-                "PR 已在 GitHub 侧合并，未经本通道审批" if merged
-                else "PR 已在 GitHub 侧关闭，未经本通道审批"
-            ),
+            failure_reason=reason,
         )
+        if merged:
+            await _notify_resolved(
+                notifier,
+                updated,
+                "merged",
+                detail=str(pr.get("merge_commit_sha") or ""),
+            )
+        else:
+            await _notify_resolved(notifier, updated, "failed", detail=reason)
     logger.info(
         "delivery webhook: closed %s#%s merged=%s terminated=%d",
         repo,
@@ -187,3 +203,19 @@ def _on_closed(repo: str, pr_number: int, pr: dict[str, Any]) -> JSONResponse:
         len(closed),
     )
     return JSONResponse({"status": "accepted", "terminated": len(closed)})
+
+
+async def _notify_resolved(
+    notifier: MergeNotifier,
+    record: MergeRecord,
+    outcome: str,
+    *,
+    detail: str = "",
+) -> None:
+    """Retire the approval card, if it has an id. Display failure must not 500."""
+    try:
+        await notifier.send_resolved_card(record, outcome, detail)
+    except Exception:  # noqa: BLE001 - 改卡是展示层：异常只告警，不阻塞 webhook
+        logger.warning(
+            "failed to send resolved card for %s", record.task_key, exc_info=True
+        )

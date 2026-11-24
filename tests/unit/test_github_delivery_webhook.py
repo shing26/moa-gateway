@@ -6,6 +6,7 @@ CI 轮询与合并执行由既有模块承担，它们的语义由各自的测�
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -24,10 +25,24 @@ class RecordingNotifier:
 
     def __init__(self) -> None:
         self.opened: list[dict[str, Any]] = []
+        self.resolved: list[dict[str, Any]] = []
 
     async def send_pr_opened_card(self, record: Any, *, title: str, url: str) -> bool:
         self.opened.append(
             {"task_key": record.task_key, "title": title, "url": url}
+        )
+        return True
+
+    async def send_resolved_card(
+        self, record: Any, outcome: str, detail: str = ""
+    ) -> bool:
+        self.resolved.append(
+            {
+                "task_key": record.task_key,
+                "outcome": outcome,
+                "detail": detail,
+                "card_message_id": record.card_message_id,
+            }
         )
         return True
 
@@ -200,6 +215,89 @@ def test_closed_terminates_open_records_with_honest_reason(
     record = store.get(("shing26/moa-gateway", 26, "bee00000face"))
     assert record is not None and record.state == "failed"
     assert "合并" in record.failure_reason
+
+
+def test_closed_merged_retires_existing_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T3：PR 在通道外被合并 → 有 message id 的审批卡改成「已合并」终态。"""
+    store = MergeStore()
+    notifier = RecordingNotifier()
+    _wire(monkeypatch, store, notifier)
+    client = app_client(app)
+    _post(client, _pr_payload("opened", 26, "bee00000face"))
+    record = store.get(("shing26/moa-gateway", 26, "bee00000face"))
+    assert record is not None
+    store.save(replace(record, card_message_id="om_merge_1"))
+
+    response = _post(
+        client,
+        _pr_payload(
+            "closed",
+            26,
+            "bee00000face",
+            merged=True,
+            merge_commit_sha="0123456789abcdef",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert notifier.resolved == [
+        {
+            "task_key": "shing26/moa-gateway#26@bee00000face",
+            "outcome": "merged",
+            "detail": "0123456789abcdef",
+            "card_message_id": "om_merge_1",
+        }
+    ]
+
+
+def test_closed_unmerged_retires_card_as_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T3：PR 被关闭 → 审批卡改成「合并失败」终态并带原因。"""
+    store = MergeStore()
+    notifier = RecordingNotifier()
+    _wire(monkeypatch, store, notifier)
+    client = app_client(app)
+    _post(client, _pr_payload("opened", 26, "bee00000face"))
+    record = store.get(("shing26/moa-gateway", 26, "bee00000face"))
+    assert record is not None
+    store.save(replace(record, card_message_id="om_close_1"))
+
+    _post(client, _pr_payload("closed", 26, "bee00000face", merged=False))
+
+    assert len(notifier.resolved) == 1
+    resolved = notifier.resolved[0]
+    assert resolved["outcome"] == "failed"
+    assert "关闭" in resolved["detail"]
+    assert resolved["card_message_id"] == "om_close_1"
+
+
+def test_synchronize_retires_superseded_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T3：PR head 变了 → 旧记录的审批卡改成「已作废」终态。"""
+    store = MergeStore()
+    notifier = RecordingNotifier()
+    _wire(monkeypatch, store, notifier)
+    client = app_client(app)
+    _post(client, _pr_payload("opened", 26, "bee00000face"))
+    old = store.get(("shing26/moa-gateway", 26, "bee00000face"))
+    assert old is not None
+    store.save(replace(old, card_message_id="om_old_head"))
+
+    response = _post(client, _pr_payload("synchronize", 26, "cafe1111dead"))
+
+    assert response.status_code == 202
+    assert notifier.resolved == [
+        {
+            "task_key": "shing26/moa-gateway#26@bee00000face",
+            "outcome": "superseded",
+            "detail": "",
+            "card_message_id": "om_old_head",
+        }
+    ]
 
 
 def test_missing_identity_fields_return_400(monkeypatch: pytest.MonkeyPatch) -> None:
