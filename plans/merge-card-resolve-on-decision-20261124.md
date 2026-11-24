@@ -95,21 +95,32 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 
 ## 6. 签收记录
 
-**所有者书面签收**：用户消息「已经签收 #141」（2026-11-25）。
+**所有者书面签收**：用户消息「签收 #141」（2026-11-25）。
 
 **合并**：PR #141 → `main`，merge commit
-`1efb1521741c746123be71dc2bea7896e3fb19d1`。
+`1efb1521741c746123be71dc2bea7896e3fb19d1`（HEAD `65b822aa1d43`）。
 
 **验收证据**：独立 Verifier 最终 `ACCEPT`（HEAD `141535d`），F1–F6 全 PASS，
-P0/P1 无。V1 `63 passed`；V2 `2381 passed, 6 skipped`；V3
-`All checks passed!`。首轮 `ACCEPT_WITH_NITS` 的三个可修 nit
-（Unicode 数字解析抛 `ValueError`、空 card id 用 INFO、`error` 分支未覆盖）
-已收掉并复核；Unicode 复现现在只告警返回 `None`。GitHub CI：`test` /
-`integration` 绿，`docker` skipped。
+P0/P1 无；首轮 `ACCEPT_WITH_NITS` 的三个可修 nit（Unicode 数字解析抛
+`ValueError`、空 card id 用 INFO、`error` 分支未覆盖）已收掉并复核，
+Unicode 复现现在只告警返回 `None`。V1 `63 passed`；V2
+`2381 passed, 6 skipped`；V3 `All checks passed!`。GitHub CI 实查
+（`65b822a`）：`test` success、`integration` success、`docker` skipped。
 
-**已知非阻塞项**：`rejected` 复用 `notification` kind，标题为「通知」/蓝色，
-不是拒绝专用红色终态卡；契约只约束文案与无按钮。
+**端到端观察（边界如实记录）**：#141 是「审批决定点改卡」上线后的第一张
+真实审批卡。19:16 发出「等待审批」卡（`om_x100b7f636caf60a4dfd38dbc2f9cb41`），
+批准与合并在 19:23 发生，同刻该卡被标记为已更新（`updated=true`，
+`update_time=19:23`），通道内出现「✅ 已批准，PR 已合并」+ merge sha
+`1efb152`。消息接口只回发卡时的原始 content，卡面逐字未复核，故本条按
+「更新时刻与决定同刻」记录，不作为逐字卡面证据。
 
-**运行时确认**：合并后 8083 网关与 `python -m app.merge_worker` 已重启到
-`1efb152`。端到端证据（富化审批卡 + 批准后卡片就地变 ✅）由紧随其后的
-留痕单自然产生，见后续修订。
+**运行时复核（2026-11-25 02:05，未通过）**：`GET 127.0.0.1:8083/healthz`
+返回 `degraded`——`redis=fallback_memory`、`vectordb=degraded
+(PoolTimeout)`、`audit_chain=ok`、`merge_worker=degraded: 心跳缺失`。
+进程表里仍有两个 `python -m app.merge_worker`（两个 venv 各一份），但
+心跳缺失，说明「worker 已重启并生效」当前无法确认。故本条不写正面运行时
+确认，记为待复核。
+
+**残余（已知并接受）**：`rejected` 终态复用 `notification` kind（标题
+「通知」/蓝色），不是拒绝专用红色终态卡；契约只约束文案与无按钮。真实
+「拒绝」路径仍只有单测覆盖，无线上样本。
