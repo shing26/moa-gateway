@@ -102,4 +102,13 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 
 ## 6. 签收记录
 
-（待所有者书面签收）
+**所有者书面签收**：用户消息「签收 #136」（2026-11-24）。
+
+**合并**：PR #136 → `main`，merge commit
+`0cd88280064faf8a43591b2b5ef56a4f66c14590`。
+
+**验收证据**：独立 Verifier `ACCEPT`（HEAD `fb109fe`），T1–T4 全 PASS，
+无 P0/P1。V1 `80 passed`；V2 `2343 passed, 6 skipped`；V3
+`All checks passed!`。真实 PTY 走查：stdout 为纯 JSON（`failure.message`
+含 `{"a": 1}` 时仍可 `json.loads`），stderr 摘要含 `/pull/`、head_sha、
+check-0..4。
