@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from app import deps
@@ -21,6 +22,27 @@ from app.engine import HitlRequest
 from apps.code_review_pipeline.merge_store import MergeRecord
 
 logger = logging.getLogger("moa.merge_notifier")
+
+_RESOLVED_KINDS = {
+    "merged": "merge_resolved_merged",
+    "superseded": "merge_resolved_superseded",
+    "failed": "merge_resolved_failed",
+}
+
+
+@dataclass(frozen=True)
+class ApprovalCardDelivery:
+    """Result of sending an approval card.
+
+    ``__bool__`` preserves the historical ``if ok:`` / ``assert not ok`` style
+    used by existing callers while exposing the message id needed for T2/T3.
+    """
+
+    sent: bool
+    message_id: str = ""
+
+    def __bool__(self) -> bool:
+        return self.sent
 
 
 class MergeNotifier:
@@ -55,27 +77,32 @@ class MergeNotifier:
             return self._card_sender
         return getattr(deps, "_card_sender", None)
 
-    async def send_approval_card(self, record: MergeRecord) -> bool:
-        """CI 绿时发审批卡片。"""
+    async def send_approval_card(
+        self,
+        record: MergeRecord,
+        pr_details: dict[str, Any] | None = None,
+    ) -> ApprovalCardDelivery:
+        """CI 绿时发审批卡片，返回发送结果与卡片消息 id。"""
         if not self._default_target:
             logger.info(
                 "no merge channel configured (CODE_REVIEW_MERGE_CHANNEL); "
                 "skipping approval card for %s",
                 record.task_key,
             )
-            return False
+            return ApprovalCardDelivery(False)
 
         card_sender = self._resolve_card_sender()
         if card_sender is None:
             logger.warning("feishu card sender not initialized; skip merge card")
-            return False
+            return ApprovalCardDelivery(False)
 
-        card = self._build_approval_card(record)
+        output = self._approval_output(record, pr_details)
+        card = self._build_approval_card(record, output)
         card.target = self._default_target
         # 先登记待批记录，再发卡：卡片一到用户就可能点，登记晚一步那次点击就落空。
-        self._register_pending_approval(record)
-        ok = await card_sender.send_card(card)
-        if ok:
+        self._register_pending_approval(record, output)
+        message_id = await card_sender.send_card_with_id(card)
+        if message_id:
             logger.info("merge approval card sent for %s", record.task_key)
         else:
             # 卡片没发出去 → 撤掉登记，不留一条永远无人点击的待批记录。
@@ -83,6 +110,46 @@ class MergeNotifier:
             logger.warning(
                 "merge approval card not sent; withdrew pending approval for %s",
                 record.task_key,
+            )
+        return ApprovalCardDelivery(bool(message_id), message_id)
+
+    async def send_resolved_card(
+        self,
+        record: MergeRecord,
+        outcome: str,
+        detail: str = "",
+    ) -> bool:
+        """把已发出的审批卡就地改成无按钮终态卡。
+
+        没有 ``card_message_id`` 时不发任何新消息——终态通知的价值不足以再打扰
+        人一次。改卡失败只告警，不抛异常、不阻塞 webhook。
+        """
+        message_id = record.card_message_id
+        if not message_id:
+            logger.info(
+                "no card message id for %s; skip resolved card", record.task_key
+            )
+            return False
+
+        card_sender = self._resolve_card_sender()
+        if card_sender is None:
+            logger.warning("feishu card sender not initialized; skip resolved card")
+            return False
+
+        card = self._build_resolved_card(record, outcome, detail)
+        card.target = self._default_target or ""
+        try:
+            ok = await card_sender.update_card(message_id, card)
+        except Exception:  # noqa: BLE001 - 改卡是展示层：异常只告警，不阻塞 webhook
+            logger.warning(
+                "resolved card update failed for %s", record.task_key, exc_info=True
+            )
+            return False
+        if ok:
+            logger.info("resolved card updated for %s (%s)", record.task_key, outcome)
+        else:
+            logger.warning(
+                "resolved card not updated for %s (%s)", record.task_key, outcome
             )
         return ok
 
@@ -156,14 +223,16 @@ class MergeNotifier:
             logger.info("PR opened card sent for %s", record.task_key)
         return ok
 
-    def _build_approval_card(self, record: MergeRecord) -> ApprovalCard:
+    def _build_approval_card(
+        self, record: MergeRecord, output: str
+    ) -> ApprovalCard:
         """CI 绿时的审批卡片。"""
         return ApprovalCard(
             session_id=record.task_key,
             trace_id=record.task_key,
             agent_name="merge_gate",
             intent="merge_approval",
-            agent_output=self._approval_output(record),
+            agent_output=output,
             channel="feishu",
             target=self._default_target or "",
             hitl_kind="merge_approval",
@@ -171,15 +240,61 @@ class MergeNotifier:
             reason="CI 通过，等待人工审批合并",
         )
 
+    def _build_resolved_card(
+        self, record: MergeRecord, outcome: str, detail: str
+    ) -> ApprovalCard:
+        kind = _RESOLVED_KINDS.get(outcome, "merge_resolved_failed")
+        return ApprovalCard(
+            session_id=record.task_key,
+            trace_id=record.task_key,
+            agent_name="merge_gate",
+            intent="merge_approval",
+            agent_output=self._resolved_output(record, outcome, detail),
+            channel="feishu",
+            target=self._default_target or "",
+            hitl_kind=kind,
+            applicant="",
+            reason="",
+        )
+
     @staticmethod
-    def _approval_output(record: MergeRecord) -> str:
+    def _resolved_output(record: MergeRecord, outcome: str, detail: str) -> str:
+        if outcome == "merged":
+            sha = (detail or record.merged_sha or record.head_sha)[:12]
+            return f"✅ 已合并 {sha}（审批人 {record.approver or '未知'}）"
+        if outcome == "superseded":
+            return (
+                f"⚠️ 本卡已作废：PR head 变了（{record.head_sha[:12]}）；"
+                "新记录已重建"
+            )
+        reason = (detail or record.failure_reason or "未知原因").strip()
+        summary = reason.splitlines()[0][:200] if reason else "未知原因"
+        return f"❌ 合并失败：{summary}"
+
+    @staticmethod
+    def _approval_output(
+        record: MergeRecord, pr_details: dict[str, Any] | None = None
+    ) -> str:
+        if pr_details:
+            return (
+                f"标题: {pr_details['title']}\n"
+                f"变更: {pr_details['changed_files']} files  "
+                f"+{pr_details['additions']} −{pr_details['deletions']}  "
+                f"→ {pr_details['base']}\n"
+                f"作者: {pr_details['login']}\n"
+                f"PR  : #{record.pr_number} {pr_details['html_url']}\n"
+                f"SHA : {record.head_sha[:12]}\n"
+                f"CI  : {record.ci_state or 'success'}\n"
+                f"批准后: 以 merge commit 合并到 {pr_details['base']}，"
+                "并写入审计（审批人 + 时间）"
+            )
         return (
             f"PR: {record.repo}#{record.pr_number}\n"
             f"SHA: {record.head_sha}\n"
             f"CI: {record.ci_state or 'success'}"
         )
 
-    def _register_pending_approval(self, record: MergeRecord) -> None:
+    def _register_pending_approval(self, record: MergeRecord, output: str) -> None:
         """把这条合并审批登记进 HITL 待批存储，让卡片按钮点得动。
 
         **这是审批闭环此前缺的一环**（2026-10-09 实测）：卡片按钮的 value 只带
@@ -193,7 +308,7 @@ class MergeNotifier:
         request = HitlRequest(
             session_id=record.task_key,
             trace_id=record.task_key,
-            agent_output=self._approval_output(record),
+            agent_output=output,
             intent="merge_approval",
             agent_name="merge_gate",
             channel="feishu",

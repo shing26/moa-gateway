@@ -228,3 +228,80 @@ async def test_feishu_card_update_uses_message_patch_api(monkeypatch) -> None:
     assert await sender.update_card("om_123", card) is True
     assert calls[0]["url"].endswith("/im/v1/messages/om_123")
     assert calls[0]["headers"]["Authorization"] == "Bearer tenant-token"
+
+
+def _message_sender(monkeypatch, response: dict) -> tuple:
+    from app.channels.feishu_cards import FeishuCardSender
+
+    class _Auth:
+        config = type("C", (), {"base_url": "https://open.feishu.cn/open-apis"})()
+
+        async def get_token(self) -> str:
+            return "tenant-token"
+
+    calls: list[dict] = []
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return response
+
+    class _Client:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def post(self, url: str, **kwargs) -> _Response:
+            calls.append({"url": url, **kwargs})
+            return _Response()
+
+    monkeypatch.setattr("app.channels.feishu_cards.httpx.AsyncClient", _Client)
+    card = ApprovalCard(
+        session_id="s",
+        trace_id="t",
+        agent_name="merge_gate",
+        intent="merge_approval",
+        agent_output="out",
+        channel="feishu",
+        target="oc_abc",
+    )
+    return FeishuCardSender(_Auth()), card, calls
+
+
+@pytest.mark.asyncio
+async def test_send_card_with_id_returns_feishu_message_id(monkeypatch) -> None:
+    """T2：发送成功时返回飞书消息 id。"""
+    sender, card, calls = _message_sender(
+        monkeypatch, {"code": 0, "data": {"message_id": "om_sent_1"}}
+    )
+
+    assert await sender.send_card_with_id(card) == "om_sent_1"
+    assert calls[0]["url"].endswith("/im/v1/messages")
+
+
+@pytest.mark.asyncio
+async def test_send_card_bool_contract_is_unchanged(monkeypatch) -> None:
+    """T2：send_card 仍是 bool，内部复用 send_card_with_id。"""
+    sender, card, _calls = _message_sender(
+        monkeypatch, {"code": 0, "data": {"message_id": "om_sent_2"}}
+    )
+
+    assert await sender.send_card(card) is True
+
+
+@pytest.mark.asyncio
+async def test_send_card_with_id_returns_empty_on_business_error(monkeypatch) -> None:
+    """T2：飞书业务错误时返回空串，send_card 仍为 False。"""
+    sender, card, _calls = _message_sender(
+        monkeypatch, {"code": 230001, "msg": "invalid receive_id"}
+    )
+
+    assert await sender.send_card_with_id(card) == ""
+    assert await sender.send_card(card) is False

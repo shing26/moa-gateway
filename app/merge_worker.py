@@ -18,6 +18,7 @@ import math
 import os
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from app.config import settings
 from app.deps import delivery_run_store, merge_store
@@ -28,6 +29,7 @@ from apps.code_review_pipeline.merge_comment_approval import (
 from apps.code_review_pipeline.merge_preflight import MERGE_WORKER_HEARTBEAT_KEY
 from apps.code_review_pipeline.merge_poller import MergePoller
 from apps.code_review_pipeline.notifications.merge_notifier import MergeNotifier
+from apps.code_review_pipeline.routing.github_client import GitHubRepo
 from apps.code_review_pipeline.routing.github_provider import build_github_client
 
 logger = logging.getLogger("moa.merge_worker")
@@ -112,7 +114,13 @@ class MergeWorker:
         result = await self._poller.poll_once()
         for record in result.approvals:
             try:
-                await self._notifier.send_approval_card(record)
+                pr_details = await self._fetch_pr_details(record)
+                delivery = await self._notifier.send_approval_card(
+                    record, pr_details
+                )
+                message_id = str(getattr(delivery, "message_id", "") or "")
+                if message_id:
+                    self._persist_card_message_id(record, message_id)
             except Exception:  # noqa: BLE001 - 审批卡片发送：任意异常记录后继续处理下一条，单卡失败不阻塞批量
                 logger.exception(
                     "failed to send approval card for %s", record.task_key
@@ -141,6 +149,76 @@ class MergeWorker:
             raise
         except Exception:  # noqa: BLE001 - 心跳是附加信号：写失败不得中断轮询
             logger.warning("merge worker heartbeat write failed", exc_info=True)
+
+    async def _fetch_pr_details(
+        self, record
+    ) -> dict[str, Any] | None:
+        """Read the PR facts used to enrich the approval card.
+
+        Display-only: any failure or missing field returns ``None`` so the
+        notifier falls back to the original three-line card. Approval delivery
+        must not depend on this call succeeding.
+        """
+        try:
+            owner, _, name = record.repo.partition("/")
+            pr = await self._github.get_pr(
+                GitHubRepo(owner=owner, name=name), record.pr_number
+            )
+        except Exception as exc:  # noqa: BLE001 - 富化失败只降级展示，不能漏发审批卡
+            logger.warning(
+                "get_pr failed for %s; approval card falls back to 3 lines: %s",
+                record.task_key,
+                exc,
+            )
+            return None
+
+        if not isinstance(pr, dict):
+            logger.warning(
+                "get_pr returned no PR data for %s; card falls back to 3 lines",
+                record.task_key,
+            )
+            return None
+
+        base = pr.get("base") or {}
+        user = pr.get("user") or {}
+        details = {
+            "title": pr.get("title"),
+            "additions": pr.get("additions"),
+            "deletions": pr.get("deletions"),
+            "changed_files": pr.get("changed_files"),
+            "base": base.get("ref") if isinstance(base, dict) else None,
+            "html_url": pr.get("html_url"),
+            "login": user.get("login") if isinstance(user, dict) else None,
+        }
+        if not self._details_complete(details):
+            logger.warning(
+                "get_pr returned incomplete fields for %s; card falls back to 3 lines",
+                record.task_key,
+            )
+            return None
+        return details
+
+    @staticmethod
+    def _details_complete(details: dict[str, Any]) -> bool:
+        for key in ("title", "base", "html_url", "login"):
+            value = details.get(key)
+            if not isinstance(value, str) or not value.strip():
+                return False
+        for key in ("additions", "deletions", "changed_files"):
+            value = details.get(key)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return False
+        return True
+
+    def _persist_card_message_id(self, record, message_id: str) -> None:
+        try:
+            self._store.set_card_message_id(record.identity, message_id)
+        except Exception:  # noqa: BLE001 - 写回消息 id 只为终态改卡，失败只告警
+            logger.warning(
+                "failed to persist card_message_id for %s",
+                record.task_key,
+                exc_info=True,
+            )
 
 
 def build_worker() -> MergeWorker:

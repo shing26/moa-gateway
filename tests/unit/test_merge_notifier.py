@@ -16,7 +16,10 @@ from app import deps
 from app.channels.feishu_cards import ApprovalCard
 from apps.code_review_pipeline.merge_state import MergeState
 from apps.code_review_pipeline.merge_store import MergeRecord
-from apps.code_review_pipeline.notifications.merge_notifier import MergeNotifier
+from apps.code_review_pipeline.notifications.merge_notifier import (
+    ApprovalCardDelivery,
+    MergeNotifier,
+)
 
 
 def _make_record(
@@ -26,6 +29,10 @@ def _make_record(
     head_sha: str = "abc123",
     ci_state: str = "success",
     ci_failing: tuple[dict[str, str], ...] = (),
+    card_message_id: str = "",
+    approver: str = "",
+    merged_sha: str = "",
+    failure_reason: str = "",
 ) -> MergeRecord:
     return MergeRecord(
         repo=repo,
@@ -34,6 +41,10 @@ def _make_record(
         state=state,
         ci_state=ci_state,
         ci_failing=ci_failing,
+        card_message_id=card_message_id,
+        approver=approver,
+        merged_sha=merged_sha,
+        failure_reason=failure_reason,
     )
 
 
@@ -45,10 +56,48 @@ class _FakeCardSender:
         self.sent_cards.append(card)
         return True
 
+    async def send_card_with_id(self, card: ApprovalCard) -> str:
+        self.sent_cards.append(card)
+        return "om_card_1"
+
 
 class _FailingCardSender:
     async def send_card(self, card: ApprovalCard) -> bool:
         return False
+
+    async def send_card_with_id(self, card: ApprovalCard) -> str:
+        return ""
+
+
+class _ResolvedCardSender:
+    """Records in-place card updates; optionally raises like a transport failure."""
+
+    def __init__(self, *, raises: bool = False) -> None:
+        self.updates: list[tuple[str, ApprovalCard]] = []
+        self.raises = raises
+
+    async def send_card(self, card: ApprovalCard) -> bool:
+        return True
+
+    async def send_card_with_id(self, card: ApprovalCard) -> str:
+        return "om_unused"
+
+    async def update_card(self, message_id: str, card: ApprovalCard) -> bool:
+        if self.raises:
+            raise RuntimeError("feishu down")
+        self.updates.append((message_id, card))
+        return True
+
+
+_PR_DETAILS = {
+    "title": "feat: enrich approval card",
+    "additions": 120,
+    "deletions": 7,
+    "changed_files": 4,
+    "base": "main",
+    "html_url": "https://github.com/owner/repo/pull/42",
+    "login": "shing26",
+}
 
 
 class _FakeSessionStore:
@@ -264,3 +313,147 @@ async def test_no_sender_skips_with_warning_without_raising(monkeypatch, caplog)
 
     assert not ok
     assert "card sender not initialized" in caplog.text
+
+
+def _card_text(card: ApprovalCard) -> str:
+    return "\n".join(
+        el.get("content", "")
+        for el in card.to_card_payload()["elements"]
+        if el.get("tag") == "markdown"
+    )
+
+
+def _has_action_buttons(card: ApprovalCard) -> bool:
+    return any(
+        el.get("tag") == "action" for el in card.to_card_payload()["elements"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_approval_card_is_enriched_with_pr_details() -> None:
+    """T1：富化成功时卡片含标题、变更统计、作者、链接、短 SHA 与批准后说明。"""
+    record = _make_record(head_sha="deadbeef1234567890")
+    sender = _FakeCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    delivery = await notifier.send_approval_card(record, _PR_DETAILS)
+
+    assert delivery.sent
+    assert delivery.message_id == "om_card_1"
+    card = sender.sent_cards[0]
+    text = _card_text(card)
+    assert "标题: feat: enrich approval card" in text
+    assert "变更: 4 files  +120 −7  → main" in text
+    assert "作者: shing26" in text
+    assert "PR  : #42 https://github.com/owner/repo/pull/42" in text
+    assert "SHA : deadbeef1234" in text
+    assert "CI  : success" in text
+    assert "批准后: 以 merge commit 合并到 main，并写入审计（审批人 + 时间）" in text
+    assert card.hitl_kind == "merge_approval"
+    assert _has_action_buttons(card)
+
+
+@pytest.mark.asyncio
+async def test_approval_card_falls_back_to_three_lines_without_details() -> None:
+    """T1：没有富化数据时仍是旧三行，卡片照发。"""
+    record = _make_record(head_sha="deadbeef1234567890")
+    sender = _FakeCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    delivery = await notifier.send_approval_card(record, None)
+
+    assert delivery.sent
+    assert sender.sent_cards[0].agent_output == (
+        "PR: owner/repo#42\n"
+        "SHA: deadbeef1234567890\n"
+        "CI: success"
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_approval_card_failure_returns_empty_message_id() -> None:
+    """T2：发送失败时显式返回 sent=False 且 message_id 为空。"""
+    notifier = MergeNotifier(
+        card_sender=_FailingCardSender(), default_target="chat_123"
+    )
+
+    delivery = await notifier.send_approval_card(_make_record(), _PR_DETAILS)
+
+    assert isinstance(delivery, ApprovalCardDelivery)
+    assert not delivery
+    assert delivery.sent is False
+    assert delivery.message_id == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "detail", "expected"),
+    [
+        (
+            "merged",
+            "0123456789abcdef",
+            "✅ 已合并 0123456789ab（审批人 alice）",
+        ),
+        (
+            "superseded",
+            "",
+            "⚠️ 本卡已作废：PR head 变了（abc123）；新记录已重建",
+        ),
+        (
+            "failed",
+            "merge conflict on main",
+            "❌ 合并失败：merge conflict on main",
+        ),
+    ],
+)
+async def test_resolved_card_updates_in_place_without_buttons(
+    outcome: str, detail: str, expected: str
+) -> None:
+    """T3：三种终态各改一次卡，文案正确且无按钮。"""
+    record = _make_record(
+        state=MergeState.MERGED.value if outcome == "merged" else MergeState.FAILED.value,
+        ci_state="success",
+        card_message_id="om_old",
+        approver="alice",
+        head_sha="abc123",
+    )
+    sender = _ResolvedCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    ok = await notifier.send_resolved_card(record, outcome, detail)
+
+    assert ok
+    assert len(sender.updates) == 1
+    message_id, card = sender.updates[0]
+    assert message_id == "om_old"
+    assert expected in _card_text(card)
+    assert not _has_action_buttons(card)
+
+
+@pytest.mark.asyncio
+async def test_resolved_card_without_message_id_sends_nothing() -> None:
+    """T3：没有卡片消息 id 时不发新消息。"""
+    sender = _ResolvedCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    ok = await notifier.send_resolved_card(
+        _make_record(card_message_id=""), "merged", "0123456789abcdef"
+    )
+
+    assert not ok
+    assert sender.updates == []
+
+
+@pytest.mark.asyncio
+async def test_resolved_card_update_exception_only_warns(caplog) -> None:
+    """T3：update_card 抛异常只告警，不向外抛。"""
+    sender = _ResolvedCardSender(raises=True)
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    with caplog.at_level("WARNING", logger="moa.merge_notifier"):
+        ok = await notifier.send_resolved_card(
+            _make_record(card_message_id="om_old"), "failed", "boom"
+        )
+
+    assert not ok
+    assert "resolved card update failed" in caplog.text
