@@ -378,8 +378,7 @@ class PostgresMergeStore:
         try:
             with self._conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE pr_merge_gate SET card_message_id = %s, "
-                    "updated_at = NOW() "
+                    "UPDATE pr_merge_gate SET card_message_id = %s "
                     f"WHERE {self._IDENTITY}",
                     (message_id, repo, int(pr_number), head_sha),
                 )

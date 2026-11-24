@@ -239,14 +239,12 @@ class TestPostgresCardMessageId:
         sql, params = cursor.executed[0]
         normalized = _normalized(sql)
         assert normalized == (
-            "UPDATE pr_merge_gate SET card_message_id = %s, updated_at = NOW() "
+            "UPDATE pr_merge_gate SET card_message_id = %s "
             "WHERE repo = %s AND pr_number = %s AND head_sha = %s"
         )
         set_clause = normalized.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
-        assert "card_message_id = %s" in set_clause
-        assert "updated_at = NOW()" in set_clause
-        assert "state" not in set_clause
-        assert "transitions" not in set_clause
+        assert set_clause == "card_message_id = %s"
+        assert "updated_at" not in set_clause
         assert params == ("om_card_1", "o/r", 7, "abc123")
         assert conn.commits == 1
 
