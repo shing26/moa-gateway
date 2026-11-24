@@ -95,4 +95,21 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 
 ## 6. 签收记录
 
-（待所有者书面签收）
+**所有者书面签收**：用户消息「已经签收 #141」（2026-11-25）。
+
+**合并**：PR #141 → `main`，merge commit
+`1efb1521741c746123be71dc2bea7896e3fb19d1`。
+
+**验收证据**：独立 Verifier 最终 `ACCEPT`（HEAD `141535d`），F1–F6 全 PASS，
+P0/P1 无。V1 `63 passed`；V2 `2381 passed, 6 skipped`；V3
+`All checks passed!`。首轮 `ACCEPT_WITH_NITS` 的三个可修 nit
+（Unicode 数字解析抛 `ValueError`、空 card id 用 INFO、`error` 分支未覆盖）
+已收掉并复核；Unicode 复现现在只告警返回 `None`。GitHub CI：`test` /
+`integration` 绿，`docker` skipped。
+
+**已知非阻塞项**：`rejected` 复用 `notification` kind，标题为「通知」/蓝色，
+不是拒绝专用红色终态卡；契约只约束文案与无按钮。
+
+**运行时确认**：合并后 8083 网关与 `python -m app.merge_worker` 已重启到
+`1efb152`。端到端证据（富化审批卡 + 批准后卡片就地变 ✅）由紧随其后的
+留痕单自然产生，见后续修订。
