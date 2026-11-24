@@ -11,6 +11,52 @@ from apps.code_review_pipeline.merge_state import (
     MergeState,
 )
 from apps.code_review_pipeline.merge_store import MergeNotFound, MergeRecord, MergeStore
+from apps.code_review_pipeline.merge_store import PostgresMergeStore
+
+
+class _FakeCursor:
+    def __init__(self, *, rowcount: int = 1) -> None:
+        self.executed: list[tuple[str, object]] = []
+        self.rowcount = rowcount
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args) -> bool:
+        return False
+
+    def execute(self, sql: str, params: object = None) -> None:
+        self.executed.append((sql, params))
+
+    def fetchone(self):
+        return None
+
+    def fetchall(self):
+        return []
+
+
+class _FakeConn:
+    def __init__(self, cursor: _FakeCursor) -> None:
+        self._cursor = cursor
+        self.commits = 0
+        self.rollbacks = 0
+
+    def cursor(self) -> _FakeCursor:
+        return self._cursor
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+class _FakePsycopg:
+    def __init__(self, conn: _FakeConn) -> None:
+        self._conn = conn
+
+    def connect(self, _dsn: str, **_kwargs) -> _FakeConn:
+        return self._conn
 
 
 def _record(pr: int = 7, sha: str = "abc123") -> MergeRecord:
@@ -152,3 +198,78 @@ class TestSupersedeOlder:
         superseded = store.supersede_older("o/r", 7, "new", at="t1")
 
         assert [r.state for r in superseded] == [MergeState.SUPERSEDED.value]
+
+
+class TestSetCardMessageId:
+    def test_memory_write_back_is_visible_through_get(self) -> None:
+        store = MergeStore()
+        store.save(_record())
+
+        store.set_card_message_id(("o/r", 7, "abc123"), "om_card_1")
+
+        got = store.get(("o/r", 7, "abc123"))
+        assert got is not None
+        assert got.card_message_id == "om_card_1"
+
+    def test_memory_missing_identity_raises(self) -> None:
+        with pytest.raises(MergeNotFound):
+            MergeStore().set_card_message_id(("o/r", 9, "nope"), "om_x")
+
+
+def _postgres_store(
+    *, rowcount: int = 1
+) -> tuple[PostgresMergeStore, _FakeCursor, _FakeConn]:
+    cursor = _FakeCursor(rowcount=rowcount)
+    conn = _FakeConn(cursor)
+    store = PostgresMergeStore(dsn="fake-dsn", _psycopg=_FakePsycopg(conn))
+    return store, cursor, conn
+
+
+def _normalized(sql: str) -> str:
+    return " ".join(sql.split())
+
+
+class TestPostgresCardMessageId:
+    def test_set_card_message_id_updates_only_that_column(self) -> None:
+        store, cursor, conn = _postgres_store()
+
+        store.set_card_message_id(("o/r", 7, "abc123"), "om_card_1")
+
+        assert len(cursor.executed) == 1
+        sql, params = cursor.executed[0]
+        normalized = _normalized(sql)
+        assert normalized == (
+            "UPDATE pr_merge_gate SET card_message_id = %s, updated_at = NOW() "
+            "WHERE repo = %s AND pr_number = %s AND head_sha = %s"
+        )
+        set_clause = normalized.split(" SET ", 1)[1].split(" WHERE ", 1)[0]
+        assert "card_message_id = %s" in set_clause
+        assert "updated_at = NOW()" in set_clause
+        assert "state" not in set_clause
+        assert "transitions" not in set_clause
+        assert params == ("om_card_1", "o/r", 7, "abc123")
+        assert conn.commits == 1
+
+    def test_set_card_message_id_missing_record_raises_and_rolls_back(self) -> None:
+        store, cursor, conn = _postgres_store(rowcount=0)
+
+        with pytest.raises(MergeNotFound):
+            store.set_card_message_id(("o/r", 7, "abc123"), "om_card_1")
+
+        assert conn.rollbacks == 1
+        assert conn.commits == 0
+
+    def test_save_conflict_still_only_touches_updated_at(self) -> None:
+        store, cursor, conn = _postgres_store()
+
+        store.save(_record())
+
+        assert len(cursor.executed) == 1
+        sql, _params = cursor.executed[0]
+        normalized = _normalized(sql)
+        assert "ON CONFLICT (repo, pr_number, head_sha) DO UPDATE SET" in normalized
+        conflict_clause = normalized.split("DO UPDATE SET ", 1)[1]
+        assert conflict_clause == "updated_at = NOW()"
+        assert "card_message_id" not in conflict_clause
+        assert "state" not in conflict_clause
+        assert conn.commits == 1

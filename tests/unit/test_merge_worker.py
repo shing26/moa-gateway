@@ -212,8 +212,22 @@ class _DeliveryNotifier:
         return None
 
 
-def _watching_store(pr_number: int = 7) -> MergeStore:
-    store = MergeStore()
+class _SpyStore(MergeStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.card_message_writes: list[tuple[tuple[str, int, str], str]] = []
+
+    def set_card_message_id(
+        self, identity: tuple[str, int, str], message_id: str
+    ) -> None:
+        self.card_message_writes.append((identity, message_id))
+        super().set_card_message_id(identity, message_id)
+
+
+def _watching_store(
+    pr_number: int = 7, store: MergeStore | None = None
+) -> MergeStore:
+    store = store or MergeStore()
     store.save(
         MergeRecord(
             repo="owner/repo",
@@ -313,7 +327,7 @@ async def test_get_pr_missing_field_falls_back_and_still_sends() -> None:
 @pytest.mark.asyncio
 async def test_message_id_is_written_back_after_successful_send() -> None:
     """T2：发送成功后把 message id 写回记录，供终态改卡使用。"""
-    store = _watching_store()
+    store = _watching_store(store=_SpyStore())
     notifier = _DeliveryNotifier(ApprovalCardDelivery(True, "om_42"))
     worker = MergeWorker(
         store=store,
@@ -327,6 +341,9 @@ async def test_message_id_is_written_back_after_successful_send() -> None:
     record = store.get(("owner/repo", 7, "deadbeef1234567890"))
     assert record is not None
     assert record.card_message_id == "om_42"
+    assert store.card_message_writes == [
+        (("owner/repo", 7, "deadbeef1234567890"), "om_42")
+    ]
     assert len(notifier.details) == 1
     assert notifier.details[0] is not None
 
@@ -334,7 +351,7 @@ async def test_message_id_is_written_back_after_successful_send() -> None:
 @pytest.mark.asyncio
 async def test_send_failure_leaves_card_message_id_unchanged() -> None:
     """T2：发送失败时记录不变，不写一个假的 message id。"""
-    store = _watching_store()
+    store = _watching_store(store=_SpyStore())
     worker = MergeWorker(
         store=store,
         github=_PrGitHub(pr_info=_PR_INFO),
@@ -347,3 +364,4 @@ async def test_send_failure_leaves_card_message_id_unchanged() -> None:
     record = store.get(("owner/repo", 7, "deadbeef1234567890"))
     assert record is not None
     assert record.card_message_id == ""
+    assert store.card_message_writes == []

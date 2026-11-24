@@ -17,7 +17,6 @@ import logging
 import math
 import os
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -213,7 +212,7 @@ class MergeWorker:
 
     def _persist_card_message_id(self, record, message_id: str) -> None:
         try:
-            self._store.save(replace(record, card_message_id=message_id))
+            self._store.set_card_message_id(record.identity, message_id)
         except Exception:  # noqa: BLE001 - 写回消息 id 只为终态改卡，失败只告警
             logger.warning(
                 "failed to persist card_message_id for %s",

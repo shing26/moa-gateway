@@ -157,6 +157,17 @@ class MergeStore:
     def save(self, record: MergeRecord) -> None:
         self._records[record.identity] = record
 
+    def set_card_message_id(
+        self, identity: tuple[str, int, str], message_id: str
+    ) -> None:
+        """Record the Feishu card id used later for in-place terminal updates."""
+        record = self._records.get(identity)
+        if record is None:
+            raise MergeNotFound(f"no merge record for {identity!r}")
+        self._records[identity] = replace(
+            record, card_message_id=message_id
+        )
+
     def get(self, identity: tuple[str, int, str]) -> MergeRecord | None:
         return self._records.get(identity)
 
@@ -357,6 +368,30 @@ class PostgresMergeStore:
             )
             row = cur.fetchone()
         return None if row is None else self._row_to_record(row)
+
+    def set_card_message_id(
+        self, identity: tuple[str, int, str], message_id: str
+    ) -> None:
+        """Persist only the card id; business columns and transitions stay intact."""
+        repo, pr_number, head_sha = identity
+        self._connect()
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE pr_merge_gate SET card_message_id = %s, "
+                    "updated_at = NOW() "
+                    f"WHERE {self._IDENTITY}",
+                    (message_id, repo, int(pr_number), head_sha),
+                )
+                if not cur.rowcount:
+                    raise MergeNotFound(
+                        f"no merge record for {identity!r}"
+                    )
+            self._conn.commit()
+        except Exception:  # noqa: BLE001 - 事务失败先回滚再原样上抛，宽捕获只覆盖回滚清理
+            if self._conn:
+                self._conn.rollback()
+            raise
 
     def transition(
         self,
