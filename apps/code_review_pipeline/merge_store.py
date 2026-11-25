@@ -248,6 +248,15 @@ class PostgresMergeStore:
         self._conn = None
 
     def _connect(self) -> None:
+        if self._conn is not None and getattr(self._conn, "closed", False):
+            # 长驻进程里的旧句柄在 Postgres 重启后仍留在 ``self._conn`` 上，
+            # 继续用只会每轮抛 "the connection is closed"。关闭动作本身没有
+            # 补救价值——底层连接已经没了，失败只记日志。
+            try:
+                self._conn.close()
+            except Exception:  # noqa: BLE001 - 旧句柄已失效，关闭失败不影响重建
+                logger.debug("ignoring error closing dead merge store connection", exc_info=True)
+            self._conn = None
         if self._conn is None:
             if self._psycopg is None:
                 import psycopg  # type: ignore[import-untyped]
