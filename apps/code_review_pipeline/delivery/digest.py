@@ -33,9 +33,10 @@ IN_PROGRESS_DELIVERY_STATES = frozenset(
         "revising",
         "pushing",
         "waiting_ci",
+        "merging",
     }
 )
-IN_PROGRESS_MERGE_STATES = frozenset({"watching", "merging"})
+IN_PROGRESS_MERGE_STATES = frozenset({"watching", "ci_failed", "merging"})
 _MAX_SECTION_ITEMS = 3
 _MAX_BODY_LINES = 10
 

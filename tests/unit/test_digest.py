@@ -274,6 +274,37 @@ def test_d1_a6_missing_and_empty_run_dir(tmp_path) -> None:
     assert "近 24h: 新开 0 · 合并 0 · 失败 0" in empty.text
 
 
+def test_in_progress_counts_ci_failed_and_merging(tmp_path) -> None:
+    now = datetime(2026, 11, 26, 9, 0, tzinfo=UTC)
+    runs = tmp_path / "runs"
+    _write_run(
+        runs,
+        "dlv-merging",
+        state="merging",
+        updated_at=now - timedelta(minutes=5),
+    )
+    records = [
+        MergeRecord(
+            repo="owner/repo",
+            pr_number=200,
+            head_sha="sha-ci-failed",
+            state=MergeState.CI_FAILED.value,
+            ci_state="failure",
+        )
+    ]
+
+    report = digest.build_digest_report(
+        now, merge_records=records, run_dir=runs
+    )
+
+    assert report.in_progress == {
+        "count": 2,
+        "delivery": 1,
+        "merge": 1,
+        "unavailable": "",
+    }
+
+
 def test_d1_a7_atomic_write_and_corrupt_state(tmp_path, monkeypatch) -> None:
     path = tmp_path / "state" / "state.json"
     digest.save_state(
