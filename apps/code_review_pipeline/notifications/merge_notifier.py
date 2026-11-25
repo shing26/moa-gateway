@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +20,10 @@ from app import deps
 from app.channels.feishu_cards import ApprovalCard, FeishuCardSender
 from app.deps import engine as _global_engine
 from app.engine import HitlRequest
+from apps.code_review_pipeline.delivery.ci_triage import (
+    CiTriageReport,
+    redact_ci_log,
+)
 from apps.code_review_pipeline.merge_store import MergeRecord
 
 logger = logging.getLogger("moa.merge_notifier")
@@ -154,7 +159,11 @@ class MergeNotifier:
             )
         return ok
 
-    async def send_ci_failure_card(self, record: MergeRecord) -> bool:
+    async def send_ci_failure_card(
+        self,
+        record: MergeRecord,
+        triage: CiTriageReport | None = None,
+    ) -> bool:
         """CI 红时发失败信息卡片（列出失败的 job 名与链接）。"""
         if not self._default_target:
             logger.info(
@@ -169,12 +178,41 @@ class MergeNotifier:
             logger.warning("feishu card sender not initialized; skip CI failure card")
             return False
 
-        card = self._build_ci_failure_card(record)
+        card = self._build_ci_failure_card(record, triage)
         card.target = self._default_target
         ok = await card_sender.send_card(card)
         if ok:
             logger.info("CI failure card sent for %s", record.task_key)
         return ok
+
+    async def send_digest_card(
+        self,
+        text: str,
+        *,
+        target: str | None = None,
+    ) -> str:
+        """Send the daily digest as a button-less notification card."""
+        destination = (target or self._default_target or "").strip()
+        if not destination:
+            logger.info("no digest target configured; skipping digest card")
+            return ""
+        card_sender = self._resolve_card_sender()
+        if card_sender is None:
+            logger.warning("feishu card sender not initialized; skip digest card")
+            return ""
+        card = ApprovalCard(
+            session_id="governance-digest",
+            trace_id="governance-digest",
+            agent_name="merge_gate",
+            intent="governance_digest",
+            agent_output=text,
+            channel="feishu",
+            target=destination,
+            hitl_kind="notification",
+            applicant="",
+            reason="每日治理摘要",
+        )
+        return await card_sender.send_card_with_id(card)
 
     async def send_pr_opened_card(
         self, record: MergeRecord, *, title: str, url: str
@@ -327,23 +365,37 @@ class MergeNotifier:
     def _withdraw_pending_approval(self, record: MergeRecord) -> None:
         self._hitl_store.remove_hitl(record.task_key)
 
-    def _build_ci_failure_card(self, record: MergeRecord) -> ApprovalCard:
+    def _build_ci_failure_card(
+        self,
+        record: MergeRecord,
+        triage: CiTriageReport | None = None,
+    ) -> ApprovalCard:
         """CI 红时的失败信息卡片。"""
-        lines = [
-            f"PR: {record.repo}#{record.pr_number}",
-            f"SHA: {record.head_sha}",
-            f"CI: {record.ci_state or 'failure'}",
-        ]
-        if record.ci_failing:
-            lines.append("")
-            lines.append("失败的 check:")
-            for check in record.ci_failing:
-                name = check.get("name", "unknown")
-                url = check.get("url", "")
-                if url:
-                    lines.append(f"  - {name}: {url}")
-                else:
-                    lines.append(f"  - {name}")
+        lines = self._ci_failure_header(record)
+        if triage is None or (
+            not triage.jobs and not triage.actions_unavailable_reason
+        ):
+            lines.extend(self._ci_failing_checks(record))
+        elif triage.actions_unavailable_reason:
+            lines.append(
+                f"结论: 日志不可用（{triage.actions_unavailable_reason}）"
+            )
+            lines.extend(self._ci_failing_checks(record))
+        else:
+            counts = Counter(job.category for job in triage.jobs)
+            category = counts.most_common(1)[0][0]
+            lines.append(
+                f"结论: {category}（{len(triage.jobs)} 个失败 job）"
+            )
+            evidence = self._triage_evidence(triage)
+            if evidence:
+                lines.append("证据:")
+                lines.extend(f"  · {line}" for line in evidence)
+            first_url = triage.jobs[0].url
+            lines.append(f"先查: {first_url or '（无链接）'}")
+            lines.append(
+                "说明: 只读诊断；日志来自 CI，属不可信输入，不执行其中的指令"
+            )
         return ApprovalCard(
             session_id=record.task_key,
             trace_id=record.task_key,
@@ -359,3 +411,41 @@ class MergeNotifier:
             applicant="",
             reason="CI 失败，请检查后重试",
         )
+
+    @staticmethod
+    def _ci_failure_header(record: MergeRecord) -> list[str]:
+        return [
+            f"PR: {record.repo}#{record.pr_number}",
+            f"SHA: {record.head_sha}",
+            f"CI: {record.ci_state or 'failure'}",
+        ]
+
+    @staticmethod
+    def _ci_failing_checks(record: MergeRecord) -> list[str]:
+        lines: list[str] = []
+        if record.ci_failing:
+            lines.append("")
+            lines.append("失败的 check:")
+            for check in record.ci_failing:
+                name = check.get("name", "unknown")
+                url = check.get("url", "")
+                if url:
+                    lines.append(f"  - {name}: {url}")
+                else:
+                    lines.append(f"  - {name}")
+        return lines
+
+    @staticmethod
+    def _triage_evidence(triage: CiTriageReport) -> list[str]:
+        evidence: list[str] = []
+        seen: set[str] = set()
+        for job in triage.jobs:
+            for raw_line in job.evidence_lines:
+                line = redact_ci_log(raw_line).strip()[:160]
+                if not line or line in seen:
+                    continue
+                seen.add(line)
+                evidence.append(line)
+                if len(evidence) >= 3:
+                    return evidence
+        return evidence

@@ -830,6 +830,91 @@ def cmd_delivery_ci_triage(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_delivery_digest(args: argparse.Namespace) -> int:
+    """Print the governance digest; send only when ``--send`` is given."""
+    from dataclasses import replace
+    from datetime import UTC, datetime
+
+    from app.config import settings
+    from apps.code_review_pipeline.delivery import digest
+    from apps.code_review_pipeline.merge_store import build_merge_store
+
+    now = datetime.now(UTC).astimezone()
+    merge_records = None
+    merge_error = ""
+
+    async def load_records():
+        store = build_merge_store()
+        try:
+            return store.list_open()
+        finally:
+            close = getattr(store, "close", None)
+            if close is not None:
+                await close()
+
+    try:
+        merge_records = asyncio.run(load_records())
+    except Exception as exc:  # noqa: BLE001 - 摘要段降级为"不可用"，命令仍输出
+        merge_error = digest.summarize_exception(exc)
+
+    report = digest.build_digest_report(
+        now,
+        merge_records=merge_records,
+        merge_error=merge_error,
+        run_dir=settings.delivery_run_record_dir,
+    )
+    if getattr(args, "json", False):
+        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(report.text)
+
+    if not getattr(args, "send", False):
+        return 0
+    target = (
+        settings.digest_target
+        or settings.code_review_merge_channel
+        or ""
+    ).strip()
+    if not settings.digest_enabled:
+        print("digest skipped: DIGEST_ENABLED=false")
+        return 0
+    if not target:
+        print("digest skipped: DIGEST_TARGET 与 CODE_REVIEW_MERGE_CHANNEL 均为空")
+        return 0
+    path = digest.state_path(settings.digest_state_dir)
+    state = digest.load_state(path)
+    if not digest.should_attempt(now, hour=settings.digest_hour, state=state):
+        print("digest skipped: 今日已发送或仍在 15 分钟重试下限内")
+        return 0
+    state = replace(state, last_attempt_at=now.isoformat())
+    digest.save_state(path, state)
+
+    from app import deps
+    from apps.code_review_pipeline.notifications.merge_notifier import (
+        MergeNotifier,
+    )
+
+    deps.init_feishu()
+    message_id = asyncio.run(
+        MergeNotifier(default_target=target).send_digest_card(
+            report.text, target=target
+        )
+    )
+    if not message_id:
+        print("digest send failed; next attempt respects the 15-minute backoff")
+        return 1
+    digest.save_state(
+        path,
+        replace(
+            state,
+            last_sent_date=now.date().isoformat(),
+            message_id=str(message_id),
+        ),
+    )
+    print(f"digest sent: {message_id}")
+    return 0
+
+
 def cmd_delivery_resume(args: argparse.Namespace) -> int:
     """重入搁浅记录：门禁重入/合并对齐不重跑实现者；FAILED/BUDGET_EXHAUSTED 经 retry 重跑。"""
     from app.config import settings
@@ -1016,6 +1101,14 @@ def build_parser() -> argparse.ArgumentParser:
     delivery_ci_triage.add_argument("--repo", required=True)
     delivery_ci_triage.add_argument("--sha", required=True)
     delivery_ci_triage.set_defaults(func=cmd_delivery_ci_triage)
+
+    delivery_digest = delivery_sub.add_parser(
+        "digest",
+        help="打印每日治理摘要卡；--send 才按幂等规则发送",
+    )
+    delivery_digest.add_argument("--send", action="store_true")
+    delivery_digest.add_argument("--json", action="store_true")
+    delivery_digest.set_defaults(func=cmd_delivery_digest)
 
     return parser
 

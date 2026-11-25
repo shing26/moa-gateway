@@ -17,12 +17,16 @@ import logging
 import math
 import os
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
 from app.config import settings
 from app.deps import delivery_run_store, merge_store
+from apps.code_review_pipeline.delivery import digest
+from apps.code_review_pipeline.delivery.adapters import github_ci
 from apps.code_review_pipeline.delivery.audit import WalDeliveryAudit
+from apps.code_review_pipeline.delivery.ci_triage import build_ci_triage_report
 from apps.code_review_pipeline.merge_comment_approval import (
     build_comment_approval_poller,
 )
@@ -129,8 +133,11 @@ class MergeWorker:
         # 存在；此前 notifier 有这个能力但 worker 从未调用它，于是"CI 红推失败信息"
         # 只活在一个直调 notifier 的单测里，真实运行中不会发生。
         for record in result.ci_failures:
+            triage = await self._collect_ci_triage(record)
             try:
-                await self._notifier.send_ci_failure_card(record)
+                await self._notifier.send_ci_failure_card(
+                    record, triage=triage
+                )
             except Exception:  # noqa: BLE001 - CI 失败卡发送：任意异常记录后继续处理下一条
                 logger.exception(
                     "failed to send CI failure card for %s", record.task_key
@@ -149,6 +156,93 @@ class MergeWorker:
             raise
         except Exception:  # noqa: BLE001 - 心跳是附加信号：写失败不得中断轮询
             logger.warning("merge worker heartbeat write failed", exc_info=True)
+        try:
+            await self._maybe_send_digest(datetime.now(UTC).astimezone())
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - 摘要卡是附加信号：失败不得中断轮询
+            logger.warning("digest send failed", exc_info=True)
+
+    async def _collect_ci_triage(self, record):
+        """Read-only CI diagnosis; failure degrades to the legacy card."""
+        try:
+            collector = github_ci.GitHubCiEvidenceCollector(
+                github=self._github,
+                max_jobs=settings.ci_triage_max_jobs,
+                max_log_chars=settings.ci_triage_max_log_chars,
+            )
+            evidence = await collector.collect(
+                repo=record.repo, head_sha=record.head_sha
+            )
+            return build_ci_triage_report(
+                evidence,
+                base_branch="",
+                branch="",
+                trace_id=record.trace_id or record.task_key,
+            )
+        except Exception as exc:  # noqa: BLE001 - 富化失败只降级卡片，失败卡照发
+            logger.warning(
+                "CI triage enrichment failed for %s: %s",
+                record.task_key,
+                exc,
+            )
+            return None
+
+    async def _maybe_send_digest(self, now: datetime) -> None:
+        """Send the once-per-local-day governance digest when due."""
+        if not settings.digest_enabled:
+            return
+        target = (
+            settings.digest_target
+            or settings.code_review_merge_channel
+            or ""
+        ).strip()
+        if not target:
+            logger.info("no digest target configured; skipping governance digest")
+            return
+        path = digest.state_path(settings.digest_state_dir)
+        state = digest.load_state(path)
+        if not digest.should_attempt(now, hour=settings.digest_hour, state=state):
+            return
+
+        merge_records = None
+        merge_error = ""
+        try:
+            merge_records = self._store.list_open()
+        except Exception as exc:  # noqa: BLE001 - 摘要段降级为"不可用"，卡仍发送
+            merge_error = digest.summarize_exception(exc)
+        report = digest.build_digest_report(
+            now,
+            merge_records=merge_records,
+            merge_error=merge_error,
+            run_dir=settings.delivery_run_record_dir,
+        )
+
+        state = replace(state, last_attempt_at=now.isoformat())
+        try:
+            digest.save_state(path, state)
+        except Exception:  # noqa: BLE001 - 状态写失败只告警；本轮仍尝试发送
+            logger.warning("failed to write digest state", exc_info=True)
+
+        try:
+            message_id = await self._notifier.send_digest_card(
+                report.text, target=target
+            )
+        except Exception:  # noqa: BLE001 - 发卡失败只告警，不中断 merge 轮询
+            logger.warning("digest card send raised", exc_info=True)
+            return
+        if not message_id:
+            logger.warning("digest card not sent; will retry after backoff")
+            return
+        sent = replace(
+            state,
+            last_sent_date=now.date().isoformat(),
+            message_id=str(message_id),
+        )
+        try:
+            digest.save_state(path, sent)
+        except Exception:  # noqa: BLE001 - 已发出：状态写失败只告警，避免重复发送
+            logger.warning("failed to persist digest message id", exc_info=True)
 
     async def _fetch_pr_details(
         self, record
