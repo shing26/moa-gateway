@@ -27,6 +27,8 @@ _RESOLVED_KINDS = {
     "merged": "merge_resolved_merged",
     "superseded": "merge_resolved_superseded",
     "failed": "merge_resolved_failed",
+    # 审批卡过期不是合并失败，但卡片形态一致：无按钮、标题族相同。
+    "expired": "merge_resolved_failed",
     "rejected": "notification",
 }
 
@@ -271,6 +273,8 @@ class MergeNotifier:
                 f"⚠️ 本卡已作废：PR head 变了（{record.head_sha[:12]}）；"
                 "新记录已重建"
             )
+        if outcome == "expired":
+            return "⏳ 审批已过期，已重发新卡"
         reason = (detail or record.failure_reason or "未知原因").strip()
         summary = reason.splitlines()[0][:200] if reason else "未知原因"
         return f"❌ 合并失败：{summary}"
