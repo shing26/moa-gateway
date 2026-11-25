@@ -178,9 +178,22 @@ class MergeWorker:
         ``get_hitl`` 抛异常（Redis 不可达等）只告警并跳过本轮——把异常当成
         过期会在 Redis 抖动时每轮刷一张新卡。
 
+        但 ``REDIS_ENABLE_FALLBACK=true`` 下 Redis 不可达不抛异常：
+        ``RedisHitlStorage`` 会降级为进程内存，``get()`` 返回内存副本里的
+        ``None``，与"登记真的过期"不可区分。所以巡检前先要求存储处于**跨进程
+        权威**状态（``using_memory`` 为假）；降级时整轮跳过——这种 ``None``
+        不能作为重发信号，而且降级期间新登记的 HITL 网关也认领不到。
+
         记录状态保持 ``awaiting_approval``：``failed`` 是终态，转过去之后 CI
         再绿也拉不回来。
         """
+        hitl_store = self._hitl_store
+        # 用 getattr 取默认值：没有该属性的测试替身按"权威存储"处理。
+        if getattr(hitl_store, "using_memory", False):
+            logger.warning(
+                "HITL store degraded to in-memory; skip expired approval sweep"
+            )
+            return
         try:
             records = self._store.list_open()
         except Exception:  # noqa: BLE001 - 巡检读失败只跳过本轮，不能拖垮 worker 轮询
@@ -198,7 +211,7 @@ class MergeWorker:
             if record.identity in just_sent:
                 continue
             try:
-                hitl = self._hitl_store.get_hitl(record.task_key)
+                hitl = hitl_store.get_hitl(record.task_key)
             except Exception:  # noqa: BLE001 - 读失败≠过期：只告警，跳过本轮
                 logger.warning(
                     "failed to read HITL entry for %s; skip expiry check",
@@ -208,6 +221,14 @@ class MergeWorker:
                 continue
             if hitl is not None:
                 continue
+            # RedisHitlStorage 的降级判定发生在**第一次操作时**：读之前它报告
+            # 权威，读完才 fallback。这个 None 来自内存副本，不是过期——放过去
+            # 就会在 Redis 刚挂掉的那一轮发一张点不动的新卡。
+            if getattr(hitl_store, "using_memory", False):
+                logger.warning(
+                    "HITL store degraded during read; skip expired approval sweep"
+                )
+                return
             await self._resend_expired_approval(record)
 
     async def _resend_expired_approval(self, record) -> None:

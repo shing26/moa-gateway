@@ -613,3 +613,80 @@ async def test_non_awaiting_states_are_skipped(state: str) -> None:
     assert sender.updates == []
     assert sender.sent == []
     assert store.card_message_writes == []
+
+
+class _DegradedSessionStore(_ExpirySessionStore):
+    """已降级为进程内存（``REDIS_ENABLE_FALLBACK``）：``None`` 不可信。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.using_memory = True
+
+
+class _DegradingSessionStore(_ExpirySessionStore):
+    """仿 ``RedisHitlStorage``：降级判定发生在**第一次操作时**。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.using_memory = False
+
+    def get_hitl(self, hitl_id: str) -> Any:
+        value = super().get_hitl(hitl_id)
+        self.using_memory = True
+        return value
+
+
+@pytest.mark.asyncio
+async def test_degraded_hitl_store_skips_whole_sweep(caplog) -> None:
+    """T8: 存储降级时整轮跳过——不改卡、不发卡、不写 id，其余记录也不处理。"""
+    first = _awaiting_record(pr_number=7)
+    second = _awaiting_record(pr_number=8, card_message_id="om_old_8")
+    store = _SpyStore()
+    store.save(first)
+    store.save(second)
+    worker, sender, session_store = _expiry_worker(
+        store,
+        _ExpiryGitHub(),
+        session_store=_DegradedSessionStore(),
+    )
+
+    with caplog.at_level("WARNING", logger="moa.merge_worker"):
+        await worker._run_once()  # noqa: SLF001 - 单测直接驱动一轮
+
+    assert "degraded to in-memory" in caplog.text
+    # 降级判定在读取任何记录之前：连 get_hitl 都不该调用。
+    assert session_store.lookups == []
+    assert sender.updates == []
+    assert sender.sent == []
+    assert store.card_message_writes == []
+    for record in (first, second):
+        stored = store.get(record.identity)
+        assert stored is not None
+        assert stored.card_message_id == record.card_message_id
+        assert stored.state == MergeState.AWAITING_APPROVAL.value
+
+
+@pytest.mark.asyncio
+async def test_hitl_degraded_during_read_is_not_treated_as_expired(caplog) -> None:
+    """T8: 读之前报告权威、读完才降级——这个 None 来自内存副本，不是过期。"""
+    record = _awaiting_record()
+    store = _SpyStore()
+    store.save(record)
+    worker, sender, session_store = _expiry_worker(
+        store,
+        _ExpiryGitHub(),
+        session_store=_DegradingSessionStore(),
+    )
+
+    with caplog.at_level("WARNING", logger="moa.merge_worker"):
+        await worker._run_once()  # noqa: SLF001 - 单测直接驱动一轮
+
+    assert "degraded during read" in caplog.text
+    assert session_store.lookups == [record.task_key]
+    assert sender.updates == []
+    assert sender.sent == []
+    assert store.card_message_writes == []
+    stored = store.get(record.identity)
+    assert stored is not None
+    assert stored.card_message_id == "om_old"
+    assert stored.state == MergeState.AWAITING_APPROVAL.value

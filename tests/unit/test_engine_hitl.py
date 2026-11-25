@@ -7,7 +7,7 @@ import pytest
 
 from app.deps import pipeline
 import app.pipeline as pipeline_module
-from app.engine import Engine, HitlRequest
+from app.engine import Engine, HitlRequest, SessionStore
 from app.evaluator.evaluator import EvalResult
 from app.fsm.state_machine import Event, State, next_state
 from app.main import app
@@ -126,6 +126,26 @@ async def test_hitl_request_created_at_survives_store_roundtrip(engine: Engine):
 @pytest.mark.asyncio
 async def test_engine_get_hitl_returns_none_for_unknown(engine: Engine):
     assert engine.session_store.get_hitl("nonexistent") is None
+
+
+# ── HITL 存储权威性：using_memory ──────────────────────────────────────
+# 合并通道的过期巡检只在存储「跨进程权威」时才敢把 get_hitl() 的 None 当成
+# 过期；降级为内存期间的 None 只是内存副本里没有。
+
+class _FlagStorage:
+    def __init__(self, using_memory: bool) -> None:
+        self.using_memory = using_memory
+
+
+def test_session_store_without_storage_reports_memory() -> None:
+    """无底层存储 = 进程内存实现，跨进程不可见。"""
+    assert SessionStore().using_memory is True
+
+
+@pytest.mark.parametrize("raw", [True, False])
+def test_session_store_forwards_storage_using_memory(raw: bool) -> None:
+    """有底层存储时转发它自己的降级状态（Redis 可能在运行中 fallback）。"""
+    assert SessionStore(_FlagStorage(raw)).using_memory is raw
 
 
 @pytest.mark.asyncio

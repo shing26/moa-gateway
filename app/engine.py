@@ -238,6 +238,19 @@ class SessionStore:
                 logger.warning("hitl storage unavailable, using in-memory: %s", exc)
                 self._storage = None
 
+    @property
+    def using_memory(self) -> bool:
+        """HITL 存储是否降级为**进程内存**（跨进程不可见）。
+
+        ``_storage is None`` 是构造期就确定的内存实现；``RedisHitlStorage`` 则在
+        **第一次操作时**才判定是否 fallback（见其 ``using_memory`` 注释）。合并
+        通道据此决定能不能把 ``get_hitl()`` 的 ``None`` 当成"登记真的过期"——
+        降级期间的 ``None`` 只是内存副本里没有，不等于跨进程权威存储里没有。
+        """
+        if self._storage is None:
+            return True
+        return bool(getattr(self._storage, "using_memory", False))
+
     def store_hitl(self, session_id: str, request: HitlRequest) -> None:
         hitl_id = request.trace_id or session_id
         if self._storage is None:
