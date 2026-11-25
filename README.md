@@ -20,7 +20,6 @@ Agent 在隔离工作区里改代码、跑验证、产出可审批的 PR；推�
   <a href="#-关键词与证据索引">证据索引</a> •
   <a href="#-核心工程防线">工程防线</a> •
   <a href="#-真实节点拓扑">节点拓扑</a> •
-  <a href="#-多智能体剂量实验台bench">剂量实验台</a> •
   <a href="#-项目结构概览">项目结构</a> •
   <a href="#-核心架构决策记录-adr">架构决策 (ADR)</a> •
   <a href="#-口径与边界">口径与边界</a>
@@ -41,13 +40,14 @@ uv run python scripts/doctor.py
 .venv\Scripts\python.exe -m app --port 8081
 ```
 
-没有 API Key 也能先看效果——零网络、零 Token，单条约 3–8 秒：
+没有 API Key 也能先看交付门禁——零网络、零 Token，约 8 秒：Agent 在临时仓库改代码 → 跑验证 → 产出变更包（dry-run，不触碰远端）：
 
 ```bash
-uv run python scripts/run_collaboration.py
+uv run python scripts/run_change_demo.py          # 验证通过，产出变更包
+uv run python scripts/run_change_demo.py --fail   # 验证失败，出口被挡住
 ```
 
-完整步骤与端口说明见 [本地运行](#-本地运行)，四条零网络演示见 [秒级实测](#-秒级实测零网络依赖)。
+完整步骤与端口说明见 [本地运行](#-本地运行)，四条零网络演示见 [零网络演示](#-零网络演示含已冻结实验)。
 
 ## 🧱 三层结构
 
@@ -55,12 +55,12 @@ uv run python scripts/run_collaboration.py
 |---|---|---|
 | **产品 · 交付 Agent** | `DeliveryRequest -> DeliveryRun`，默认单 Implementer，产出可审批的 PR | [受治理仓库交付 Agent](#受治理仓库交付-agent) |
 | **支撑 · 治理运行时** | `app/`：FSM 主链、HITL、Guard、审计 WAL、检索与预算 | [核心工程防线](#-核心工程防线) |
-| **验证 · 实验台** | `bench/`：同任务、同预算下比较 L0–L3，回答“多智能体值不值得” | [剂量实验台](#-多智能体剂量实验台bench) |
+| **附录 · 实验档案（已冻结）** | `bench/`：L0–L3 等预算实验的代码与 Run Record；结论已定稿，不再扩场景 | [实验档案](#-实验档案bench已冻结) |
 
 > [!IMPORTANT]
-> **先对齐口径——这不是网关，也不是无边界多智能体系统，更不是自动合并。**
+> **先对齐口径——这不是网关，也不是多智能体编排演示，更不是自动合并。**
 > - **网关**：请求进来后由它执行，不是转发层，也不替谁挡流量；仓库名是历史遗留。
-> - **多智能体**：默认单 Implementer。多执行体只在两条显式入口存在：协作图（`COLLAB_ENABLED=false`，ADR-022）与 `bench/` 剂量实验（人工跑、不进 CI，ADR-023）。
+> - **多智能体编排不是主线**：产品默认单 Implementer；协作图（`COLLAB_ENABLED=false`，ADR-022）与 `bench/` 剂量实验（人工跑、不进 CI，ADR-023）都已冻结，只作为历史实验保留。
 > - **自动合并**：推送与合并必须过 bundle、人工审批与审计；CI 失败只做只读诊断并转人工，不自动修复。
 >
 > 对外一句话：**“我让 Agent 把仓库变更做完，但推送、CI 与合并都必须留下可复核证据并经过人批准。”**
@@ -68,14 +68,14 @@ uv run python scripts/run_collaboration.py
 <details>
 <summary><b>展开：完整定位、停用词与当前边界</b></summary>
 
-仓库名保留历史写法（`Gateway` / `MoA` 两个词在正文口径里停用，理由见下）。**产品是受治理的仓库交付 Agent**：入口为 `DeliveryRequest -> DeliveryRun`，默认单 Implementer，负责在隔离工作区中修改、验证并产出可审批的 PR；推送和合并仍必须经过 bundle、人工审批与审计。`app/` 是支撑交付链的 LLM 治理运行时，`bench/` 是验证多智能体编排是否值得的等预算实验台。S0 已实现，真实仓库端到端验收已于 2026-10-30 完成（证据见 `docs/acceptance/2026-10-30-s0-acceptance.md`）；只读 Verifier 是预注册实验 S1，默认关闭。
+仓库名保留历史写法（`Gateway` / `MoA` 两个词在正文口径里停用，理由见下）。**产品是受治理的仓库交付 Agent**：入口为 `DeliveryRequest -> DeliveryRun`，默认单 Implementer，负责在隔离工作区中修改、验证并产出可审批的 PR；推送和合并仍必须经过 bundle、人工审批与审计。`app/` 是支撑交付链的 LLM 治理运行时；`bench/` 是已冻结的历史实验档案，不再是项目主线。S0 已实现，真实仓库端到端验收已于 2026-10-30 完成（证据见 `docs/acceptance/2026-10-30-s0-acceptance.md`）；只读 Verifier 是预注册实验 S1，默认关闭。
 
-这个项目的**产品**是受治理的仓库交付 Agent；**支撑层**是 `app/` 的治理运行时（拦截、审批、留痕、回归）；**验证层**是 `bench/` 的等预算实验台（同一任务集、同一预算下把 agent 结构从 L0 加到 L3，看边际收益）。三层不能倒过来读成“平台已经支撑多场景”。
+这个项目的**产品**是受治理的仓库交付 Agent；**支撑层**是 `app/` 的治理运行时（拦截、审批、留痕、回归）；`bench/` 是**历史实验档案**（同一任务集、同一预算下把 agent 结构从 L0 加到 L3 的等预算实验，2026-10 冻结）。三层不能倒过来读成“平台已经支撑多场景”。
 
 这里**停用两个词**，并明确交付 Agent 的当前边界：
 
 - **网关**——设计文档 §2.1 判定不成立：请求进来之后是它在干活，不是转发给别人、也不替谁挡流量。"网关"会让人以为它只是中间层。仓库名是历史遗留。
-- **多智能体系统**——PR 审查 R0 是 5 段顺序 LLM 调用；R1 再加入逐 finding 的 Critic，并把 `revise` 的一次回边送回 Report。它不是无边界 handoff 或并行调度。真有多个执行体并发分工的只有两处，且都不在产品主路径上：`app/orchestration/collaboration.py`（Supervisor + `Send` 扇出，`COLLAB_ENABLED=false`，显式入口，ADR-022）与 `bench/` 的剂量实验（L0–L3，人工跑，不进 CI，ADR-023）。
+- **多智能体系统**——PR 审查 R0 是 5 段顺序 LLM 调用；R1 再加入逐 finding 的 Critic，并把 `revise` 的一次回边送回 Report。它不是无边界 handoff 或并行调度。真有多个执行体并发分工的只有两处，且都已冻结、不在产品主路径上：`app/orchestration/collaboration.py`（Supervisor + `Send` 扇出，`COLLAB_ENABLED=false`，ADR-022）与 `bench/` 的剂量实验（L0–L3，人工跑、不进 CI，ADR-023）。
 - **交付 Agent**——默认是单 Implementer，负责改代码、验证、产出可审批的 PR；只读 Verifier 是预注册实验 S1，不是默认拓扑。CI 失败诊断是只读辅助入口，不是 CI 自动修复。
 
 </details>
@@ -91,7 +91,7 @@ uv run python scripts/run_collaboration.py
 | **审批 · 人机协同** | 运行时 HITL 挂起-恢复与审批白名单：[ADR-021](docs/adr/adr-021-approval-gated-merge.md)、`app/pipeline.py` 的 `prepare_hitl` / `await_human`；合并门禁（head-SHA 乐观锁）：[`merge_executor.py`](apps/code_review_pipeline/merge_executor.py)；推送审批现支持 TTY（[`cli.py`](app/cli.py)）与飞书远程卡片（ADR-042）两条通道 `TerminalPushApprovalPort` |
 | **审计 · 留痕** | 哈希链审计 WAL（tamper-evident，能指出第一个被改的行号）：[ADR-019](docs/adr/adr-019-audit-chain-and-retention.md)、[`app/audit/wal.py`](app/audit/wal.py)；GitHub / DeliveryRun / MergeRecord / 审计 WAL 四方对账实例：[S0 真实验收记录](docs/acceptance/2026-10-30-s0-acceptance.md) |
 | **评测 · 效果度量** | RAG 六维离线评测与同源特征止损（实测 nDCG 负向倒退即关闭）：[docs/retrieval-evaluation.md](docs/retrieval-evaluation.md)；预注册配对分析协议：[ADR-029](docs/adr/adr-029-preregistered-paired-analysis.md) |
-| **实验设计** | 实验协议与运行记录：[ADR-026](docs/adr/adr-026-experiment-protocol.md)、[ADR-025](docs/adr/adr-025-multi-agent-experiment-run-record.md)；等预算剂量设计：[ADR-023](docs/adr/adr-023-bench-agent-primitive.md)；实验台：`bench/` |
+| **实验归档（已冻结）** | 实验协议与运行记录：[ADR-026](docs/adr/adr-026-experiment-protocol.md)、[ADR-025](docs/adr/adr-025-multi-agent-experiment-run-record.md)；等预算剂量设计：[ADR-023](docs/adr/adr-023-bench-agent-primitive.md)；结论：[实验档案](docs/multi-agent-experiment-conclusions.md) |
 | **交付门禁 · 写侧安全** | bundle 审批边界与确定性验证：[ADR-030](docs/adr/adr-030-governed-change-agent.md)、[`bundle.py`](apps/code_review_pipeline/change/bundle.py)；交付 Agent 全链路：[ADR-031](docs/adr/adr-031-governed-repository-delivery-agent.md)；工作区写隔离：[ADR-027](docs/adr/adr-027-workspace-write-isolation.md)；S1 数据门槛（dogfood 先行）：[ADR-033](docs/adr/adr-033-s1-data-gate-dogfood-first.md) |
 | **凭证 · 脱敏** | 纵深凭证防线：输入侧白名单（[`subprocess_env.py`](app/agents/subprocess_env.py)）+ 输出侧统一 `redact()`（[ADR-035](docs/adr/adr-035-output-redaction.md)、[`app/redact.py`](app/redact.py)）；触发层四契约预注册：[ADR-036](docs/adr/adr-036-trigger-layer-preregistration.md)；同类产品对照与取舍：[docs/competitive-analysis.md](docs/competitive-analysis.md) |
 | **上下文 · 记忆** | 会话记忆与预算：[`app/memory.py`](app/memory.py)、[`app/context_budget.py`](app/context_budget.py)；长期记忆：[`app/long_term_memory.py`](app/long_term_memory.py)；知识库访问控制：[`app/knowledge_access.py`](app/knowledge_access.py) |
@@ -130,7 +130,7 @@ uv run python scripts/run_collaboration.py
 2. **协议虚假成功**：`SubAgent` 协议只有一个字符串出口（`execute() -> str`），失败与成功共用同一条通道——专家因环境缺失（如 `GITHUB_TOKEN` 未配置）把失败当答案返回时，下游会把它当正常内容放行（本仓实测出现过：Critic 甚至 approve 之后原样交付）。
 3. **技术盲目堆砌**：缺乏量化评测体系，盲目引入 Rerank 等模块，在特征同源时导致排序指标（nDCG）负向倒退。
 
-前两条构成 `app/`（治理运行时）的存在理由。第三条之外还有更根本的一问：**把这些都做对之后，多智能体到底值不值得？** 这是一个还没有答案的实验问题，由 `bench/` 用等预算的 L0–L3 剂量实验正面回答，而不是靠架构图宣称。
+前两条构成 `app/`（治理运行时）的存在理由。第三条曾被 `bench/` 用等预算实验正面回答过一次：**当前配置下多智能体增益不可测量、成本 7.9–14.8 倍**，因此协作默认关闭。这个否定性结论只对当时的模型与任务集成立，证据保留在实验档案中，不再作为项目主线扩展。
 
 ---
 
@@ -224,7 +224,8 @@ flowchart TD
     Rejected --> End
 ```
 
-多 Agent 协作线（ADR-022）是**另一张**真实运行的图，默认关闭、显式入口：
+<details>
+<summary><b>已冻结：多 Agent 协作图（ADR-022，默认关闭，不在主路径）</b></summary>
 
 ```text
 plan ──▶ dispatch ──▶ Send 派 ready 子任务 ──▶ execute_expert ×N ──▶ dispatch
@@ -238,11 +239,13 @@ plan ──▶ dispatch ──▶ Send 派 ready 子任务 ──▶ execute_exp
 收口节点：blocked / rejected / failed
 ```
 
+</details>
+
 ---
 
-## 🧪 多智能体剂量实验台（bench/）
+## 🧪 实验档案（bench/，已冻结）
 
-`bench/` 是仓库的第二个主体。它把"多智能体到底强不强"当成一个**可证伪的实验问题**：同一任务集、同一 token 预算、同一中档模型，只改编排拓扑，看通过率与成本的边际变化。
+`bench/` 保留 2026-10 的等预算剂量实验，**不是产品主线，也不再扩场景**：同一任务集、同一 token 预算、同一模型，只改编排拓扑（L0–L3），用通过率与成本判断“加编排是否值得”。2026-10-25 之后未再开新批次，代码与 Run Record 保留用于复跑和质证。
 
 | 档 | 编排（唯一变量） | 说明 |
 | :---: | :--- | :--- |
@@ -255,96 +258,26 @@ plan ──▶ dispatch ──▶ Send 派 ready 子任务 ──▶ execute_exp
 - **能失败**：任务先跑一次 fail-first（基线必须红），agent 跑完再由固定验证命令判决；`fail` / `budget_exhausted` / `error` 是三种不同的结局，不当成同一种东西。
 - **防作弊靠还原**：验证前把测试文件还原到任务定义的 test patch 版本，并删掉 `tests/` 下新增的未跟踪文件。
 
-### 可验证实验台（Experiment Bench）
+| 实验 | 结论 |
+|---|---|
+| v5 B1（唯一授权分析） | 四档通过率均 0%，L3−L0 配对差 0.0（p=1.0）；token 为 L0 的 **7.9–14.8 倍** → 基线贴地板，**增益不可测量且成本高** |
+| v8 B1 | L0 通过率 0%，被有效样本门禁挡住，**不可授权分析** |
+| 第一轮曲线（2026-10-19，n=2、repeats=1） | L1（单条有界 Critic 回边）为峰值：L0 50% → L1 100%；**方向性证据，不是统计结论** |
+| Issue 分诊 v3 L0（2026-10-25） | 24/24、0 error、对账通过；L0 25%，仅属 qwen2.5:3b + 512 配置，**方法迁移，不是能力宣称** |
 
-剂量曲线之外，`bench/experiment/` 把每次执行统一落成
-`Experiment → Trial → Run Record`：任务、模型与配置快照、真实 prompt 指纹、计划与依赖、
-Critic/Guard/HITL 结果、token/成本/工具账本、工作区执行前后指纹都在同一条记录里。
-每条 Trial 独立写本地不可变 JSON，重复 Experiment ID 或覆盖旧 Trial 会直接失败。
+这条实验线的直接产出是一个否定性依据：**0 可测增益 × 8–15 倍成本**，所以协作图 `COLLAB_ENABLED=false`、不进主路径。方法（自报/判决分离、fail-first、防作弊还原、不可变 Run Record）仍被交付链复用。
 
-```powershell
-$verify = @("python", "-m", "pytest", "-q") | ConvertTo-Json -Compress
-.\.venv\Scripts\python.exe bench/run_experiment.py collab `
-  --task "读取 README.md 并总结" --mode mock --workspace . `
-  --verify-command-json $verify --out .bench-experiments/readme-check
-```
-
-本地真模型用 `--mode live --provider local --model qwen2.5:3b`；受控复跑传
-`--compare-to <baseline>/experiment.json`。完整 schema、比较语义与适配器边界见
-[multi-agent-experiment-bench.md](docs/multi-agent-experiment-bench.md)。
-
-"可验证"指机制（不可变 Run Record、预注册分析、全量对账）可被任何人复跑检查，
-不等于结论已在多配置下验证：正式批次结论目前只覆盖两个本地模型配置
-（v5/v8 均为 qwen2.5:3b，差异在 temperature 与单次输出上限），NVIDIA 端点
-批次因容量阻塞未形成可分析样本，跨模型报告固定为描述性并列、不作推断。
-
-### 第一轮真实曲线（2026-10-19）
-
-模型 `nvidia/nemotron-3-super-120b-a12b`（免费端点，`temperature=1.0`），2 题 × 4 档 × 1 次：
-
-| 档 | 通过率 | 平均 token | 平均每 pass token |
-| :---: | ---: | ---: | ---: |
-| L0 | 50% | 165,071 | 330,141 |
-| **L1** | **100%** | 248,192 | 248,192 |
-| L2 | 50%（1 条撞预算） | 371,190 | 742,380 |
-| L3 | 50% | 217,867 | 435,733 |
-
-边际：**L0→L1 +50pp / +83k token；L1→L2 −50pp / +123k；L2→L3 +0pp / −153k。**
-读法是"**L1 是峰值**"：同样的模型、同样的题，只加一条 Critic 回边就把其中一题从 fail 翻成 pass；再往上加 planner（L2）成本涨了、通过率反而掉回来。L3 的 token 比 L2 低，是因为它把活分给并发 worker，但通过率没比 L2 更好。
-
-> [!IMPORTANT]
-> **这是方向性证据，不是统计结论**：`repeats=1`（报告里每个格子都标 `under_sampled`）、只有 2 题。单个 pass/fail 翻转就足以改变任何一列。
-
-复现：`uv run python bench/run_curve.py --tasks 988fccb a746b81 --repeats 3`（**真花钱、不进 CI**），归档在 `.bench-work/`（不入库）。
-
-### 正式批次结论（结论日期 2026-10-24）
-
-**口径**：v5 B1（采集 2026-10-23）授权分析 + v5/v8 B1/B3 四批次
-（2026-10-23 至 2026-10-24）384 条 Run Record 全量对账。
-只有 v5 B1 满足 `analysis_authorized=true`；v8 B1 被 L3 有效样本门禁挡住，
-v8 B3 存在 17 个截断 `error`。四批次全部对账通过，但对账 ≠ 授权分析。
-
-| 批次 | 结论 | L0 token | L2 token | L3 token |
-| :--- | :--- | ---: | ---: | ---: |
-| v5 B1（授权分析） | 四 arm 通过率均 0%，L3−L0 配对差 0.0，p=1.0 | 67,884 | 705,993 | 538,632 |
-| v8 B1 | 不可授权分析；L0 通过率 0% | 95,582 | 1,410,024 | 705,529 |
-
-**读法必须精确**：L0 通过率本身为 0%，所以"配对差 0.0"不能解读为
-"多智能体无增益"，只能解读为"当前模型与任务集下基线贴地板，增益不可测量"。
-不受地板效应污染的硬数字是 token 倍率：L2/L3 相对 L0 消耗 **7.9–14.8 倍**。
-**0 可测增益 × 8–15 倍成本**，是协作默认关闭的直接依据；默认开启的前提是
-基线通过率脱离地板后，新批次给出配对检验显著为正。
-
-这条教训已固化为 pilot 区分度门禁（`scripts/verify_pilot_runtime.py`）：
-正式批次授权前，基线 arm 必须有足够有效样本且通过率不得贴 0%/100%；
-落在 20%–80% 建议区间外会产生功效警告。v8 当年的 pilot 只有 1 条 L0
-样本且全 fail，若该门禁当时存在，正式批次会在授权阶段被挡下，而不是
-跑满 96 条后才发现数据没有区分力。
-
-### 第二任务域：Issue 分诊（2026-10-25 收口）
-
-分诊轨道复用同一条 pilot 门禁与 Run Record 契约，任务判定为 category+route
-全对（priority 仅记录）。三轮 pilot 各拦截一个根因（workspace 空转 → 判定口径
-含主观字段 → L2 planner 结构性失败），第四轮按 runbook 处置方向 2 冻结
-**v3 L0-only 协议**（`scope.multi_arm_comparison=false`，无比较对象时
-`analysis_authorized=false` 是正确输出）：
-
-- pilot `issue-triage-v3-l0-pilot-live-r2`：基线 37.5%，门禁 `ready=true`；
-- formal `issue-triage-v3-l0-formal-b1-live-r1`：24/24、0 error、全量对账通过，
-  **L0 通过率 25%**，平均 1,938.7 token/次；逐字段归因 category 83.3% / route 37.5%，
-  失败集中在 route 误路由 human。
-
-读法：这是**方法迁移与基线建立**，不是分诊能力宣称——25% 只属于
-qwen2.5:3b + 512 这一配置。多档重进须新协议重过门禁；主线编码任务的多智能体
-结论以 v5 B1 授权分析为终稿，不再用当前配置追加批次。
+完整曲线、四批次对账与分诊口径见 [multi-agent-experiment-conclusions.md](docs/multi-agent-experiment-conclusions.md)；机制契约见 [multi-agent-experiment-bench.md](docs/multi-agent-experiment-bench.md)。复跑：`uv run python bench/run_curve.py --tasks 988fccb a746b81 --repeats 3`（真花钱、不进 CI）。
 
 ---
 
-## ⚡ 秒级实测（零网络依赖）
+## ⚡ 零网络演示（含已冻结实验）
 
 以下四条命令全部在本机实测可跑：mock / 确定性模式，不依赖外部 API Key 与外部网络，单条约 3–8 秒（含启动开销）。
 
 **前置（一次性）**：安装 [uv](https://docs.astral.sh/uv/) 后执行 `uv sync --all-extras --dev`——协作演示（1–3）硬依赖 `langgraph` optional extra，漏装会报 `ModuleNotFoundError`；第 4 条 RAG 案例不需要 extra。首次运行 uv 会自动安装依赖与 Python（约 1–3 分钟，之后才是秒级）。
+
+> 1–3 是**已冻结的协作实验**，用于演示治理链与失败识别，不在产品主路径；日常交付走 `delivery` CLI。
 
 ```bash
 # 1. 协作实验演示（需显式开启 COLLAB_ENABLED；Supervisor → Send 扇出 → Critic 放行 → 治理链）
@@ -405,20 +338,21 @@ moa-gateway/
 │   ├── guard/            # GuardService 三态裁决、RBAC、红队引擎
 │   ├── orchestration/
 │   │   ├── graph.py          # ADR-008：请求链的 LangGraph 表达（等价性对拍）
-│   │   └── collaboration.py # ADR-022：多 Agent 协作图（默认关闭）
+│   │   └── collaboration.py # ADR-022：多 Agent 协作图（已冻结，默认关闭）
 │   ├── pipeline.py       # 生产主链路：自建 FSM 管道
 │   ├── router/           # 意图路由三级降级（正则 → 微模型 → 路由 LLM）
 │   ├── routes/           # FastAPI 端点：chat / webhook / feishu / dashboard / collab
 │   └── vectordb/         # pgvector 双腿检索（稀疏 + 稠密，RRF 融合）与 rerank 接入点
 ├── apps/
 │   └── code_review_pipeline/   # PR 审查垂直应用 + ADR-021 经审批合并通道
-├── bench/       # §5.0 agent 原语 + §5.1 带工具专家 + harness + 预算 B1/B3 + 报告聚合 + 任务定义（剂量曲线实验）
+├── bench/       # 已冻结：agent 原语、harness、预算与 L0–L3 剂量实验（历史证据，不再扩场景）
 ├── delivery/    # 定位与减法清单（对外口径的单一来源）+ 交付材料摘要
 ├── docs/
 │   ├── adr/                           # ADR-002 ~ ADR-043
 │   ├── archive/                       # 历史文档 9 份（未按此实施，见 archive/README.md）
 │   ├── multi-agent-collaboration.md # 协作链路架构与并发写治理说明
 │   ├── multi-agent-experiment-bench.md # Experiment/Trial/Run Record 契约与复跑语义
+│   ├── multi-agent-experiment-conclusions.md # 剂量实验结论归档（已冻结）
 │   └── retrieval-evaluation.md      # 检索 gold set、度量基线与精排止损归档
 ├── evals/       # 数据集与 run_evals.py（intent / guard / e2e / retrieval / hitl_feedback）
 ├── scripts/     # 演示与验收：run_collaboration / rag_case / compare_rerank / doctor / redteam …
@@ -441,10 +375,10 @@ moa-gateway/
 | **ADR-019** | 审计链与保留 | WAL 哈希链（tamper-evident）；审计字段单一来源 |
 | **ADR-020** | 混合检索落地 | 独立稀疏腿 + RRF（k=60）+ 维度不符启动 fail-fast；精排登记回 ADR-016 台账 |
 | **ADR-021** | 审批门禁的合并通道 | PR 合并必须过人工审批门，全程留痕（谁批的、批了什么、何时） |
-| **ADR-022** | 多 Agent 协作立项 | 解除 R6 冻结：Supervisor + `Send` fan-out + Critic 有界回边；不进主路径、默认关闭、复用同一套治理原语 |
+| **ADR-022** | 多 Agent 协作立项（已冻结） | Supervisor + `Send` fan-out + Critic 有界回边；不进主路径、默认关闭、复用同一套治理原语；2026-11-25 随主线收敛归档，不再扩展 |
 | **ADR-023** | bench 内的 agent 原语 | 工具+循环+目标+记忆+预算六要素齐备、**能失败**的执行体；自报（`AgentRun`）与判决（`RunResult`）分离；落 `bench/`、不动 `app/` |
 | **ADR-024** | PR Review 价值闭环 | 候选与发布分离；逐条五态反馈；Run generation 隔离；Comment-only 人工写回与固定 `R0/R1/R1+I` 评测 |
-| **ADR-025** | 多智能体实验 Run Record | 固定 `Experiment → Trial → Run Record`；每条 Trial 不可变落盘；真实 prompt 指纹、模型/配置/工作区快照与受控复跑比较共同构成验收面 |
+| **ADR-025** | 多智能体实验 Run Record（已冻结） | 固定 `Experiment → Trial → Run Record`；每条 Trial 不可变落盘；真实 prompt 指纹、模型/配置/工作区快照与受控复跑比较共同构成验收面；机制仍被复用，实验线不再扩场景 |
 | **ADR-030** | 受治理的变更 agent | 验证 → 人工审批 → 推送；默认 dry-run，未验证或无模型时拒绝产出可推送变更包 |
 | **ADR-031** | 受治理仓库交付 Agent | `DeliveryRequest -> DeliveryRun`；默认单 Implementer，Verifier 仅作预注册实验 |
 | **ADR-032** | CI 失败只读诊断 | 只收集、脱敏并归类失败证据；不修复、不重跑、不写回 GitHub |
