@@ -85,7 +85,17 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 
 ## 6. 签收记录
 
-（待所有者书面签收）
+**所有者签收**：飞书审批卡「批准」，2026-11-25 14:30:10（+08），
+operator `ou_ae3e5cc009fae3462147e15e8c271602`。
+
+**合并**：PR #144 → `main`，merge commit
+`e3ddf8ffde5b8d6d784be5580d7244091f4a3a7b`，`merging -> merged (complete)`
+于 14:30:15。
+
+**验收证据**：独立 Verifier `ACCEPT_WITH_NITS`（HEAD `c3f7448`），T1–T6
+全 PASS，P0/P1 无。V1 `50 passed`；V2 `2387 passed, 6 skipped`；V3
+`All checks passed!`。GitHub CI：`test` / `integration` 绿，`docker`
+skipped。
 
 ## 7. 已知同类缺口（不在本单范围）
 
