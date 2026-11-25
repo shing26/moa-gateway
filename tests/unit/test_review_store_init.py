@@ -147,3 +147,143 @@ def test_review_route_store_is_built_on_first_use(
     assert route._get_review_store() is sentinel
     assert route._get_review_store() is sentinel
     assert built == ["once"], "每次请求都重建 store = 每次请求都建连接"
+
+
+# ── 缺陷 3：句柄已关闭时必须重建（2026-11-25） ────────────────────────────
+
+
+class _FakeHandle:
+    """可模拟 ``closed`` / ``close()`` / SQL 执行的假连接句柄。"""
+
+    def __init__(
+        self,
+        *,
+        closed: bool = False,
+        close_error: BaseException | None = None,
+    ) -> None:
+        self.closed = closed
+        self.close_error = close_error
+        self.close_calls = 0
+        self.executed: list[str] = []
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
+        self.closed = True
+
+    def cursor(self) -> "_RecordingCursor":
+        return _RecordingCursor(self)
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+
+class _RecordingCursor:
+    def __init__(self, handle: _FakeHandle) -> None:
+        self._handle = handle
+
+    def __enter__(self) -> "_RecordingCursor":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def execute(self, sql: str, *a: object, **k: object) -> None:
+        self._handle.executed.append(sql)
+
+
+class _FakePsycopg:
+    def __init__(
+        self,
+        *,
+        handles: list[_FakeHandle] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._handles = list(handles or [])
+        self._error = error
+
+    def connect(self, dsn: str, **kwargs: Any) -> _FakeHandle:
+        self.calls.append({"dsn": dsn, **kwargs})
+        if self._error is not None:
+            raise self._error
+        if self._handles:
+            return self._handles.pop(0)
+        return _FakeHandle()
+
+
+_DSN = "postgresql://u:p@127.0.0.1:5432/db"
+
+
+def _store_with(handle: _FakeHandle, psycopg: _FakePsycopg) -> rs.PostgresReviewStore:
+    store = rs.PostgresReviewStore(dsn=_DSN, _psycopg=psycopg)
+    store._conn = handle
+    return store
+
+
+def test_connect_rebuilds_a_closed_handle() -> None:
+    """T1：closed 句柄先关闭、再按 dsn + connect_timeout 重建一次。"""
+    old = _FakeHandle(closed=True)
+    fake = _FakePsycopg()
+    store = _store_with(old, fake)
+
+    store._connect()
+
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["dsn"] == _DSN
+    assert fake.calls[0]["connect_timeout"] == rs._CONNECT_TIMEOUT_S
+    assert old.close_calls == 1
+    assert old.executed == [], "旧句柄已关闭，不得再在其上执行 SQL"
+    assert store._conn is not old
+    assert store._conn is not None
+
+
+def test_connect_leaves_a_healthy_handle_alone() -> None:
+    """T2：健康句柄不重连、不关闭（否则会打断进行中的事务）。"""
+    healthy = _FakeHandle(closed=False)
+    fake = _FakePsycopg()
+    store = _store_with(healthy, fake)
+
+    store._connect()
+    store._connect()
+
+    assert fake.calls == []
+    assert healthy.close_calls == 0
+    assert store._conn is healthy
+
+
+def test_connect_rebuilds_even_when_closing_the_dead_handle_fails() -> None:
+    """T3：旧句柄 close() 抛异常被吞，重建照常完成。"""
+    old = _FakeHandle(closed=True, close_error=RuntimeError("already gone"))
+    new = _FakeHandle(closed=False)
+    fake = _FakePsycopg(handles=[new])
+    store = _store_with(old, fake)
+
+    store._connect()
+
+    assert old.close_calls == 1
+    assert len(fake.calls) == 1
+    assert store._conn is new
+    with new.cursor() as cur:
+        cur.execute("select 1")
+    assert new.executed == ["select 1"]
+
+
+def test_connect_propagates_rebuild_failure_without_storing_a_half_connection() -> None:
+    """T4：重建失败照常上抛，self._conn 不会留下半个连接。"""
+    import psycopg
+
+    old = _FakeHandle(closed=True)
+    fake = _FakePsycopg(error=psycopg.OperationalError("still down"))
+    store = _store_with(old, fake)
+
+    with pytest.raises(psycopg.OperationalError):
+        store._connect()
+
+    assert old.close_calls == 1
+    assert len(fake.calls) == 1
+    assert store._conn is None
