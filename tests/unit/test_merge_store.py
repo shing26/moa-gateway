@@ -36,13 +36,27 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    def __init__(self, cursor: _FakeCursor) -> None:
+    def __init__(
+        self,
+        cursor: _FakeCursor,
+        *,
+        closed: bool = False,
+        close_error: Exception | None = None,
+    ) -> None:
         self._cursor = cursor
+        self.closed = closed
+        self.closes = 0
+        self._close_error = close_error
         self.commits = 0
         self.rollbacks = 0
 
     def cursor(self) -> _FakeCursor:
         return self._cursor
+
+    def close(self) -> None:
+        self.closes += 1
+        if self._close_error is not None:
+            raise self._close_error
 
     def commit(self) -> None:
         self.commits += 1
@@ -52,11 +66,20 @@ class _FakeConn:
 
 
 class _FakePsycopg:
-    def __init__(self, conn: _FakeConn) -> None:
-        self._conn = conn
+    def __init__(self, conn: _FakeConn, *reconnect_to: _FakeConn) -> None:
+        self._queue = [conn, *reconnect_to]
+        self.connect_calls = 0
+        self.connect_args: list[tuple[str, dict[str, object]]] = []
+        self.connect_error: Exception | None = None
 
-    def connect(self, _dsn: str, **_kwargs) -> _FakeConn:
-        return self._conn
+    def connect(self, dsn: str, **kwargs) -> _FakeConn:
+        self.connect_calls += 1
+        self.connect_args.append((dsn, kwargs))
+        if self.connect_error is not None:
+            raise self.connect_error
+        if len(self._queue) > 1:
+            return self._queue.pop(0)
+        return self._queue[0]
 
 
 def _record(pr: int = 7, sha: str = "abc123") -> MergeRecord:
@@ -271,3 +294,70 @@ class TestPostgresCardMessageId:
         assert "card_message_id" not in conflict_clause
         assert "state" not in conflict_clause
         assert conn.commits == 1
+
+
+class TestPostgresReconnect:
+    """Postgres 容器重启后旧句柄必须被换掉，健康连接不得重连。"""
+
+    def test_closed_connection_is_replaced(self) -> None:
+        stale_cursor = _FakeCursor()
+        stale = _FakeConn(stale_cursor, closed=True)
+        fresh_cursor = _FakeCursor()
+        fresh = _FakeConn(fresh_cursor)
+        psycopg = _FakePsycopg(fresh)
+        store = PostgresMergeStore(dsn="fake-dsn", _psycopg=psycopg)
+        store._conn = stale  # 事故现场：长驻进程握着重启前的句柄
+
+        store.list_open()
+
+        assert psycopg.connect_calls == 1
+        dsn, kwargs = psycopg.connect_args[0]
+        assert dsn == "fake-dsn"
+        assert kwargs["connect_timeout"] > 0
+        assert stale.closes == 1
+        assert store._conn is fresh
+        assert stale_cursor.executed == []
+        assert len(fresh_cursor.executed) == 1
+        assert "SELECT" in _normalized(fresh_cursor.executed[0][0])
+
+    def test_healthy_connection_is_not_reconnected(self) -> None:
+        cursor = _FakeCursor()
+        conn = _FakeConn(cursor)
+        psycopg = _FakePsycopg(conn)
+        store = PostgresMergeStore(dsn="fake-dsn", _psycopg=psycopg)
+
+        store._connect()
+        store._connect()
+
+        assert psycopg.connect_calls == 1
+        assert conn.closes == 0
+
+    def test_close_failure_still_reconnects(self) -> None:
+        stale = _FakeConn(
+            _FakeCursor(), closed=True, close_error=RuntimeError("already gone")
+        )
+        fresh_cursor = _FakeCursor()
+        fresh = _FakeConn(fresh_cursor)
+        psycopg = _FakePsycopg(fresh)
+        store = PostgresMergeStore(dsn="fake-dsn", _psycopg=psycopg)
+        store._conn = stale
+
+        store.list_open()
+
+        assert stale.closes == 1
+        assert psycopg.connect_calls == 1
+        assert store._conn is fresh
+        assert len(fresh_cursor.executed) == 1
+
+    def test_reconnect_failure_propagates_without_bad_handle(self) -> None:
+        stale = _FakeConn(_FakeCursor(), closed=True)
+        psycopg = _FakePsycopg(stale)
+        store = PostgresMergeStore(dsn="fake-dsn", _psycopg=psycopg)
+        store._conn = stale
+        psycopg.connect_error = RuntimeError("db down")
+
+        with pytest.raises(RuntimeError, match="db down"):
+            store.list_open()
+
+        assert psycopg.connect_calls == 1
+        assert store._conn is None
