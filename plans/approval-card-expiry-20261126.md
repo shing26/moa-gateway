@@ -26,6 +26,18 @@
 「返回 None」是唯一重发信号。异常与 None 必须分开：Redis 抖动时重发会变成
 每轮刷一张新卡的循环。
 
+**但是**（2026-11-26 Verifier 实测修订）：`REDIS_ENABLE_FALLBACK=true`（默认且
+本机真实配置）下，Redis 不可达不会抛异常——`RedisHitlStorage` 会降级为进程内存，
+`get()` 返回内存副本里的 `None`。这个 `None` 与「登记真的过期」不可区分，直接
+重发会在 Redis 故障期间每轮换一张卡，而且降级期间新登记的 HITL 只存在于 worker
+进程内存里，网关认领不到，新卡同样点不动。
+
+因此新增前置条件：**HITL 存储必须处于「跨进程权威」状态才允许判定过期**。
+`SessionStore` 暴露一个只读 `using_memory` 属性（`_storage is None` 或底层
+`RedisHitlStorage.using_memory` 为真 → `True`）；巡检在读取任何记录前先检查它，
+为真则记 warning 并整轮跳过。判定一律用 `getattr(..., False)` 读取，使测试替身
+（无该属性）按「权威」处理。
+
 ### R2 过期处置
 
 对判定为过期的记录：
@@ -52,7 +64,9 @@
 
 ```
 app/merge_worker.py
+app/engine.py
 apps/code_review_pipeline/notifications/merge_notifier.py
+tests/unit/test_engine_hitl.py
 tests/unit/test_merge_worker.py
 tests/unit/test_merge_notifier.py
 plans/approval-card-expiry-20261126.md
@@ -73,6 +87,10 @@ plans/approval-card-expiry-20261126.md
   `merged` / `rejected` / `superseded` / 默认 failed 文案不变。
 - **T7** 既有 `test_merge_worker.py` / `test_merge_notifier.py` 全绿；
   不删弱化断言；无新增 skip；`ruff check .` 全绿；无新依赖。
+- **T8** HITL 存储降级（`SessionStore.using_memory is True`，或底层
+  `RedisHitlStorage` 已 fallback）时：即使 `get_hitl()` 返回 `None`，也不改卡、
+  不发新卡；`SessionStore.using_memory` 能正确转发底层状态，`_storage is None`
+  时为 `True`。
 
 ## 4. 验证命令
 
