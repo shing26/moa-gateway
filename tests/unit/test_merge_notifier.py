@@ -408,13 +408,70 @@ async def test_d2_a1_triage_card_has_conclusion_evidence_and_link() -> None:
     assert ok
     card = sender.sent_cards[0]
     text = _card_text(card)
-    assert "结论: test_failure（3 个失败 job）" in text
+    assert "结论: test_failure 2 · unknown 1（3 个失败 job）" in text
     evidence_lines = [
         line for line in text.splitlines() if line.startswith("  · ")
     ]
     assert 1 <= len(evidence_lines) <= 3
     assert "先查: https://github.com/shing26/moa-gateway/actions/runs/123" in text
     assert not _has_action_buttons(card)
+
+
+@pytest.mark.asyncio
+async def test_d2_a11_unknown_majority_does_not_win() -> None:
+    record = _make_record(state=MergeState.CI_FAILED.value, ci_state="failure")
+    report = _triage(
+        (
+            _job(job_id=1, category="unknown"),
+            _job(job_id=2, category="unknown"),
+            _job(job_id=3, category="test_failure"),
+        )
+    )
+    sender = _FakeCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    await notifier.send_ci_failure_card(record, report)
+
+    text = _card_text(sender.sent_cards[0])
+    assert "结论: test_failure 1 · unknown 2（3 个失败 job）" in text
+
+
+@pytest.mark.asyncio
+async def test_d2_a11_all_unknown_still_reports_unknown() -> None:
+    record = _make_record(state=MergeState.CI_FAILED.value, ci_state="failure")
+    report = _triage(
+        (
+            _job(job_id=1, category="unknown"),
+            _job(job_id=2, category="unknown"),
+            _job(job_id=3, category="unknown"),
+        )
+    )
+    sender = _FakeCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    await notifier.send_ci_failure_card(record, report)
+
+    text = _card_text(sender.sent_cards[0])
+    assert "结论: unknown 3（3 个失败 job）" in text
+
+
+@pytest.mark.asyncio
+async def test_d2_a11_ties_follow_contract_priority() -> None:
+    record = _make_record(state=MergeState.CI_FAILED.value, ci_state="failure")
+    report = _triage(
+        (
+            _job(job_id=1, category="timeout"),
+            _job(job_id=2, category="syntax_or_build"),
+            _job(job_id=3, category="unknown"),
+        )
+    )
+    sender = _FakeCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    await notifier.send_ci_failure_card(record, report)
+
+    text = _card_text(sender.sent_cards[0])
+    assert "结论: syntax_or_build 1 · timeout 1 · unknown 1（3 个失败 job）" in text
 
 
 @pytest.mark.asyncio

@@ -127,6 +127,33 @@ def test_card_omits_blank_applicant_and_reason() -> None:
     assert not any("事由" in t for t in texts)
 
 
+@pytest.mark.parametrize(
+    "hitl_kind",
+    ["merge_approval", "notification", "merge_resolved_merged"],
+)
+def test_d2_a13_card_body_has_no_bare_backtick_lines(hitl_kind: str) -> None:
+    card = ApprovalCard(
+        session_id="s", trace_id="t", agent_name="merge_gate",
+        intent="merge_approval", agent_output="line one\nline two",
+        channel="feishu", target="chat", hitl_kind=hitl_kind,
+    )
+    payload = card.to_card_payload()
+    body = "\n".join(
+        el.get("content", "")
+        for el in payload["elements"]
+        if el.get("tag") == "markdown"
+    )
+
+    assert payload["header"]["title"]["content"]
+    assert "line one" in body
+    assert "```" in body
+    assert not [
+        line
+        for line in body.splitlines()
+        if line.startswith("`") and not line.startswith("```")
+    ]
+
+
 class _FakeAuth:
     """只实现 send_card 用到的那一个方法；不该被调用的路径一调就炸。"""
 

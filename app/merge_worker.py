@@ -149,9 +149,10 @@ class MergeWorker:
         # 只活在一个直调 notifier 的单测里，真实运行中不会发生。
         for record in result.ci_failures:
             triage = await self._collect_ci_triage(record)
+            pr_details = await self._fetch_pr_details(record)
             try:
                 await self._notifier.send_ci_failure_card(
-                    record, triage=triage
+                    record, triage=triage, pr_details=pr_details
                 )
             except Exception:  # noqa: BLE001 - CI 失败卡发送：任意异常记录后继续处理下一条
                 logger.exception(
