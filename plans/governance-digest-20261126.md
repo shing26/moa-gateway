@@ -151,10 +151,17 @@ CI : failure
   解析出的 run id，按 run id 去重；候选数上限 `CI_TRIAGE_MAX_JOBS`。
 - check URL 形如 `https://github.com/<owner>/<repo>/actions/runs/<run_id>/job/<job_id>`；
   解析失败、或不是 Actions URL 的 check 跳过，不影响其他 check。
+- 解析必须同时校验 **host 与 repo**：仅接受 scheme `https`、host 为 `github.com` 或
+  `www.github.com`、且路径中 owner/repo 与目标仓库一致（大小写不敏感）；
+  其余 URL 一律跳过。`ci.example.com/actions/runs/789/...` 这类路径形状相同的外部 CI
+  不得被当成 GitHub run。
 - 对每个候选 run 调用 `list_workflow_jobs(run_id)`，**以 job 级 conclusion 判定失败**；
   不得因为 run 级 `conclusion` 为空 / `in_progress` 而跳过该 run。
 - 候选非空但"没有任何失败 job"时，同一轮内最多 **3 次尝试（首试 + 2 次重试）**，
   间隔 10 秒，总阻塞 ≤ 20 秒；仍为空则按 D2.3 降级。候选为空时直接降级，不重试。
+- **已取得至少一个失败 job 时，`actions_unavailable_reason` 必须留空**：单个 run 的
+  读取失败（404 / 403 / 超时）不得覆盖已收集的证据，也不得让卡片退化为"日志不可用"。
+  只有在没有任何失败 job 时才写该原因。
 - 等待函数必须可注入，测试不得真睡。
 - D2.4 的只读、脱敏、成本上限全部不变。
 
@@ -212,6 +219,9 @@ tests/unit/test_ci_triage_github_adapter.py                     （v1.2）
 - **D2-A8** job 全空的 fake 下：`list_workflow_jobs` 最多调用 3 次，注入的等待函数
   被调用 2 次、每次 10 秒；测试不得真实等待。
 - **D2-A9** 非 Actions URL / 空 URL 的 check 不影响其他 check 的解析，且不抛异常。
+- **D2-A10** 混合"真实 GitHub run 123 + 伪 run 789（`ci.example.com` 或别的仓库，
+  读取时 404）"：job 只来自 123，`actions_unavailable_reason` 为空，
+  卡片不得出现"日志不可用"，且 123 的证据行完整。
 
 ### D3 通用
 
@@ -277,6 +287,10 @@ D1-A9 / D1-A10。触发原因：真实数据下 v1.0 的行预算被陈旧待批
 运行中 workflow 的证据获取（check URL 反解 run id、以 job 级结论为准、最多 3 次尝试）；
 新增 D2-A6…A9 与 D3-A4。触发原因：`shing26/OpsShield#110` 的真实 CI 红卡退化为旧三行，
 根因是 run 级结论晚于 check 级失败，而富化只做一次。
+
+**v1.2 澄清**（2026-11-27，Verifier 首轮 REJECT 驱动）：解析 check URL 必须校验 host 与
+repo；已取得失败 job 时不得用单个 run 的读取失败覆盖证据。新增 D2-A10。
+该澄清是 D2.5"不影响其他 check"的直接展开，不扩大范围。
 
 **实现**：独立会话在 `feat/governance-digest-20261126` 分支完成，不得与本会话兼任裁决。
 
