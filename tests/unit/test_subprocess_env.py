@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from app.agents.command_runner import build_verify_env, resolve_program, run_command
-from app.agents.subprocess_env import isolated_env
+from app.agents.subprocess_env import _ALLOWED_NAMES, isolated_env
 
 
 def test_verify_env_prepends_the_active_virtualenv(
@@ -40,6 +40,54 @@ def test_isolated_env_keeps_its_allowlist_semantics(
 
     assert env["PATH"] == "/usr/bin"
     assert "VIRTUAL_ENV" not in env
+
+
+def test_java_home_is_allowlisted_and_crosses_the_boundary(tmp_path: Path) -> None:
+    java_home = str(tmp_path / "jdk21")
+
+    env = isolated_env(
+        tmp_path / "workspace",
+        base={"PATH": "/usr/bin", "JAVA_HOME": java_home},
+    )
+
+    assert "JAVA_HOME" in _ALLOWED_NAMES
+    assert env["JAVA_HOME"] == java_home
+
+
+def test_isolated_env_still_drops_unlisted_variables(tmp_path: Path) -> None:
+    env = isolated_env(
+        tmp_path / "workspace",
+        base={
+            "PATH": "/usr/bin",
+            "JAVA_HOME": "/opt/jdk21",
+            "AWS_SECRET_ACCESS_KEY": "secret",
+            "GITHUB_TOKEN": "token",
+        },
+    )
+
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+    assert "GITHUB_TOKEN" not in env
+
+
+def test_isolated_env_omits_java_home_when_unset(tmp_path: Path) -> None:
+    env = isolated_env(tmp_path / "workspace", base={"PATH": "/usr/bin"})
+
+    assert "JAVA_HOME" not in env
+
+
+def test_verify_env_keeps_java_home(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(sys, "prefix", str(tmp_path / "venv"))
+    monkeypatch.setattr(sys, "base_prefix", str(tmp_path / "base"))
+
+    env = build_verify_env(
+        tmp_path / "workspace",
+        base={"PATH": "/usr/bin", "JAVA_HOME": "/opt/jdk21"},
+    )
+
+    assert env["JAVA_HOME"] == "/opt/jdk21"
 
 
 def test_resolve_program_replaces_a_bare_name_with_the_path_hit(
