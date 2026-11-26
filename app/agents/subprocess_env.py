@@ -30,6 +30,7 @@ _ALLOWED_NAMES = frozenset(
         "LC_CTYPE",
         "TZ",
         "VIRTUAL_ENV",
+        "JAVA_HOME",
         "PYTHONHOME",
         "PYTHONPATH",
         "PYTHONIOENCODING",
