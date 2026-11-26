@@ -43,15 +43,24 @@ MoA 治理摘要 · 2026-11-26 09:00
 ```
 
 - **待你决定**：`merge_store.list_open()` 中 `state == awaiting_approval` 的记录，
-  加上 delivery run 中 `state == ready_for_push_approval` 的记录。
+  加上 delivery run 中 `state ∈ {ready_for_push_approval, awaiting_merge_approval}` 的记录；
+  同一变更按 `run_id` 去重（任一侧缺 `run_id` 时用 `repo#pr@sha` 匹配）。
   merge 记录的时长取 `transitions` 最后一条的 `at`；run 的时长取 `updated_at`；
-  取不到时写 `时长未知`。按最旧优先，最多列 3 条，超出写 `… 另有 N 条`。
+  取不到时写 `时长未知`。
+  **超过 7 天的只计数、不逐条列出**；段标题固定为
+  `待你决定: <总数>（可处理 <n> · 超 7 天 <m>）`，可处理项最多列 2 条。
 - **卡住了**：delivery run 中 `state ∈ {needs_human, budget_exhausted, failed}` 且
-  `updated_at` 在 7 天内。每条带 failure code（无 code 写 `(none)`），最多 3 条。
-- **进行中**：delivery run 中 `state ∈ {implementing, revising, waiting_ci}` 与
-  merge 记录中 `state ∈ {watching, merging}` 的计数，只给数字与两类拆分。
+  `updated_at` 在 7 天内。每条带 failure code（无 code 写 `(none)`），**最多列 2 条**，
+  其余写进段标题 `卡住了: <总数>（另有 N 条）`。
+- **进行中**：**所有未在前两段计数的非终态**。delivery 侧非终态为 preparing /
+  implementing / checking / verifier_review / revising / ready_for_push_approval /
+  pushing / waiting_ci / awaiting_merge_approval / merging；merge 侧非终态为
+  watching / ci_failed / awaiting_approval / merging。终态（delivery 的 merged /
+  rejected / needs_human / budget_exhausted / failed，merge 的 merged / rejected /
+  failed / superseded）不进任何段。只给总数与 `（delivery N / merge M）` 拆分。
 - **近 24h**：`collect_stats(run_dir, since=today - 1 day)` 的 `runs` / `delivered` / `failed`。
-- 正文硬上限 10 行；超出的条目收敛为计数，不得截断 URL。
+- 正文硬上限 10 行，**由每段额度保证而不是先到先得**：固定 5 行（标题 + 三个段标题 +
+  近 24h），明细每段最多 2 条；**前一段不得挤占后一段的明细额度**。不得截断 URL。
 - 每一个列出条目必须带可点的 URL，或显式写 `（无链接）`。
 
 #### D1.3 幂等与重试
@@ -163,6 +172,10 @@ plans/governance-digest-20261126.md
 - **D1-A6** run 目录不存在 → 三段写 `不可用`；目录存在但无记录 → 写 `0`。
 - **D1-A7** 状态文件原子写；损坏 JSON 被当作无状态处理，不抛异常。
 - **D1-A8** `delivery digest` 默认不发送、不写状态；`--send` 才发送；`--json` 输出可解析的 report。
+- **D1-A9** 构造 5 条 pending（其中 3 条超过 7 天）与 5 条 stuck：两个明细段各至少列出 1 条，
+  `stuck.items` 不得为空，总数与 `hidden` 正确，正文 ≤ 10 行。
+- **D1-A10** 真实数据（7 天内有失败单）跑 `--json`：`stuck.items` 非空；
+  待你决定段标题含 `可处理` 与 `超 7 天` 两个计数。
 
 ### D2 CI 分诊卡
 
@@ -226,6 +239,11 @@ V4  真实数据只读对账（不发送）
 **契约冻结**：所有者书面批准「批准 governance-digest-20261126」（2026-11-26）。
 基线 commit `4ac369f`；实现分支 `feat/governance-digest-20261126`（独立 worktree
 `.worktrees/governance-digest`）。
+
+**v1.1 修订**：所有者书面批准「批准 v1.1 修订」（2026-11-26）。修订内容：待你决定段引入
+7 天陈旧项折叠与每段明细额度；进行中段改为"所有未在前两段计数的非终态"；新增
+D1-A9 / D1-A10。触发原因：真实数据下 v1.0 的行预算被陈旧待批挤占，
+`stuck.items` 为空——合规但不可用。
 
 **实现**：独立会话在 `feat/governance-digest-20261126` 分支完成，不得与本会话兼任裁决。
 
