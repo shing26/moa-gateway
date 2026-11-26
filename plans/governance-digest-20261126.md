@@ -165,6 +165,23 @@ CI : failure
 - 等待函数必须可注入，测试不得真睡。
 - D2.4 的只读、脱敏、成本上限全部不变。
 
+#### D2.6 卡片可读性（v1.3）
+
+**触发原因**：2026-11-27 送达的首张真实分诊卡（`om_x100b7fb3f45788a4dd5476bb73f6738`）
+暴露三个展示缺陷：`结论: unknown` 由多数票产生、信息量最低；正文出现孤立反引号；
+卡片没有 PR 标题/作者/链接。
+
+- **结论行**：主类别 = 失败 job 中出现次数最多的**非 `unknown`** 类别；并列时按
+  `test_failure > syntax_or_build > dependency > permission_or_auth > timeout >
+  cancelled > unknown` 取先者；全部为 `unknown` 时才用 `unknown`。
+  渲染 `结论: <主类别> <n> · <次类别> <m> …（<N> 个失败 job）`，最多 3 组。
+- **PR 上下文**：CI 失败卡尽量带 `PR: #<n> <title>`、`作者: <login>`、`链接: <html_url>`。
+  数据取自现有 `_fetch_pr_details`；失败或字段缺失时退回 `PR: <repo>#<n>`，
+  不得漏发卡片、不得阻塞其它卡片。
+- **正文渲染**：`ApprovalCard.to_card_payload` 不得再用单个反引号包裹多行输出，
+  改为三反引号围栏（或等价）；飞书卡片不得出现孤立 `` ` `` 字符行。
+  该修改对所有卡片类型生效，属展示修正，不改变任何按钮/审批语义。
+
 ## 2. 允许路径
 
 ```
@@ -180,6 +197,8 @@ tests/unit/test_merge_notifier.py
 plans/governance-digest-20261126.md
 apps/code_review_pipeline/delivery/adapters/github_ci.py        （v1.2）
 tests/unit/test_ci_triage_github_adapter.py                     （v1.2）
+app/channels/feishu_cards.py                                    （v1.3）
+tests/unit/test_feishu_cards.py                                 （v1.3）
 ```
 
 `apps/code_review_pipeline/delivery/ci_triage.py` 与 `merge_poller.py` **不在允许路径**：
@@ -222,6 +241,12 @@ tests/unit/test_ci_triage_github_adapter.py                     （v1.2）
 - **D2-A10** 混合"真实 GitHub run 123 + 伪 run 789（`ci.example.com` 或别的仓库，
   读取时 404）"：job 只来自 123，`actions_unavailable_reason` 为空，
   卡片不得出现"日志不可用"，且 123 的证据行完整。
+- **D2-A11** 3 个失败 job（2 个 `unknown` + 1 个 `test_failure`）→ 主类别必须是
+  `test_failure`，文本同时含 `unknown 2` 与 `3 个失败 job`；全部 `unknown` 时才显示 `unknown`。
+- **D2-A12** `pr_details` 可用 → 卡片含标题、作者、`/pull/` 链接；`get_pr` 抛异常 →
+  仍发卡、含 `repo#n`、无标题行、不抛异常。
+- **D2-A13** `to_card_payload()` 的 markdown 正文不含以单个反引号开头的行；
+  审批/通知/终态三类既有卡片仍可正常渲染。
 
 ### D3 通用
 
@@ -291,6 +316,9 @@ D1-A9 / D1-A10。触发原因：真实数据下 v1.0 的行预算被陈旧待批
 **v1.2 澄清**（2026-11-27，Verifier 首轮 REJECT 驱动）：解析 check URL 必须校验 host 与
 repo；已取得失败 job 时不得用单个 run 的读取失败覆盖证据。新增 D2-A10。
 该澄清是 D2.5"不影响其他 check"的直接展开，不扩大范围。
+
+**v1.3 修订**：所有者书面批准「批准 v1.3 修订」（2026-11-27）。修订内容：D2.6
+卡片可读性（结论分类拆分、PR 标题/作者/链接、去掉裸反引号）；新增 D2-A11…A13。
 
 **实现**：独立会话在 `feat/governance-digest-20261126` 分支完成，不得与本会话兼任裁决。
 
