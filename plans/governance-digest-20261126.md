@@ -328,3 +328,13 @@ V4 真实数据对账：待你决定 29（可处理 1 · 超 7 天 28）、卡�
 
 **待验（诚实记录）**：真实 CI 红分诊卡尚未产生，需在下一次真实 CI 失败时补证；
 在补证前，分诊卡只有单测覆盖。
+
+**v1.2 合并**：PR #156 → `main`，merge commit
+`e9aa64b73afeab0e8879d49d512f803662206f20`（分支 `fix/ci-triage-running-run-20261126`）。
+验收 HEAD `ea5559a`；合并 `main` 文档提交后为 `7b6715d`，代码相对验收 HEAD 零 diff。
+
+**v1.2 验收证据**：独立 Verifier `ACCEPT`。V1 `98 passed`；V2 `2437 passed, 6 skipped`
+（可用内存 3.6 GB）；V3 `All checks passed!`。D2-A6…A10、D3-A4 全 PASS，P0/P1 无。
+首轮 `REJECT` 的 P1（`ci.example.com/actions/runs/789` 被误判为 GitHub run 并覆盖证据）
+已由 host/repo 校验 + "有证据时清空 limitation" 关闭，复现输出 `[]`。
+真实只读探针 `shing26/OpsShield#110`：3 个 job，`test_failure` / `unknown` / `unknown`。
