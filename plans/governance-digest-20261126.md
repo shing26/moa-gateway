@@ -326,8 +326,8 @@ V4 真实数据对账：待你决定 29（可处理 1 · 超 7 天 28）、卡�
 `om_x100b7f48ae8fa0b4c0c0eb15c813035`；`data/digest/state.json` 记录
 `last_sent_date=2026-11-26`、`message_id` 同上。
 
-**待验（诚实记录）**：真实 CI 红分诊卡尚未产生，需在下一次真实 CI 失败时补证；
-在补证前，分诊卡只有单测覆盖。
+**已完成（原待验项）**：真实 CI 红分诊卡已于 2026-11-27 02:35 送达
+（`shing26/OpsShield#110`，message id `om_x100b7fb3f45788a4dd5476bb73f6738`）。
 
 **v1.2 合并**：PR #156 → `main`，merge commit
 `e9aa64b73afeab0e8879d49d512f803662206f20`（分支 `fix/ci-triage-running-run-20261126`）。
@@ -343,4 +343,7 @@ V4 真实数据对账：待你决定 29（可处理 1 · 超 7 天 28）、卡�
 对 `shing26/OpsShield#110` 生成了新格式卡片（`结论: unknown（3 个失败 job）` +
 3 条证据 + 先查链接 + 只读说明）。当时本机网络与 Docker 均异常：飞书出站
 `httpx.ConnectError`，Postgres `:5433` 不可达，故这张卡未送达。
-下一次真实 CI 红将按新格式自动发送；送达后再补消息 id。
+
+**v1.2 送达**：2026-11-27 02:35，Postgres/Redis 容器恢复、merge worker 自愈后，
+对同一记录重放该卡，飞书返回 message id `om_x100b7fb3f45788a4dd5476bb73f6738`。
+真实 CI 红分诊卡至此完成端到端送达；后续真实失败将自动走同一路径。
