@@ -250,3 +250,28 @@ D1-A9 / D1-A10。触发原因：真实数据下 v1.0 的行预算被陈旧待批
 **验收**：独立 Verifier 重跑 V1–V3，`ACCEPT` 后由所有者签收。
 
 **待验（合并后补齐）**：一张真实摘要卡、一张真实 CI 红分诊卡的飞书截图或消息 id。
+
+**所有者签收**：2026-11-26，用户消息「签收 governance-digest-20261126」。
+
+**合并**：PR #150 → `main`，merge commit
+`faa423911555d0f4d2c89ad7d5f7404f704fadc7`。
+
+**验收证据**：独立 Verifier 最终 `ACCEPT`（合并树 HEAD `f71a83d`，父
+`1d3b953` + `78ee40d`）。D1-A1…A10、D2-A1…A5、D3-A1…A3 全 PASS，P0/P1 无。
+V1 `87 passed`；V2 `2427 passed, 6 skipped`；V3 `All checks passed!`；
+V4 真实数据对账：待你决定 29（可处理 1 · 超 7 天 28）、卡住了 11（列出 2 条）、
+进行中 35，与 `delivery stats` 复算一致。GitHub CI：`test` / `integration` 绿，
+`docker` skipped。
+
+**两轮打回记录**：
+
+- 首轮 `REJECT`（HEAD `edc8280`）：`merge.ci_failed` 与 `delivery.merging` 非终态漏计 →
+  `9d458e6` 修复。
+- 契约 v1.1（`791280c`，所有者批准）：陈旧待批挤占行预算，`stuck.items` 为空 →
+  `1d3b953` 修复。
+
+**冲突解决**：PR #150 与 #148/#149 冲突于 `tests/unit/test_merge_worker.py`；
+取 `main` 版本 + 追加本单两个测试，双方均无删除行，合并树复核后 `ACCEPT`。
+
+**待验（诚实记录）**：真实飞书摘要卡与真实 CI 红分诊卡尚未产生。需在 8083 网关与
+merge worker 重启到 `faa4239` 后，于下一轮真实审批 / CI 红时补证。
