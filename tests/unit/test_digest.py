@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -220,7 +221,7 @@ def test_d1_a4_five_sections_line_cap_and_links(tmp_path) -> None:
     assert any(line.startswith("进行中: 0（delivery 0 / merge 0）") for line in lines)
     assert any(line.startswith("近 24h: 新开 4") for line in lines)
     assert len(lines) <= 10
-    assert any("… 另有 2 条" in line for line in lines)
+    assert any("卡住了: 4（另有 2 条）" in line for line in lines)
     for line in lines:
         if line.startswith("  · "):
             assert "https://" in line or "（无链接）" in line
@@ -303,6 +304,98 @@ def test_in_progress_counts_ci_failed_and_merging(tmp_path) -> None:
         "merge": 1,
         "unavailable": "",
     }
+
+
+def test_d1_a9_stale_pending_and_stuck_get_independent_slots(
+    tmp_path,
+) -> None:
+    now = datetime(2026, 11, 26, 9, 0, tzinfo=UTC)
+    runs = tmp_path / "runs"
+    for index, state in enumerate(
+        ["needs_human", "budget_exhausted", "failed", "needs_human", "failed"]
+    ):
+        _write_run(
+            runs,
+            f"dlv-stuck-{index}",
+            state=state,
+            updated_at=now - timedelta(hours=index + 1),
+        )
+    records = [
+        MergeRecord(
+            repo="owner/repo",
+            pr_number=300 + index,
+            head_sha=f"sha{index}",
+            state=MergeState.AWAITING_APPROVAL.value,
+            ci_state="success",
+            transitions=(
+                {
+                    "from": MergeState.WATCHING.value,
+                    "to": MergeState.AWAITING_APPROVAL.value,
+                    "at": (
+                        now - timedelta(days=8 + stale_index)
+                        if stale_index is not None
+                        else now - timedelta(hours=stale_index or 1)
+                    ).isoformat(),
+                },
+            ),
+        )
+        for index, stale_index in enumerate([0, 1, 2, None, None])
+    ]
+
+    report = digest.build_digest_report(
+        now, merge_records=records, run_dir=runs
+    )
+    lines = report.text.splitlines()
+
+    assert report.pending["count"] == 5
+    assert report.pending["actionable"] == 2
+    assert report.pending["stale"] == 3
+    assert report.pending["hidden"] == 0
+    assert len(report.pending["items"]) == 2
+    assert report.stuck["count"] == 5
+    assert report.stuck["hidden"] == 3
+    assert len(report.stuck["items"]) == 2
+    assert report.stuck["items"]
+    assert any(
+        "待你决定: 5（可处理 2 · 超 7 天 3）" in line for line in lines
+    )
+    assert any("卡住了: 5（另有 3 条）" in line for line in lines)
+    assert len(lines) <= 10
+
+
+def test_d1_a10_real_data_stuck_items_and_pending_title() -> None:
+    real_dir = Path(
+        os.getenv(
+            "DELIVERY_RUN_RECORD_DIR",
+            r"D:\HermesData\moa-gateway\data\delivery-runs",
+        )
+    )
+    if not real_dir.is_dir():
+        pytest.skip(f"real delivery run dir not available: {real_dir}")
+    now = datetime.now(UTC).astimezone()
+    payloads, _, available = digest._read_runs(real_dir)  # noqa: SLF001
+    assert available
+
+    def _recent_stuck(payload) -> bool:
+        if str(payload.get("state")) not in digest.STUCK_DELIVERY_STATES:
+            return False
+        seconds = digest._elapsed_seconds(  # noqa: SLF001
+            now,
+            digest._parse_datetime(payload.get("updated_at")),  # noqa: SLF001
+        )
+        return seconds is not None and seconds <= 7 * 24 * 3600
+
+    recent_stuck = any(_recent_stuck(payload) for payload in payloads)
+    if not recent_stuck:
+        pytest.skip("real data has no failure within 7 days")
+
+    report = digest.build_digest_report(
+        now, merge_records=[], run_dir=real_dir
+    )
+
+    assert report.stuck["items"]
+    assert "可处理" in report.text
+    assert "超 7 天" in report.text
 
 
 def test_d1_a7_atomic_write_and_corrupt_state(tmp_path, monkeypatch) -> None:

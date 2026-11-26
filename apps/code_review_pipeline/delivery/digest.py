@@ -37,8 +37,8 @@ IN_PROGRESS_DELIVERY_STATES = frozenset(
     }
 )
 IN_PROGRESS_MERGE_STATES = frozenset({"watching", "ci_failed", "merging"})
-_MAX_SECTION_ITEMS = 3
-_MAX_BODY_LINES = 10
+_MAX_SECTION_ITEMS = 2
+_STALE_AFTER_SECONDS = 7 * 24 * 3600
 
 
 @dataclass(frozen=True)
@@ -279,23 +279,6 @@ def _read_runs(run_dir: str | Path) -> tuple[list[dict[str, Any]], str, bool]:
     return payloads, "", True
 
 
-def _truncate_section(
-    items: list[DigestItem],
-    remaining_lines: int,
-) -> tuple[list[DigestItem], int, int]:
-    """Return shown items, remaining lines, and hidden count."""
-    if not items:
-        return [], remaining_lines, 0
-    shown = min(len(items), _MAX_SECTION_ITEMS, remaining_lines)
-    truncated = shown < len(items)
-    if truncated and shown == remaining_lines:
-        shown -= 1
-    shown = max(0, shown)
-    hidden = len(items) - shown
-    lines = shown + (1 if hidden else 0)
-    return items[:shown], remaining_lines - lines, hidden
-
-
 def build_digest_report(
     now: datetime,
     *,
@@ -361,12 +344,34 @@ def build_digest_report(
             -(item.age_seconds or 0.0),
         )
     )
-    pending_count = len(pending)
+    if merge_error:
+        pending_count: int | None = None
+        pending_actionable = 0
+        pending_stale = 0
+        pending_shown: list[DigestItem] = []
+        pending_hidden = 0
+    else:
+        pending_stale_items = [
+            item
+            for item in pending
+            if item.age_seconds is not None
+            and item.age_seconds > _STALE_AFTER_SECONDS
+        ]
+        pending_actionable_items = [
+            item
+            for item in pending
+            if item.age_seconds is None
+            or item.age_seconds <= _STALE_AFTER_SECONDS
+        ]
+        pending_count = len(pending)
+        pending_actionable = len(pending_actionable_items)
+        pending_stale = len(pending_stale_items)
+        pending_shown = pending_actionable_items[:_MAX_SECTION_ITEMS]
+        pending_hidden = pending_actionable - len(pending_shown)
 
     stuck: list[DigestItem] = []
     in_progress_delivery = 0
     if run_available:
-        seven_days = 7 * 24 * 3600
         for payload in payloads:
             state = str(payload.get("state") or "")
             if state in IN_PROGRESS_DELIVERY_STATES:
@@ -374,7 +379,7 @@ def build_digest_report(
             if state not in STUCK_DELIVERY_STATES:
                 continue
             seconds = _elapsed_seconds(now, _parse_datetime(payload.get("updated_at")))
-            if seconds is None or seconds > seven_days:
+            if seconds is None or seconds > _STALE_AFTER_SECONDS:
                 continue
             failure = payload.get("failure")
             code = "(none)"
@@ -395,7 +400,14 @@ def build_digest_report(
             -(item.age_seconds or 0.0),
         )
     )
-    stuck_count = len(stuck)
+    if run_available:
+        stuck_count: int | None = len(stuck)
+        stuck_shown = stuck[:_MAX_SECTION_ITEMS]
+        stuck_hidden = len(stuck) - len(stuck_shown)
+    else:
+        stuck_count = None
+        stuck_shown = []
+        stuck_hidden = 0
 
     in_progress_merge = 0
     if merge_records is not None:
@@ -425,21 +437,21 @@ def build_digest_report(
     lines: list[str] = [
         f"MoA 治理摘要 · {now.strftime('%Y-%m-%d %H:%M')}",
     ]
-    if merge_error and pending_count == 0:
+    if merge_error:
         lines.append(f"待你决定: 不可用（{merge_error}）")
-    elif merge_error:
-        lines.append(
-            f"待你决定: {pending_count}（merge 待批不可用: {merge_error}）"
-        )
-    elif pending:
+    else:
         lines.append(
             f"待你决定: {pending_count}"
-            f"（最早 {_format_age(pending[0].age_seconds)}）"
+            f"（可处理 {pending_actionable} · 超 7 天 {pending_stale}）"
         )
-    else:
-        lines.append("待你决定: 0")
 
-    lines.append(f"卡住了: {stuck_count if run_available else '不可用（' + run_error + '）'}")
+    if run_available:
+        stuck_title = f"卡住了: {stuck_count}"
+        if stuck_hidden:
+            stuck_title += f"（另有 {stuck_hidden} 条）"
+        lines.append(stuck_title)
+    else:
+        lines.append(f"卡住了: 不可用（{run_error}）")
     if in_progress_available:
         lines.append(
             f"进行中: {in_progress_count}"
@@ -457,22 +469,15 @@ def build_digest_report(
             )
         )
 
-    remaining = _MAX_BODY_LINES - len(lines)
-    pending_shown, remaining, pending_hidden = _truncate_section(pending, remaining)
     pending_lines = [f"  · {item.text}" for item in pending_shown]
-    if pending_hidden:
-        pending_lines.append(f"  … 另有 {pending_hidden} 条")
     # Insert entries directly under their headers.
     lines[2:2] = pending_lines
 
-    stuck_shown, _remaining, stuck_hidden = _truncate_section(stuck, remaining)
     stuck_lines = [f"  · {item.text}" for item in stuck_shown]
-    if stuck_hidden:
-        stuck_lines.append(f"  … 另有 {stuck_hidden} 条")
     stuck_header = 3 + len(pending_lines)
     lines[stuck_header:stuck_header] = stuck_lines
 
-    text = "\n".join(lines[:_MAX_BODY_LINES])
+    text = "\n".join(lines)
     return DigestReport(
         generated_at=now.isoformat(),
         text=text,
@@ -480,6 +485,8 @@ def build_digest_report(
             "count": pending_count,
             "items": [item.to_dict() for item in pending_shown],
             "hidden": pending_hidden,
+            "actionable": pending_actionable,
+            "stale": pending_stale,
             "unavailable": merge_error,
         },
         stuck={
