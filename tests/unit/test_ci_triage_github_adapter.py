@@ -6,6 +6,7 @@ import pytest
 from apps.code_review_pipeline.delivery.adapters.github_ci import (
     CiNotFailed,
     GitHubCiEvidenceCollector,
+    _run_ids_from_checks,
 )
 from apps.code_review_pipeline.routing.github_client import (
     CI_FAILURE,
@@ -203,3 +204,136 @@ async def test_collector_rejects_green_ci() -> None:
 
     with pytest.raises(CiNotFailed, match="success"):
         await collector.collect(repo="owner/name", head_sha=SHA)
+
+
+@pytest.mark.asyncio
+async def test_collector_uses_check_url_run_when_sha_lookup_is_empty() -> None:
+    github = FakeGitHub()
+    github.status = CiStatus(
+        state=CI_FAILURE,
+        checks=(
+            CiCheck(
+                name="test",
+                conclusion="failure",
+                url="https://github.com/owner/name/actions/runs/123/job/9",
+            ),
+            CiCheck(
+                name="external",
+                conclusion="failure",
+                url="https://ci.example.com/build/7",
+            ),
+            CiCheck(name="empty", conclusion="failure", url=""),
+        ),
+    )
+    github.runs = []
+    github.jobs = {
+        123: [
+            {
+                "id": 9,
+                "name": "pytest",
+                "conclusion": "failure",
+                "html_url": "https://github.com/owner/name/actions/runs/123/job/9",
+            }
+        ]
+    }
+    github.logs = {9: "FAILED tests/test_x.py - AssertionError: 1 == 2"}
+    collector = GitHubCiEvidenceCollector(github=github)
+
+    evidence = await collector.collect(repo="owner/name", head_sha=SHA)
+
+    assert github.job_requests == [123]
+    assert github.log_requests == [9]
+    assert len(evidence.jobs) == 1
+    assert evidence.jobs[0].run_id == 123
+    assert "FAILED tests/test_x.py" in evidence.jobs[0].log
+    assert evidence.actions_unavailable_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_collector_accepts_running_run_with_failed_job() -> None:
+    github = FakeGitHub()
+    github.status = CiStatus(
+        state=CI_FAILURE,
+        checks=(
+            CiCheck(
+                name="test",
+                conclusion="failure",
+                url="https://github.com/owner/name/actions/runs/123",
+            ),
+        ),
+    )
+    github.runs = [
+        {
+            "id": 123,
+            "workflow_id": 10,
+            "name": "CI",
+            "run_number": 1,
+            "run_attempt": 1,
+            "conclusion": None,
+            "status": "in_progress",
+        },
+    ]
+    github.jobs = {
+        123: [{"id": 9, "name": "pytest", "conclusion": "failure"}],
+    }
+    github.logs = {9: "FAILED tests/test_x.py - AssertionError: 1 == 2"}
+    collector = GitHubCiEvidenceCollector(github=github)
+
+    evidence = await collector.collect(repo="owner/name", head_sha=SHA)
+
+    assert len(evidence.jobs) == 1
+    assert evidence.jobs[0].name == "pytest"
+    assert evidence.actions_unavailable_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_collector_retries_empty_jobs_with_injected_wait() -> None:
+    github = FakeGitHub()
+    github.status = CiStatus(
+        state=CI_FAILURE,
+        checks=(
+            CiCheck(
+                name="test",
+                conclusion="failure",
+                url="https://github.com/owner/name/actions/runs/123",
+            ),
+        ),
+    )
+    github.runs = []
+    github.jobs = {123: []}
+    waits: list[float] = []
+
+    async def fake_wait(delay: float) -> None:
+        waits.append(delay)
+
+    collector = GitHubCiEvidenceCollector(github=github, wait=fake_wait)
+
+    evidence = await collector.collect(repo="owner/name", head_sha=SHA)
+
+    assert github.job_requests == [123, 123, 123]
+    assert waits == [10, 10]
+    assert evidence.jobs == ()
+    assert "no failed job details" in evidence.actions_unavailable_reason
+
+
+def test_run_ids_from_checks_skips_non_actions_and_empty_urls() -> None:
+    checks = (
+        CiCheck(
+            name="a",
+            conclusion="failure",
+            url="https://github.com/owner/name/actions/runs/123/job/9",
+        ),
+        CiCheck(
+            name="b",
+            conclusion="failure",
+            url="https://github.com/owner/name/actions/runs/123",
+        ),
+        CiCheck(
+            name="c",
+            conclusion="failure",
+            url="https://ci.example.com/build/7",
+        ),
+        CiCheck(name="d", conclusion="failure", url=""),
+    )
+
+    assert _run_ids_from_checks(checks) == [123]
