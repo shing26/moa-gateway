@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
+from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -71,6 +75,44 @@ def _latest_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(latest.values())
 
 
+_ACTIONS_RUN_ID = re.compile(
+    r"^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/actions/runs/(?P<run_id>\d+)(?:/|$)"
+)
+_GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
+
+
+def _run_ids_from_checks(checks: Any, repo: GitHubRepo) -> list[int]:
+    """Extract Actions run ids from check URLs, preserving first-seen order."""
+    run_ids: list[int] = []
+    seen: set[int] = set()
+    for check in checks:
+        url = getattr(check, "url", "")
+        if not isinstance(url, str) or not url:
+            continue
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            continue
+        if parsed.scheme != "https":
+            continue
+        if (parsed.hostname or "").lower() not in _GITHUB_HOSTS:
+            continue
+        match = _ACTIONS_RUN_ID.match(parsed.path)
+        if match is None:
+            continue
+        if (
+            match.group("owner").casefold() != repo.owner.casefold()
+            or match.group("repo").casefold() != repo.name.casefold()
+        ):
+            continue
+        run_id = int(match.group("run_id"))
+        if run_id <= 0 or run_id in seen:
+            continue
+        seen.add(run_id)
+        run_ids.append(run_id)
+    return run_ids
+
+
 def _http_reason(exc: httpx.HTTPStatusError, *, what: str) -> str:
     status = exc.response.status_code
     if status in {401, 403}:
@@ -91,6 +133,7 @@ class GitHubCiEvidenceCollector:
         github: CiGitHubPort,
         max_jobs: int = 10,
         max_log_chars: int = 50_000,
+        wait: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         if max_jobs <= 0:
             raise ValueError("max_jobs must be positive")
@@ -99,6 +142,7 @@ class GitHubCiEvidenceCollector:
         self._github = github
         self._max_jobs = max_jobs
         self._max_log_chars = max_log_chars
+        self._wait = wait or asyncio.sleep
 
     async def collect(self, *, repo: str, head_sha: str) -> CiFailureEvidence:
         target = _repo(repo)
@@ -127,57 +171,78 @@ class GitHubCiEvidenceCollector:
                 ),
             )
 
-        failed_runs = [
-            run
-            for run in _latest_runs(runs)
-            if is_failing_ci_conclusion(str(run.get("conclusion") or ""))
-        ]
+        candidates: list[dict[str, Any]] = []
+        seen_run_ids: set[int] = set()
+        for run in _latest_runs(runs):
+            run_id = int(run.get("id") or 0)
+            if run_id <= 0 or run_id in seen_run_ids:
+                continue
+            seen_run_ids.add(run_id)
+            candidates.append(run)
+        for run_id in _run_ids_from_checks(status.failing, target):
+            if run_id in seen_run_ids:
+                continue
+            seen_run_ids.add(run_id)
+            candidates.append({"id": run_id})
+        candidates = candidates[: self._max_jobs]
+
         jobs: list[CiJobLog] = []
         limitation = ""
-        for run in failed_runs:
-            run_id = int(run.get("id") or 0)
-            workflow_name = str(
-                run.get("name") or run.get("display_title") or run.get("path") or "workflow"
-            )
-            try:
-                raw_jobs = await self._github.list_workflow_jobs(target, run_id)
-            except httpx.HTTPStatusError as exc:
-                limitation = _http_reason(
-                    exc, what=f"GitHub Actions jobs for run {run_id}"
+        for attempt in range(3):
+            jobs = []
+            limitation = ""
+            for run in candidates:
+                run_id = int(run.get("id") or 0)
+                workflow_name = str(
+                    run.get("name")
+                    or run.get("display_title")
+                    or run.get("path")
+                    or "workflow"
                 )
-                continue
-            for raw in raw_jobs:
-                conclusion = str(raw.get("conclusion") or "").lower()
-                if not is_failing_ci_conclusion(conclusion):
-                    continue
-                job_id = int(raw.get("id") or 0)
                 try:
-                    log = await self._github.get_job_log(target, job_id)
-                    unavailable = ""
+                    raw_jobs = await self._github.list_workflow_jobs(target, run_id)
                 except httpx.HTTPStatusError as exc:
-                    log = ""
-                    unavailable = _http_reason(exc, what=f"job {job_id} log")
-                except JobLogTooLarge as exc:
-                    log = ""
-                    unavailable = f"job {job_id} log unavailable: {exc}"
-                jobs.append(
-                    CiJobLog(
-                        run_id=run_id,
-                        job_id=job_id,
-                        workflow_name=workflow_name,
-                        name=str(raw.get("name") or f"job-{job_id}"),
-                        conclusion=conclusion,
-                        url=str(raw.get("html_url") or ""),
-                        log=redact_ci_log(log)[-self._max_log_chars :],
-                        unavailable_reason=unavailable,
+                    limitation = _http_reason(
+                        exc, what=f"GitHub Actions jobs for run {run_id}"
                     )
-                )
+                    continue
+                for raw in raw_jobs:
+                    conclusion = str(raw.get("conclusion") or "").lower()
+                    if not is_failing_ci_conclusion(conclusion):
+                        continue
+                    job_id = int(raw.get("id") or 0)
+                    try:
+                        log = await self._github.get_job_log(target, job_id)
+                        unavailable = ""
+                    except httpx.HTTPStatusError as exc:
+                        log = ""
+                        unavailable = _http_reason(exc, what=f"job {job_id} log")
+                    except JobLogTooLarge as exc:
+                        log = ""
+                        unavailable = f"job {job_id} log unavailable: {exc}"
+                    jobs.append(
+                        CiJobLog(
+                            run_id=run_id,
+                            job_id=job_id,
+                            workflow_name=workflow_name,
+                            name=str(raw.get("name") or f"job-{job_id}"),
+                            conclusion=conclusion,
+                            url=str(raw.get("html_url") or ""),
+                            log=redact_ci_log(log)[-self._max_log_chars :],
+                            unavailable_reason=unavailable,
+                        )
+                    )
+                    if len(jobs) >= self._max_jobs:
+                        break
                 if len(jobs) >= self._max_jobs:
                     break
-            if len(jobs) >= self._max_jobs:
+            if jobs or limitation or not candidates or attempt == 2:
                 break
+            await self._wait(10)
 
-        if failed_runs and not jobs and not limitation:
+        if jobs:
+            limitation = ""
+        elif candidates and not limitation:
             limitation = (
                 "GitHub reported failed workflow runs, but no failed job details "
                 "were available to this token."

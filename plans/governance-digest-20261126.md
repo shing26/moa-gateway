@@ -140,6 +140,31 @@ CI : failure
   `list_workflow_jobs` / `get_job_log`。不得调用任何写方法。
 - 成本上限沿用 `CI_TRIAGE_MAX_JOBS` / `CI_TRIAGE_MAX_LOG_CHARS`，不新增配置。
 
+#### D2.5 运行中 workflow 的证据获取（v1.2）
+
+**触发原因**：2026-11-26 19:00 的 `shing26/OpsShield#110` 真实卡片退化为旧三行。
+时间线（UTC）：run 创建 10:59:44；三个 job 分别在 10:59:51 / 10:59:52 / 11:00:13 失败；
+**11:00:47 发卡**，此时 run 级 `conclusion` 仍为 `null`；run 到 11:00:58 才整体完成。
+现有实现只对"run 级结论已是失败值"的 run 拉 job，于是候选为空、0 个 job、永久降级。
+
+- run 候选 = `list_workflow_runs_for_sha(repo, head_sha)` 的结果 **∪** 从失败 check 的 URL
+  解析出的 run id，按 run id 去重；候选数上限 `CI_TRIAGE_MAX_JOBS`。
+- check URL 形如 `https://github.com/<owner>/<repo>/actions/runs/<run_id>/job/<job_id>`；
+  解析失败、或不是 Actions URL 的 check 跳过，不影响其他 check。
+- 解析必须同时校验 **host 与 repo**：仅接受 scheme `https`、host 为 `github.com` 或
+  `www.github.com`、且路径中 owner/repo 与目标仓库一致（大小写不敏感）；
+  其余 URL 一律跳过。`ci.example.com/actions/runs/789/...` 这类路径形状相同的外部 CI
+  不得被当成 GitHub run。
+- 对每个候选 run 调用 `list_workflow_jobs(run_id)`，**以 job 级 conclusion 判定失败**；
+  不得因为 run 级 `conclusion` 为空 / `in_progress` 而跳过该 run。
+- 候选非空但"没有任何失败 job"时，同一轮内最多 **3 次尝试（首试 + 2 次重试）**，
+  间隔 10 秒，总阻塞 ≤ 20 秒；仍为空则按 D2.3 降级。候选为空时直接降级，不重试。
+- **已取得至少一个失败 job 时，`actions_unavailable_reason` 必须留空**：单个 run 的
+  读取失败（404 / 403 / 超时）不得覆盖已收集的证据，也不得让卡片退化为"日志不可用"。
+  只有在没有任何失败 job 时才写该原因。
+- 等待函数必须可注入，测试不得真睡。
+- D2.4 的只读、脱敏、成本上限全部不变。
+
 ## 2. 允许路径
 
 ```
@@ -153,6 +178,8 @@ tests/unit/test_digest.py                            （新建）
 tests/unit/test_merge_worker.py
 tests/unit/test_merge_notifier.py
 plans/governance-digest-20261126.md
+apps/code_review_pipeline/delivery/adapters/github_ci.py        （v1.2）
+tests/unit/test_ci_triage_github_adapter.py                     （v1.2）
 ```
 
 `apps/code_review_pipeline/delivery/ci_triage.py` 与 `merge_poller.py` **不在允许路径**：
@@ -185,12 +212,23 @@ plans/governance-digest-20261126.md
 - **D2-A3** `triage=None` 时输出与现有失败卡逐字一致（既有测试不改仍绿）。
 - **D2-A4** `actions_unavailable_reason` 非空 → 结论标注日志不可用，仍列 check 名与链接。
 - **D2-A5** fake github 只记录四个读方法；出现任何写方法调用即测试失败。
+- **D2-A6** `list_workflow_runs_for_sha` 返回空，但失败 check 的 URL 指向 run 123、
+  且 `list_workflow_jobs(123)` 返回失败 job → 卡片必须含结论与证据，不得降级。
+- **D2-A7** run 返回 `{"id": 123, "conclusion": null, "status": "in_progress"}`，
+  但 job 级结论为 failure → 必须产出诊断。
+- **D2-A8** job 全空的 fake 下：`list_workflow_jobs` 最多调用 3 次，注入的等待函数
+  被调用 2 次、每次 10 秒；测试不得真实等待。
+- **D2-A9** 非 Actions URL / 空 URL 的 check 不影响其他 check 的解析，且不抛异常。
+- **D2-A10** 混合"真实 GitHub run 123 + 伪 run 789（`ci.example.com` 或别的仓库，
+  读取时 404）"：job 只来自 123，`actions_unavailable_reason` 为空，
+  卡片不得出现"日志不可用"，且 123 的证据行完整。
 
 ### D3 通用
 
 - **D3-A1** 摘要或分诊抛异常时，同一轮的其他审批卡/失败卡照发，worker 不退出（既有 worker 测试全绿）。
 - **D3-A2** `ruff check .` 全绿；不新增依赖；不删或弱化任何既有断言。
 - **D3-A3** 审批身份校验、`bundle_hash` 绑定、head-SHA 乐观锁、状态机转移表零改动。
+- **D3-A4** 既有 D2-A1…A5 与降级测试语义不变且仍绿；分诊仍无任何 GitHub 写调用。
 
 ## 4. 验证命令
 
@@ -244,6 +282,15 @@ V4  真实数据只读对账（不发送）
 7 天陈旧项折叠与每段明细额度；进行中段改为"所有未在前两段计数的非终态"；新增
 D1-A9 / D1-A10。触发原因：真实数据下 v1.0 的行预算被陈旧待批挤占，
 `stuck.items` 为空——合规但不可用。
+
+**v1.2 修订**：所有者书面批准「批准 v1.2 修订」（2026-11-26）。修订内容：D2.5
+运行中 workflow 的证据获取（check URL 反解 run id、以 job 级结论为准、最多 3 次尝试）；
+新增 D2-A6…A9 与 D3-A4。触发原因：`shing26/OpsShield#110` 的真实 CI 红卡退化为旧三行，
+根因是 run 级结论晚于 check 级失败，而富化只做一次。
+
+**v1.2 澄清**（2026-11-27，Verifier 首轮 REJECT 驱动）：解析 check URL 必须校验 host 与
+repo；已取得失败 job 时不得用单个 run 的读取失败覆盖证据。新增 D2-A10。
+该澄清是 D2.5"不影响其他 check"的直接展开，不扩大范围。
 
 **实现**：独立会话在 `feat/governance-digest-20261126` 分支完成，不得与本会话兼任裁决。
 
