@@ -375,3 +375,33 @@ V4 真实数据对账：待你决定 29（可处理 1 · 超 7 天 28）、卡�
 **v1.2 送达**：2026-11-27 02:35，Postgres/Redis 容器恢复、merge worker 自愈后，
 对同一记录重放该卡，飞书返回 message id `om_x100b7fb3f45788a4dd5476bb73f6738`。
 真实 CI 红分诊卡至此完成端到端送达；后续真实失败将自动走同一路径。
+
+**v1.3 合并**：PR #161 → `main`，merge commit
+`38043bc41f3688d1c07717f8dee29cf199b061c7`（分支 `fix/ci-card-display-20261127`，
+验收 HEAD `3fe899b1ff42bff04a23a1fa8f05580335aba228`）。
+
+**所有者签收**：2026-11-27，用户消息「批准 v1.3 修订」。
+
+**v1.3 验收证据**：独立 Verifier `ACCEPT`（HEAD `3fe899b`），D2-A11…A13 全 PASS，
+P0/P1 无。签收前复跑：V1（契约 5 文件）`92 passed`（含 v1.3 新增文件的 7 文件集合
+`121 passed`）；V2 `2445 passed, 6 skipped`；V3 `All checks passed!`。
+
+**v1.3 运行时**：2026-11-27 03:58（+08），主工作区代码到 `38043bc`，merge worker
+重启后 `/healthz` 为 `healthy`、`merge_worker: running`。用生产渲染路径对
+`shing26/OpsShield#110@4068de2ebb66f281daecc2498104747c3c50939c` 重新渲染，
+三处修复均生效：
+
+- 结论行 `结论: test_failure 1 · unknown 2（3 个失败 job）`，不再由 2 个 `unknown`
+  的多数票决定主类别。
+- 卡片头含 `PR  : #110 docs(readme): sync Python probes badge with CI`、
+  `作者: shing26`、`链接: https://github.com/shing26/OpsShield/pull/110`。
+- 正文为三反引号围栏，无孤立单反引号行；证据含 3 条断言输出。
+
+该次为本地渲染验证，未重复发送；该 PR 的送达记录仍是原卡
+`om_x100b7fb3f45788a4dd5476bb73f6738`。
+
+**v1.3 遗留观察（P2，不阻塞）**：
+
+- 正文自身带三反引号围栏时可能提前闭合卡片围栏；D2-A13 目前只覆盖单反引号行。
+- `triage=None` 且 `pr_details` 非空时实际输出富化头，与 D2.3「与今天完全一致」
+  的字面不符；该组合无测试覆盖。
