@@ -338,3 +338,9 @@ V4 真实数据对账：待你决定 29（可处理 1 · 超 7 天 28）、卡�
 首轮 `REJECT` 的 P1（`ci.example.com/actions/runs/789` 被误判为 GitHub run 并覆盖证据）
 已由 host/repo 校验 + "有证据时清空 limitation" 关闭，复现输出 `[]`。
 真实只读探针 `shing26/OpsShield#110`：3 个 job，`test_failure` / `unknown` / `unknown`。
+
+**v1.2 运行时**：2026-11-27 01:26，merge worker 已重启到 `e9aa64b`。用生产渲染路径
+对 `shing26/OpsShield#110` 生成了新格式卡片（`结论: unknown（3 个失败 job）` +
+3 条证据 + 先查链接 + 只读说明）。当时本机网络与 Docker 均异常：飞书出站
+`httpx.ConnectError`，Postgres `:5433` 不可达，故这张卡未送达。
+下一次真实 CI 红将按新格式自动发送；送达后再补消息 id。
