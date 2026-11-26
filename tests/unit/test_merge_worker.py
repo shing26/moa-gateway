@@ -696,8 +696,20 @@ async def test_hitl_degraded_during_read_is_not_treated_as_expired(caplog) -> No
 
 
 class _TriageGitHub:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        pr_info: dict[str, Any] | None = None,
+        pr_error: Exception | None = None,
+    ) -> None:
         self.calls: list[str] = []
+        self._pr_info = pr_info
+        self._pr_error = pr_error
+
+    async def get_pr(self, repo, pr_number: int) -> dict[str, Any]:
+        self.calls.append("get_pr")
+        if self._pr_error is not None:
+            raise self._pr_error
+        return self._pr_info or {}
 
     async def get_ci_status(self, repo, ref: str) -> CiStatus:
         self.calls.append("get_ci_status")
@@ -781,9 +793,60 @@ async def test_d2_a5_triage_only_uses_the_four_read_methods(
         "list_workflow_runs_for_sha",
         "list_workflow_jobs",
         "get_job_log",
+        "get_pr",
     ]
     assert len(sender.sent_cards) == 1
-    assert "结论: test_failure（1 个失败 job）" in sender.sent_cards[0].agent_output
+    assert "结论: test_failure 1（1 个失败 job）" in sender.sent_cards[0].agent_output
+
+
+@pytest.mark.asyncio
+async def test_d2_a12_ci_failure_card_shows_pr_context(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "digest_target", "")
+    monkeypatch.setattr(settings, "code_review_merge_channel", "")
+    store = _watching_store(pr_number=11)
+    github = _TriageGitHub(
+        pr_info={
+            **_PR_INFO,
+            "html_url": "https://github.com/owner/repo/pull/11",
+        }
+    )
+    sender = _RecordingCardSender()
+    worker = MergeWorker(
+        store=store,
+        github=github,
+        notifier=MergeNotifier(card_sender=sender, default_target="chat_123"),
+        heartbeat=_noop_heartbeat,
+    )
+
+    await worker._run_once()  # noqa: SLF001 - 单测直接驱动一轮
+
+    text = sender.sent_cards[0].agent_output
+    assert "PR  : #11 feat: enrich approval card" in text
+    assert "作者: shing26" in text
+    assert "链接: https://github.com/owner/repo/pull/11" in text
+
+
+@pytest.mark.asyncio
+async def test_d2_a12_get_pr_error_still_sends_legacy_failure_card(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "digest_target", "")
+    monkeypatch.setattr(settings, "code_review_merge_channel", "")
+    store = _watching_store(pr_number=11)
+    github = _TriageGitHub(pr_error=RuntimeError("github down"))
+    sender = _RecordingCardSender()
+    worker = MergeWorker(
+        store=store,
+        github=github,
+        notifier=MergeNotifier(card_sender=sender, default_target="chat_123"),
+        heartbeat=_noop_heartbeat,
+    )
+
+    await worker._run_once()  # noqa: SLF001 - 单测直接驱动一轮
+
+    assert len(sender.sent_cards) == 1
+    text = sender.sent_cards[0].agent_output
+    assert text.startswith("PR: owner/repo#11\n")
+    assert "标题:" not in text
+    assert "作者:" not in text
 
 
 class _TwoRecordGitHub:
@@ -801,7 +864,7 @@ class _ExplodingCardNotifier:
         self.approvals.append(record)
         return ApprovalCardDelivery(True, "om_ok")
 
-    async def send_ci_failure_card(self, record, triage=None) -> None:
+    async def send_ci_failure_card(self, record, triage=None, pr_details=None) -> None:
         raise RuntimeError("failure card boom")
 
     async def send_digest_card(self, text: str, *, target=None) -> str:

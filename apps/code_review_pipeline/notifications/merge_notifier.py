@@ -37,6 +37,16 @@ _RESOLVED_KINDS = {
     "rejected": "notification",
 }
 
+_CI_CATEGORY_PRIORITY = (
+    "test_failure",
+    "syntax_or_build",
+    "dependency",
+    "permission_or_auth",
+    "timeout",
+    "cancelled",
+    "unknown",
+)
+
 
 @dataclass(frozen=True)
 class ApprovalCardDelivery:
@@ -165,6 +175,7 @@ class MergeNotifier:
         self,
         record: MergeRecord,
         triage: CiTriageReport | None = None,
+        pr_details: dict[str, Any] | None = None,
     ) -> bool:
         """CI 红时发失败信息卡片（列出失败的 job 名与链接）。"""
         if not self._default_target:
@@ -180,7 +191,7 @@ class MergeNotifier:
             logger.warning("feishu card sender not initialized; skip CI failure card")
             return False
 
-        card = self._build_ci_failure_card(record, triage)
+        card = self._build_ci_failure_card(record, triage, pr_details)
         card.target = self._default_target
         ok = await card_sender.send_card(card)
         if ok:
@@ -373,9 +384,10 @@ class MergeNotifier:
         self,
         record: MergeRecord,
         triage: CiTriageReport | None = None,
+        pr_details: dict[str, Any] | None = None,
     ) -> ApprovalCard:
         """CI 红时的失败信息卡片。"""
-        lines = self._ci_failure_header(record)
+        lines = self._ci_failure_header(record, pr_details)
         if triage is None or (
             not triage.jobs and not triage.actions_unavailable_reason
         ):
@@ -386,11 +398,7 @@ class MergeNotifier:
             )
             lines.extend(self._ci_failing_checks(record))
         else:
-            counts = Counter(job.category for job in triage.jobs)
-            category = counts.most_common(1)[0][0]
-            lines.append(
-                f"结论: {category}（{len(triage.jobs)} 个失败 job）"
-            )
+            lines.append(self._ci_conclusion(triage))
             evidence = self._triage_evidence(triage)
             if evidence:
                 lines.append("证据:")
@@ -417,7 +425,36 @@ class MergeNotifier:
         )
 
     @staticmethod
-    def _ci_failure_header(record: MergeRecord) -> list[str]:
+    def _ci_conclusion(triage: CiTriageReport) -> str:
+        counts = Counter(job.category for job in triage.jobs)
+        ranked = sorted(
+            counts,
+            key=lambda category: (
+                -counts[category],
+                _CI_CATEGORY_PRIORITY.index(category),
+            ),
+        )
+        known = [category for category in ranked if category != "unknown"]
+        main = known[0] if known else "unknown"
+        ordered = [main] + [category for category in ranked if category != main]
+        parts = " · ".join(
+            f"{category} {counts[category]}" for category in ordered[:3]
+        )
+        return f"结论: {parts}（{len(triage.jobs)} 个失败 job）"
+
+    @staticmethod
+    def _ci_failure_header(
+        record: MergeRecord,
+        pr_details: dict[str, Any] | None = None,
+    ) -> list[str]:
+        if pr_details:
+            return [
+                f"PR  : #{record.pr_number} {pr_details['title']}",
+                f"作者: {pr_details['login']}",
+                f"链接: {pr_details['html_url']}",
+                f"SHA: {record.head_sha}",
+                f"CI: {record.ci_state or 'failure'}",
+            ]
         return [
             f"PR: {record.repo}#{record.pr_number}",
             f"SHA: {record.head_sha}",
