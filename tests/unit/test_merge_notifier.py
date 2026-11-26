@@ -14,6 +14,10 @@ import pytest
 
 from app import deps
 from app.channels.feishu_cards import ApprovalCard
+from apps.code_review_pipeline.delivery.ci_triage import (
+    CiJobDiagnosis,
+    CiTriageReport,
+)
 from apps.code_review_pipeline.merge_state import MergeState
 from apps.code_review_pipeline.merge_store import MergeRecord
 from apps.code_review_pipeline.notifications.merge_notifier import (
@@ -327,6 +331,163 @@ def _has_action_buttons(card: ApprovalCard) -> bool:
     return any(
         el.get("tag") == "action" for el in card.to_card_payload()["elements"]
     )
+
+
+def _triage(
+    jobs: tuple[CiJobDiagnosis, ...],
+    *,
+    unavailable: str = "",
+) -> CiTriageReport:
+    return CiTriageReport(
+        schema_version=1,
+        repo="shing26/moa-gateway",
+        head_sha="4f2a9c1b7d3e",
+        trace_id="trace-1",
+        base_branch="",
+        branch="",
+        checks=(),
+        jobs=jobs,
+        actions_unavailable_reason=unavailable,
+        jobs_truncated=False,
+        created_at="2026-11-26T00:00:00+00:00",
+    )
+
+
+def _job(
+    *,
+    job_id: int = 1,
+    name: str = "test",
+    category: str = "test_failure",
+    url: str = "https://github.com/shing26/moa-gateway/actions/runs/123",
+    evidence: tuple[str, ...] = (
+        "FAILED tests/unit/test_x.py::test_y - AssertionError: 1 == 2",
+    ),
+) -> CiJobDiagnosis:
+    return CiJobDiagnosis(
+        run_id=123,
+        job_id=job_id,
+        workflow_name="CI",
+        name=name,
+        conclusion="failure",
+        url=url,
+        category=category,
+        evidence_lines=evidence,
+        log_sha256="",
+    )
+
+
+@pytest.mark.asyncio
+async def test_d2_a1_triage_card_has_conclusion_evidence_and_link() -> None:
+    record = _make_record(
+        state=MergeState.CI_FAILED.value,
+        ci_state="failure",
+        ci_failing=(
+            {"name": "test", "url": "https://github.com/owner/repo/runs/123"},
+        ),
+    )
+    report = _triage(
+        (
+            _job(
+                evidence=(
+                    "FAILED tests/unit/test_x.py::test_y - AssertionError: 1 == 2",
+                    "E   assert 1 == 2",
+                )
+            ),
+            _job(
+                job_id=2,
+                evidence=("1 failed, 10 passed", "E   assert 1 == 2"),
+            ),
+            _job(job_id=3, category="unknown", evidence=("boom", "bam")),
+        )
+    )
+    sender = _FakeCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    ok = await notifier.send_ci_failure_card(record, report)
+
+    assert ok
+    card = sender.sent_cards[0]
+    text = _card_text(card)
+    assert "结论: test_failure（3 个失败 job）" in text
+    evidence_lines = [
+        line for line in text.splitlines() if line.startswith("  · ")
+    ]
+    assert 1 <= len(evidence_lines) <= 3
+    assert "先查: https://github.com/shing26/moa-gateway/actions/runs/123" in text
+    assert not _has_action_buttons(card)
+
+
+@pytest.mark.asyncio
+async def test_d2_a2_log_secrets_are_redacted_again_at_render() -> None:
+    token = "ghp_" + "a" * 30
+    record = _make_record(state=MergeState.CI_FAILED.value, ci_state="failure")
+    report = _triage(
+        (
+            _job(
+                evidence=(
+                    f"token={token}",
+                    "Authorization: Bearer supersecrettoken123",
+                    "E   assert 1 == 2",
+                )
+            ),
+        )
+    )
+    sender = _FakeCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    await notifier.send_ci_failure_card(record, report)
+
+    text = _card_text(sender.sent_cards[0])
+    assert token not in text
+    assert "supersecrettoken123" not in text
+    assert "[REDACTED]" in text
+
+
+@pytest.mark.asyncio
+async def test_d2_a3_none_triage_keeps_legacy_card_exact() -> None:
+    record = _make_record(
+        state=MergeState.CI_FAILED.value,
+        ci_state="failure",
+        ci_failing=(
+            {"name": "test", "url": "https://github.com/owner/repo/runs/123"},
+            {"name": "lint", "url": ""},
+        ),
+    )
+    sender = _FakeCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    await notifier.send_ci_failure_card(record)
+
+    assert sender.sent_cards[0].agent_output == (
+        "PR: owner/repo#42\n"
+        "SHA: abc123\n"
+        "CI: failure\n"
+        "\n"
+        "失败的 check:\n"
+        "  - test: https://github.com/owner/repo/runs/123\n"
+        "  - lint"
+    )
+
+
+@pytest.mark.asyncio
+async def test_d2_a4_actions_unavailable_lists_checks() -> None:
+    record = _make_record(
+        state=MergeState.CI_FAILED.value,
+        ci_state="failure",
+        ci_failing=(
+            {"name": "test", "url": "https://github.com/owner/repo/runs/123"},
+        ),
+    )
+    report = _triage((), unavailable="GitHub Actions: HTTP 403")
+    sender = _FakeCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    await notifier.send_ci_failure_card(record, report)
+
+    text = _card_text(sender.sent_cards[0])
+    assert "结论: 日志不可用（GitHub Actions: HTTP 403）" in text
+    assert "test" in text
+    assert "https://github.com/owner/repo/runs/123" in text
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from app.channels.feishu_cards import ApprovalCard
+from app.config import settings
 from app.merge_worker import MergeWorker
 from apps.code_review_pipeline.merge_state import MergeState
 from apps.code_review_pipeline.merge_store import MergeRecord, MergeStore
@@ -19,8 +20,10 @@ from apps.code_review_pipeline.notifications.merge_notifier import (
     MergeNotifier,
 )
 from apps.code_review_pipeline.routing.github_client import (
+    CI_FAILURE,
     CI_PENDING,
     CI_SUCCESS,
+    CiCheck,
     CiStatus,
 )
 
@@ -690,3 +693,160 @@ async def test_hitl_degraded_during_read_is_not_treated_as_expired(caplog) -> No
     assert stored is not None
     assert stored.card_message_id == "om_old"
     assert stored.state == MergeState.AWAITING_APPROVAL.value
+
+
+class _TriageGitHub:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def get_ci_status(self, repo, ref: str) -> CiStatus:
+        self.calls.append("get_ci_status")
+        return CiStatus(
+            state=CI_FAILURE,
+            checks=(
+                CiCheck(
+                    name="test",
+                    conclusion="failure",
+                    url="https://github.com/owner/repo/runs/123",
+                ),
+            ),
+        )
+
+    async def get_check_run_status(self, repo, ref: str) -> CiStatus:
+        self.calls.append("get_check_run_status")
+        return CiStatus(
+            state=CI_FAILURE,
+            checks=(
+                CiCheck(
+                    name="test",
+                    conclusion="failure",
+                    url="https://github.com/owner/repo/runs/123",
+                ),
+            ),
+        )
+
+    async def list_workflow_runs_for_sha(self, repo, head_sha: str):
+        self.calls.append("list_workflow_runs_for_sha")
+        return [
+            {
+                "id": 123,
+                "run_number": 1,
+                "run_attempt": 1,
+                "conclusion": "failure",
+                "name": "CI",
+            }
+        ]
+
+    async def list_workflow_jobs(self, repo, run_id: int):
+        self.calls.append("list_workflow_jobs")
+        return [
+            {
+                "id": 9,
+                "name": "test",
+                "conclusion": "failure",
+                "html_url": "https://github.com/owner/repo/runs/123/job/9",
+            }
+        ]
+
+    async def get_job_log(self, repo, job_id: int) -> str:
+        self.calls.append("get_job_log")
+        return "FAILED tests/unit/test_x.py::test_y - AssertionError: 1 == 2"
+
+    def __getattr__(self, name: str):
+        raise AssertionError(f"unexpected GitHub call: {name}")
+
+
+@pytest.mark.asyncio
+async def test_d2_a5_triage_only_uses_the_four_read_methods(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(settings, "digest_target", "")
+    monkeypatch.setattr(settings, "code_review_merge_channel", "")
+    store = _watching_store(pr_number=11)
+    github = _TriageGitHub()
+    sender = _RecordingCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+    worker = MergeWorker(
+        store=store,
+        github=github,
+        notifier=notifier,
+        heartbeat=_noop_heartbeat,
+    )
+
+    await worker._run_once()  # noqa: SLF001 - 单测直接驱动一轮
+
+    assert github.calls == [
+        "get_ci_status",
+        "get_check_run_status",
+        "list_workflow_runs_for_sha",
+        "list_workflow_jobs",
+        "get_job_log",
+    ]
+    assert len(sender.sent_cards) == 1
+    assert "结论: test_failure（1 个失败 job）" in sender.sent_cards[0].agent_output
+
+
+class _TwoRecordGitHub:
+    async def get_ci_status(self, repo, ref: str) -> CiStatus:
+        if ref == "sha-red":
+            return CiStatus(state=CI_FAILURE)
+        return CiStatus(state=CI_SUCCESS)
+
+
+class _ExplodingCardNotifier:
+    def __init__(self) -> None:
+        self.approvals: list[Any] = []
+
+    async def send_approval_card(self, record, pr_details=None):
+        self.approvals.append(record)
+        return ApprovalCardDelivery(True, "om_ok")
+
+    async def send_ci_failure_card(self, record, triage=None) -> None:
+        raise RuntimeError("failure card boom")
+
+    async def send_digest_card(self, text: str, *, target=None) -> str:
+        raise RuntimeError("digest boom")
+
+
+@pytest.mark.asyncio
+async def test_d3_a1_card_exceptions_do_not_block_other_cards(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(settings, "digest_enabled", True)
+    monkeypatch.setattr(settings, "digest_hour", 0)
+    monkeypatch.setattr(settings, "digest_target", "chat_digest")
+    monkeypatch.setattr(settings, "digest_state_dir", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        settings, "delivery_run_record_dir", str(tmp_path / "runs")
+    )
+    store = MergeStore()
+    store.save(
+        MergeRecord(
+            repo="owner/repo",
+            pr_number=10,
+            head_sha="sha-green",
+            state=MergeState.WATCHING.value,
+        )
+    )
+    store.save(
+        MergeRecord(
+            repo="owner/repo",
+            pr_number=11,
+            head_sha="sha-red",
+            state=MergeState.WATCHING.value,
+        )
+    )
+    notifier = _ExplodingCardNotifier()
+    worker = MergeWorker(
+        store=store,
+        github=_TwoRecordGitHub(),
+        notifier=notifier,  # type: ignore[arg-type]
+        heartbeat=_noop_heartbeat,
+    )
+
+    await worker._run_once()  # noqa: SLF001 - 单测直接驱动一轮
+
+    assert [record.pr_number for record in notifier.approvals] == [10]
+    assert store.get(("owner/repo", 11, "sha-red")).state == (
+        MergeState.CI_FAILED.value
+    )
