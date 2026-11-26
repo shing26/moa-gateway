@@ -328,6 +328,21 @@ class Settings:
             50_000,
             name="CI_TRIAGE_MAX_LOG_CHARS",
         )
+        # ── 每日治理摘要卡 ──────────────────────────────────────────────
+        # 只读聚合合并通道与 delivery run，按本地日发送一次。DIGEST_TARGET
+        # 留空时回退 CODE_REVIEW_MERGE_CHANNEL；两者都空则不发送、不写状态。
+        self.digest_enabled: bool = _parse_bool(
+            os.getenv("DIGEST_ENABLED"), True
+        )
+        self.digest_hour: int = _parse_int(
+            os.getenv("DIGEST_HOUR"), 9, name="DIGEST_HOUR"
+        )
+        self.digest_target: str = (
+            os.getenv("DIGEST_TARGET", "") or ""
+        ).strip()
+        self.digest_state_dir: str = (
+            os.getenv("DIGEST_STATE_DIR", "data/digest") or "data/digest"
+        ).strip() or "data/digest"
 
         # ── 合并通道（ADR-021）────────────────────────────────────────────
         # 默认关：合并是有外部后果的写操作，必须显式开启才生效。
