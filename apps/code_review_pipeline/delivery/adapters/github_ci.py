@@ -6,6 +6,7 @@ import asyncio
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -74,10 +75,13 @@ def _latest_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return list(latest.values())
 
 
-_ACTIONS_RUN_ID = re.compile(r"/actions/runs/(\d+)(?:/|$)")
+_ACTIONS_RUN_ID = re.compile(
+    r"^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/actions/runs/(?P<run_id>\d+)(?:/|$)"
+)
+_GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
 
 
-def _run_ids_from_checks(checks: Any) -> list[int]:
+def _run_ids_from_checks(checks: Any, repo: GitHubRepo) -> list[int]:
     """Extract Actions run ids from check URLs, preserving first-seen order."""
     run_ids: list[int] = []
     seen: set[int] = set()
@@ -85,10 +89,23 @@ def _run_ids_from_checks(checks: Any) -> list[int]:
         url = getattr(check, "url", "")
         if not isinstance(url, str) or not url:
             continue
-        match = _ACTIONS_RUN_ID.search(url)
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            continue
+        if parsed.scheme != "https":
+            continue
+        if (parsed.hostname or "").lower() not in _GITHUB_HOSTS:
+            continue
+        match = _ACTIONS_RUN_ID.match(parsed.path)
         if match is None:
             continue
-        run_id = int(match.group(1))
+        if (
+            match.group("owner").casefold() != repo.owner.casefold()
+            or match.group("repo").casefold() != repo.name.casefold()
+        ):
+            continue
+        run_id = int(match.group("run_id"))
         if run_id <= 0 or run_id in seen:
             continue
         seen.add(run_id)
@@ -162,7 +179,7 @@ class GitHubCiEvidenceCollector:
                 continue
             seen_run_ids.add(run_id)
             candidates.append(run)
-        for run_id in _run_ids_from_checks(status.failing):
+        for run_id in _run_ids_from_checks(status.failing, target):
             if run_id in seen_run_ids:
                 continue
             seen_run_ids.add(run_id)
@@ -223,7 +240,9 @@ class GitHubCiEvidenceCollector:
                 break
             await self._wait(10)
 
-        if candidates and not jobs and not limitation:
+        if jobs:
+            limitation = ""
+        elif candidates and not limitation:
             limitation = (
                 "GitHub reported failed workflow runs, but no failed job details "
                 "were available to this token."
