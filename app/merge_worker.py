@@ -21,6 +21,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
+from app import deps
 from app.config import settings
 from app.deps import delivery_run_store, merge_store
 from apps.code_review_pipeline.delivery import digest
@@ -32,6 +33,7 @@ from apps.code_review_pipeline.merge_comment_approval import (
 )
 from apps.code_review_pipeline.merge_preflight import MERGE_WORKER_HEARTBEAT_KEY
 from apps.code_review_pipeline.merge_poller import MergePoller
+from apps.code_review_pipeline.merge_state import MergeState
 from apps.code_review_pipeline.notifications.merge_notifier import MergeNotifier
 from apps.code_review_pipeline.routing.github_client import GitHubRepo
 from apps.code_review_pipeline.routing.github_provider import build_github_client
@@ -83,6 +85,7 @@ class MergeWorker:
         interval_s: float = 60.0,
         comment_approval=None,
         heartbeat: Heartbeat | None = None,
+        session_store=None,
     ) -> None:
         self._store = store
         self._github = github
@@ -90,12 +93,22 @@ class MergeWorker:
         self._interval_s = interval_s
         self._comment_approval = comment_approval
         self._heartbeat = heartbeat or build_redis_heartbeat(interval_s)
+        # 可注入：默认在**调用时**取 ``app.deps.engine.session_store``（生产是
+        # Redis），与 notifier 登记 HITL 用的是同一个存储。导入期绑定会让单测
+        # 传进来的假 store 永远不生效。
+        self._session_store = session_store
         self._poller = MergePoller(
             store,
             github,
             run_store=run_store,
             audit=audit,
         )
+
+    @property
+    def _hitl_store(self) -> Any:
+        if self._session_store is not None:
+            return self._session_store
+        return deps.engine.session_store
 
     async def run_forever(self) -> None:
         """定期轮询，直到进程被终止。"""
@@ -116,6 +129,7 @@ class MergeWorker:
     async def _run_once(self) -> None:
         """轮询一次：读 CI 状态，推进状态机，发卡片。"""
         result = await self._poller.poll_once()
+        sent_this_round: set[tuple[str, int, str]] = set()
         for record in result.approvals:
             try:
                 pr_details = await self._fetch_pr_details(record)
@@ -124,6 +138,7 @@ class MergeWorker:
                 )
                 message_id = str(getattr(delivery, "message_id", "") or "")
                 if message_id:
+                    sent_this_round.add(record.identity)
                     self._persist_card_message_id(record, message_id)
             except Exception:  # noqa: BLE001 - 审批卡片发送：任意异常记录后继续处理下一条，单卡失败不阻塞批量
                 logger.exception(
@@ -148,6 +163,10 @@ class MergeWorker:
         # 连一次评论 API 都不会调用。
         if self._comment_approval is not None:
             await self._comment_approval.poll_once()
+        # 审批卡自愈：卡片按钮绑定的是 HITL 登记，登记按 TTL 过期后卡片还在、
+        # 点了却只会得到"已失效"。本轮刚发过卡的记录不参与巡检——它们的登记
+        # 是刚刚写下的，再查一次只会重复发卡。
+        await self._refresh_expired_approvals(sent_this_round)
         # 心跳写在轮询末尾：它证明的是"这一轮真的跑完了"，而不是"进程还活着"。
         # 写失败只告警——Redis 抖动不该让合并通道停摆（下一轮会重试）。
         try:
@@ -243,6 +262,98 @@ class MergeWorker:
             digest.save_state(path, sent)
         except Exception:  # noqa: BLE001 - 已发出：状态写失败只告警，避免重复发送
             logger.warning("failed to persist digest message id", exc_info=True)
+
+    async def _refresh_expired_approvals(
+        self, just_sent: set[tuple[str, int, str]]
+    ) -> None:
+        """把 HITL 登记已过期的待批卡改成终态并重发一张新卡。
+
+        过期判定只看 ``SessionStore.get_hitl``：**返回 None 才重发**。
+        ``get_hitl`` 抛异常（Redis 不可达等）只告警并跳过本轮——把异常当成
+        过期会在 Redis 抖动时每轮刷一张新卡。
+
+        但 ``REDIS_ENABLE_FALLBACK=true`` 下 Redis 不可达不抛异常：
+        ``RedisHitlStorage`` 会降级为进程内存，``get()`` 返回内存副本里的
+        ``None``，与"登记真的过期"不可区分。所以巡检前先要求存储处于**跨进程
+        权威**状态（``using_memory`` 为假）；降级时整轮跳过——这种 ``None``
+        不能作为重发信号，而且降级期间新登记的 HITL 网关也认领不到。
+
+        记录状态保持 ``awaiting_approval``：``failed`` 是终态，转过去之后 CI
+        再绿也拉不回来。
+        """
+        hitl_store = self._hitl_store
+        # 用 getattr 取默认值：没有该属性的测试替身按"权威存储"处理。
+        if getattr(hitl_store, "using_memory", False):
+            logger.warning(
+                "HITL store degraded to in-memory; skip expired approval sweep"
+            )
+            return
+        try:
+            records = self._store.list_open()
+        except Exception:  # noqa: BLE001 - 巡检读失败只跳过本轮，不能拖垮 worker 轮询
+            logger.warning(
+                "failed to list open merge records for expiry check", exc_info=True
+            )
+            return
+
+        for record in records:
+            if record.state != MergeState.AWAITING_APPROVAL.value:
+                continue
+            # 没有卡片 id 就无法定位旧卡；也无从判断哪张卡"点不动了"。
+            if not record.card_message_id:
+                continue
+            if record.identity in just_sent:
+                continue
+            try:
+                hitl = hitl_store.get_hitl(record.task_key)
+            except Exception:  # noqa: BLE001 - 读失败≠过期：只告警，跳过本轮
+                logger.warning(
+                    "failed to read HITL entry for %s; skip expiry check",
+                    record.task_key,
+                    exc_info=True,
+                )
+                continue
+            if hitl is not None:
+                continue
+            # RedisHitlStorage 的降级判定发生在**第一次操作时**：读之前它报告
+            # 权威，读完才 fallback。这个 None 来自内存副本，不是过期——放过去
+            # 就会在 Redis 刚挂掉的那一轮发一张点不动的新卡。
+            if getattr(hitl_store, "using_memory", False):
+                logger.warning(
+                    "HITL store degraded during read; skip expired approval sweep"
+                )
+                return
+            await self._resend_expired_approval(record)
+
+    async def _resend_expired_approval(self, record) -> None:
+        """旧卡改无按钮终态，再发一张带新登记的新卡；任一步失败只记日志。"""
+        # 改卡是展示层：旧卡没改成功不影响新卡的可操作性，不能因此不发。
+        try:
+            await self._notifier.send_resolved_card(record, "expired")
+        except Exception:  # noqa: BLE001 - 改旧卡失败只告警，新卡仍要发
+            logger.warning(
+                "failed to mark expired card for %s", record.task_key, exc_info=True
+            )
+        try:
+            pr_details = await self._fetch_pr_details(record)
+            delivery = await self._notifier.send_approval_card(record, pr_details)
+        except Exception:  # noqa: BLE001 - 重发失败记录保持原状态，下一轮再试
+            logger.warning(
+                "failed to resend approval card for %s", record.task_key, exc_info=True
+            )
+            return
+        message_id = str(getattr(delivery, "message_id", "") or "")
+        if not message_id:
+            logger.warning(
+                "expired approval card was not resent for %s", record.task_key
+            )
+            return
+        self._persist_card_message_id(record, message_id)
+        logger.info(
+            "expired approval card refreshed for %s (new card %s)",
+            record.task_key,
+            message_id,
+        )
 
     async def _fetch_pr_details(
         self, record

@@ -638,3 +638,43 @@ async def test_resolved_card_update_exception_only_warns(caplog) -> None:
 
     assert not ok
     assert "resolved card update failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_expired_resolved_card_text_and_no_buttons() -> None:
+    """T6：过期终态文案固定，沿用失败标题族且没有按钮。"""
+    record = _make_record(card_message_id="om_old")
+    sender = _ResolvedCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    ok = await notifier.send_resolved_card(record, "expired")
+
+    assert ok
+    assert len(sender.updates) == 1
+    message_id, card = sender.updates[0]
+    assert message_id == "om_old"
+    assert "⏳ 审批已过期，已重发新卡" in _card_text(card)
+    assert card.hitl_kind == "merge_resolved_failed"
+    assert not _has_action_buttons(card)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "detail", "expected"),
+    [
+        ("merged", "0123456789abcdef", "✅ 已合并 0123456789ab（审批人 alice）"),
+        ("rejected", "ou_alice", "🚫 已拒绝（审批人 alice）"),
+        (
+            "superseded",
+            "",
+            "⚠️ 本卡已作废：PR head 变了（abc123）；新记录已重建",
+        ),
+        ("failed", "merge conflict on main", "❌ 合并失败：merge conflict on main"),
+    ],
+)
+def test_expired_outcome_does_not_change_existing_texts(
+    outcome: str, detail: str, expected: str
+) -> None:
+    """T6：新增 expired 分支不得挪动既有四种终态的文案。"""
+    record = _make_record(head_sha="abc123", approver="alice")
+
+    assert MergeNotifier._resolved_output(record, outcome, detail) == expected

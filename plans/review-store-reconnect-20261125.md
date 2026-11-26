@@ -90,4 +90,23 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 
 ## 6. 签收记录
 
-（待所有者书面签收）
+**所有者签收**：飞书审批卡「批准」，2026-11-25 20:35:46（+08），
+operator `ou_ae3e5cc009fae3462147e15e8c271602`。
+
+**合并**：PR #146 → `main`，merge commit
+`4ac369f25026cd4dd86d480c493e73adca93d6b6`，`merging -> merged (complete)`
+于 20:35:51。
+
+**一次失败的合并尝试（留痕）**：首次批准落在 head `be0c1a8`，19:52 合并被
+GitHub 以 `Required status check "test" is expected.` 拒绝。根因不是代码或
+CI：`strict=true` 要求分支与 base 同步，而 #145 于 17:33 合并使 `main`
+前进到 `a121c08`，PR 处于 `BEHIND`。合并 `main` 得到新 head `6908d8a`、
+CI 重跑全绿后重新审批，合并成功。旧 head 的批准未被复用——head-SHA 乐观锁
+按设计生效。
+
+**验收证据**：独立 Verifier `ACCEPT`（HEAD `be0c1a8`，即合并前的代码
+内容；同步 `main` 只引入文档改动，未触碰实现），T1–T6 全 PASS，P0/P1 无。
+V1 `43 passed`；V2 `2391 passed, 6 skipped`；V3 `All checks passed!`。把
+新测试套在父提交旧实现上 `3 failed, 1 passed`，证明用例能区分新旧行为。
+GitHub CI（head `6908d8a`）：`test` / `integration` pass，`docker`
+skipping。
