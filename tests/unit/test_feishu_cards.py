@@ -1,5 +1,7 @@
 ﻿from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.channels.feishu_cards import ApprovalCard, parse_card_callback
@@ -152,6 +154,122 @@ def test_d2_a13_card_body_has_no_bare_backtick_lines(hitl_kind: str) -> None:
         for line in body.splitlines()
         if line.startswith("`") and not line.startswith("```")
     ]
+
+
+def test_d2_a14_inner_fences_are_neutralized() -> None:
+    original = "before\n```\ninside\n````\nafter"
+    card = ApprovalCard(
+        session_id="s", trace_id="t", agent_name="merge_gate",
+        intent="merge_approval", agent_output=original,
+        channel="feishu", target="chat", hitl_kind="merge_ci_failure",
+    )
+    markdown = next(
+        el["content"]
+        for el in card.to_card_payload()["elements"]
+        if el.get("tag") == "markdown" and "失败详情" in el.get("content", "")
+    )
+    lines = markdown.split("\n")
+
+    assert len([line for line in lines if line.startswith("```")]) == 2
+    assert lines[1] == "```"
+    assert lines[-1] == "```"
+    assert "\n".join(lines[2:-1]).replace("\u200b", "") == original
+
+
+def test_d2_a14_truncation_precedes_neutralization() -> None:
+    original = "x" * 1998 + "```"
+    card = ApprovalCard(
+        session_id="s", trace_id="t", agent_name="merge_gate",
+        intent="merge_approval", agent_output=original,
+        channel="feishu", target="chat", hitl_kind="merge_ci_failure",
+    )
+    markdown = next(
+        el["content"]
+        for el in card.to_card_payload()["elements"]
+        if el.get("tag") == "markdown" and "失败详情" in el.get("content", "")
+    )
+    inner = "\n".join(markdown.split("\n")[2:-1])
+
+    assert "\u200b" not in inner
+    assert inner == original[:2000]
+
+
+def test_d2_a15_plain_body_payload_matches_v13() -> None:
+    output = "line one\n`single`\n  indented  \nline two"
+    card = ApprovalCard(
+        session_id="s", trace_id="t", agent_name="merge_gate",
+        intent="merge_approval", agent_output=output,
+        channel="feishu", target="chat",
+    )
+    expected = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "Agent Gateway - 人工审批请求"},
+            "template": "orange",
+        },
+        "elements": [
+            {"tag": "markdown", "content": "**Agent**: merge_gate"},
+            {"tag": "markdown", "content": "**Intent**: merge_approval"},
+            {"tag": "markdown", "content": "**Trace**: t"},
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": f"**Agent Output**:\n```\n{output}\n```",
+            },
+            {"tag": "hr"},
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "批准"},
+                        "value": {
+                            "action": "approve",
+                            "session_id": "s",
+                            "trace_id": "t",
+                        },
+                        "type": "primary",
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "拒绝"},
+                        "value": {
+                            "action": "reject",
+                            "session_id": "s",
+                            "trace_id": "t",
+                        },
+                        "type": "danger",
+                    },
+                ],
+            },
+        ],
+    }
+
+    assert json.dumps(
+        card.to_card_payload(), ensure_ascii=False
+    ) == json.dumps(expected, ensure_ascii=False)
+
+
+@pytest.mark.parametrize(
+    "hitl_kind",
+    ["merge_approval", "notification", "merge_resolved_merged"],
+)
+def test_d2_a15_plain_bodies_render_for_all_kinds(hitl_kind: str) -> None:
+    card = ApprovalCard(
+        session_id="s", trace_id="t", agent_name="merge_gate",
+        intent="merge_approval", agent_output="plain body",
+        channel="feishu", target="chat", hitl_kind=hitl_kind,
+    )
+    payload = card.to_card_payload()
+    body = "\n".join(
+        el.get("content", "")
+        for el in payload["elements"]
+        if el.get("tag") == "markdown"
+    )
+
+    assert "plain body" in body
+    assert "\u200b" not in body
+    assert payload["header"]["title"]["content"]
 
 
 class _FakeAuth:

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -71,6 +72,8 @@ class ApprovalCard:
     reason: str = ""
 
     def to_card_payload(self) -> dict[str, Any]:
+        output = self.agent_output[:2000]
+        output = re.sub(r"`{3,}", lambda match: "\u200b".join(match.group()), output)
         elements: list[dict[str, Any]] = [
             {"tag": "markdown", "content": f"**Agent**: {self.agent_name}"},
             {"tag": "markdown", "content": f"**Intent**: {self.intent}"},
@@ -88,7 +91,7 @@ class ApprovalCard:
                 "tag": "markdown",
                 "content": (
                     f"**{_HITL_OUTPUT_LABELS.get(self.hitl_kind, 'Agent Output')}**:\n"
-                    f"```\n{self.agent_output[:2000]}\n```"
+                    f"```\n{output}\n```"
                 ),
             },
         ]

@@ -126,8 +126,9 @@ CI : failure
 
 #### D2.3 降级
 
-- `triage` 为 `None`（collector 抛异常 / `CiNotFailed` / 无 job）→ 输出与今天完全一致的
-  `PR / SHA / CI + 失败 check 名与链接`，既有断言不改。
+- `triage` 为 `None`（collector 抛异常 / `CiNotFailed` / 无 job）→ 正文与今天完全一致的
+  `失败 check 名与链接`，既有断言不改；头部在 `pr_details` 完整时按 D2.6 带
+  `PR / 作者 / 链接`，否则保持 `PR / SHA / CI` 三行（v1.4 澄清）。
 - `report.actions_unavailable_reason` 非空 → 结论行改为 `结论: 日志不可用（<reason>）`，
   仍列出 `record.ci_failing` 的 check 名与链接。
 - 富化失败不得漏发卡片、不得改变状态机结论。
@@ -182,6 +183,18 @@ CI : failure
   改为三反引号围栏（或等价）；飞书卡片不得出现孤立 `` ` `` 字符行。
   该修改对所有卡片类型生效，属展示修正，不改变任何按钮/审批语义。
 
+#### D2.7 卡片围栏安全（v1.4）
+
+**触发原因**：v1.3 用固定三反引号包裹正文；正文自带三反引号行时会提前闭合围栏，
+其后的 CI 日志被飞书当成 markdown 渲染。
+
+- 写入代码块前，必须把 `agent_output` 中长度 ≥3 的反引号连续串中和：在每个反引号
+  之间插入 U+200B（零宽空格），使内部不再出现连续三个反引号。
+- 中和必须可逆：去掉 U+200B 后，内容与截断到 2000 字符的原文逐字节一致。
+- 围栏仍由首尾两行构成；正文中任何行都不得以 ≥3 个连续反引号开头。
+- 对所有 `hitl_kind` 生效；不含连续反引号的正文，卡片 payload 必须与 v1.3 逐字节一致。
+- 该修改只影响展示，不改变按钮、审批语义或任何状态机行为。
+
 ## 2. 允许路径
 
 ```
@@ -197,8 +210,9 @@ tests/unit/test_merge_notifier.py
 plans/governance-digest-20261126.md
 apps/code_review_pipeline/delivery/adapters/github_ci.py        （v1.2）
 tests/unit/test_ci_triage_github_adapter.py                     （v1.2）
-app/channels/feishu_cards.py                                    （v1.3）
-tests/unit/test_feishu_cards.py                                 （v1.3）
+app/channels/feishu_cards.py                                    （v1.3 / v1.4）
+tests/unit/test_feishu_cards.py                                 （v1.3 / v1.4）
+tests/unit/test_merge_notifier.py                               （v1.4 仅新增用例）
 ```
 
 `apps/code_review_pipeline/delivery/ci_triage.py` 与 `merge_poller.py` **不在允许路径**：
@@ -248,6 +262,15 @@ tests/unit/test_feishu_cards.py                                 （v1.3）
 - **D2-A13** `to_card_payload()` 的 markdown 正文不含以单个反引号开头的行；
   审批/通知/终态三类既有卡片仍可正常渲染。
 
+- **D2-A14** `agent_output` 含三反引号与四反引号行时，卡片 markdown 中以 ≥3 个
+  反引号开头的行恰好 2 行（首尾围栏），内部无提前闭合；去掉 U+200B 后正文等于
+  原文（2000 字符截断后）。
+- **D2-A15** 不含连续反引号的正文，`to_card_payload()` 与 v1.3 逐字节一致；
+  审批/通知/终态三类卡片仍正常渲染（D2-A13 不改）。
+- **D2-A16** `triage=None` 且 `pr_details` 完整 → 头部含标题、作者、链接，正文
+  仍为旧失败 check 列表，不含 `结论:` / `证据:` / `先查:`；`pr_details=None` →
+  与旧卡逐字一致；`actions_unavailable_reason` 非空时同样允许 PR 头。
+
 ### D3 通用
 
 - **D3-A1** 摘要或分诊抛异常时，同一轮的其他审批卡/失败卡照发，worker 不退出（既有 worker 测试全绿）。
@@ -262,7 +285,7 @@ V1  最窄相关
     $env:PYTHONPATH='.'; .venv\Scripts\python.exe -m pytest `
       tests/unit/test_digest.py tests/unit/test_merge_notifier.py `
       tests/unit/test_merge_worker.py tests/unit/test_ci_triage.py `
-      tests/unit/test_merge_poller.py -q
+      tests/unit/test_merge_poller.py tests/unit/test_feishu_cards.py -q
 
 V2  全量单测
     $env:PYTHONPATH='.'; .venv\Scripts\python.exe -m pytest tests/unit -q
@@ -284,6 +307,8 @@ V4  真实数据只读对账（不发送）
 - 分诊路径调用任何 GitHub 写方法。
 - 在卡片里渲染未经 `redact_ci_log()` 的日志原文。
 - 用 `0` 表示"数据源读取失败"。
+- 用删除或替换内容的方式规避围栏（必须可逆中和，且不得改动日志语义）。
+- 改动 D2.6 的结论排序或 PR 头字段规则。
 - 改 `ci_triage.py` 的分类规则、`merge_poller.py` 的转移逻辑、审批身份校验或状态机。
 - 新增依赖；改动 Allowed paths 之外的文件；删改既有测试断言换取通过。
 
@@ -405,3 +430,9 @@ P0/P1 无。签收前复跑：V1（契约 5 文件）`92 passed`（含 v1.3 新�
 - 正文自身带三反引号围栏时可能提前闭合卡片围栏；D2-A13 目前只覆盖单反引号行。
 - `triage=None` 且 `pr_details` 非空时实际输出富化头，与 D2.3「与今天完全一致」
   的字面不符；该组合无测试覆盖。
+
+**v1.4 修订**：所有者书面批准「批准 v1.4 修订」（2026-11-27）。修订内容：新增
+D2.7 卡片围栏安全；澄清 D2.3 降级路径允许 PR 上下文；新增 D2-A14…A16。
+触发原因：v1.3 遗留两项 P2——正文自带三反引号会提前闭合围栏；`triage=None` +
+`pr_details` 非空时头部与 D2.3 字面不符。实现与裁决分离，由独立 Implementer
+在独立分支完成，独立 Verifier 重跑后签收。
