@@ -735,3 +735,136 @@ def test_expired_outcome_does_not_change_existing_texts(
     record = _make_record(head_sha="abc123", approver="alice")
 
     assert MergeNotifier._resolved_output(record, outcome, detail) == expected
+
+
+class _DualRecordingSender:
+    """Records both in-place updates and newly sent cards for R1 assertions."""
+
+    def __init__(
+        self, *, update_result: bool = True, update_raises: bool = False
+    ) -> None:
+        self.sent: list[ApprovalCard] = []
+        self.update_attempts: list[tuple[str, ApprovalCard]] = []
+        self.updates: list[tuple[str, ApprovalCard]] = []
+        self._update_result = update_result
+        self._update_raises = update_raises
+
+    async def send_card(self, card: ApprovalCard) -> bool:
+        self.sent.append(card)
+        return True
+
+    async def send_card_with_id(self, card: ApprovalCard) -> str:
+        self.sent.append(card)
+        return "om_new"
+
+    async def update_card(self, message_id: str, card: ApprovalCard) -> bool:
+        self.update_attempts.append((message_id, card))
+        if self._update_raises:
+            raise RuntimeError("feishu down")
+        if not self._update_result:
+            return False
+        self.updates.append((message_id, card))
+        return True
+
+
+@pytest.mark.asyncio
+async def test_t1_ci_failure_updates_existing_card_in_place() -> None:
+    """T1：有审批卡时改卡，不发新卡，正文列出两个失败 job。"""
+    record = _make_record(
+        state=MergeState.CI_FAILED.value,
+        ci_state="failure",
+        card_message_id="om_card_1",
+    )
+    report = _triage(
+        (_job(job_id=1, name="pytest"), _job(job_id=2, name="lint"))
+    )
+    sender = _DualRecordingSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    ok = await notifier.send_ci_failure_card(record, report)
+
+    assert ok
+    assert sender.sent == []
+    assert len(sender.updates) == 1
+    message_id, card = sender.updates[0]
+    assert message_id == "om_card_1"
+    assert card.hitl_kind == "merge_resolved_failed"
+    text = _card_text(card)
+    assert "❌ 合并失败：CI 未通过（pytest, lint）" in text
+    assert not _has_action_buttons(card)
+
+
+@pytest.mark.asyncio
+async def test_t2_update_returning_false_falls_back_to_new_card() -> None:
+    """T2：改卡返回 False → 退回发一张新诊断卡，返回 True。"""
+    record = _make_record(
+        state=MergeState.CI_FAILED.value,
+        ci_state="failure",
+        card_message_id="om_card_1",
+    )
+    sender = _DualRecordingSender(update_result=False)
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    ok = await notifier.send_ci_failure_card(record, _triage(()))
+
+    assert ok
+    assert len(sender.update_attempts) == 1
+    assert len(sender.sent) == 1
+    assert sender.sent[0].hitl_kind == "merge_ci_failure"
+
+
+@pytest.mark.asyncio
+async def test_t3_update_exception_falls_back_without_leaking() -> None:
+    """T3：改卡抛异常 → 退回发新卡，异常不外泄。"""
+    record = _make_record(
+        state=MergeState.CI_FAILED.value,
+        ci_state="failure",
+        card_message_id="om_card_1",
+    )
+    sender = _DualRecordingSender(update_raises=True)
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    ok = await notifier.send_ci_failure_card(record, _triage(()))
+
+    assert ok
+    assert len(sender.update_attempts) == 1
+    assert len(sender.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_t4_without_card_message_id_keeps_legacy_send() -> None:
+    """T4：没有卡片 id 时不改卡，按既有行为直接发诊断卡。"""
+    record = _make_record(
+        state=MergeState.CI_FAILED.value,
+        ci_state="failure",
+        card_message_id="",
+    )
+    sender = _DualRecordingSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    ok = await notifier.send_ci_failure_card(record, _triage(()))
+
+    assert ok
+    assert sender.update_attempts == []
+    assert len(sender.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_t5_no_job_names_degrades_to_plain_ci_failed() -> None:
+    """T5：triage 与 ci_failing 都空 → 正文退化为「CI 未通过」，仍走改卡。"""
+    record = _make_record(
+        state=MergeState.CI_FAILED.value,
+        ci_state="failure",
+        ci_failing=(),
+        card_message_id="om_card_1",
+    )
+    sender = _DualRecordingSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    ok = await notifier.send_ci_failure_card(record, _triage(()))
+
+    assert ok
+    assert sender.sent == []
+    assert len(sender.updates) == 1
+    _message_id, card = sender.updates[0]
+    assert card.agent_output == "❌ 合并失败：CI 未通过"

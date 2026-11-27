@@ -7,12 +7,22 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.channels.base import ChannelMessage
+from app.channels.feishu_cards import ApprovalCard
 from app.deps import pipeline
 from app.main import app
 from app.pipeline import PipelineResult
 import app.routes.feishu as feishu_route
-from apps.code_review_pipeline.merge_state import MergeAction, MergeState
-from apps.code_review_pipeline.merge_store import MergeRecord, MergeStore
+from apps.code_review_pipeline.merge_state import (
+    InvalidMergeTransition,
+    MergeAction,
+    MergeState,
+)
+from apps.code_review_pipeline.merge_store import (
+    MergeNotFound,
+    MergeRecord,
+    MergeStore,
+)
+from apps.code_review_pipeline.notifications.merge_notifier import MergeNotifier
 from apps.code_review_pipeline.routing.github_client import MergeOutcome
 
 
@@ -498,3 +508,165 @@ async def test_merge_approval_unparseable_hitl_id_skips_card(
 
     assert response.status_code == 200
     assert notifier.calls == []
+
+
+class _RouteCardSender:
+    """Records in-place updates and new cards for the stale callback path."""
+
+    def __init__(self) -> None:
+        self.sent: list[ApprovalCard] = []
+        self.updates: list[tuple[str, ApprovalCard]] = []
+
+    async def send_card(self, card: ApprovalCard) -> bool:
+        self.sent.append(card)
+        return True
+
+    async def send_card_with_id(self, card: ApprovalCard) -> str:
+        self.sent.append(card)
+        return "om_new"
+
+    async def update_card(self, message_id: str, card: ApprovalCard) -> bool:
+        self.updates.append((message_id, card))
+        return True
+
+
+async def _drive_stale_merge_approval(
+    monkeypatch,
+    *,
+    record: MergeRecord | None,
+    error: Exception,
+) -> tuple:
+    store = MergeStore()
+    if record is not None:
+        store.save(record)
+    sender = _RouteCardSender()
+    messages: list[str] = []
+    audits: list[dict] = []
+
+    class _RaisingExecutor:
+        async def execute(self, *_args, **_kwargs):
+            raise error
+
+    async def _record_send(_target: str, text: str, _trace_id: str) -> None:
+        messages.append(text)
+
+    async def _record_audit(**kwargs) -> None:
+        audits.append(kwargs)
+
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+    monkeypatch.setattr(feishu_route, "merge_store", store)
+    monkeypatch.setattr(feishu_route, "build_github_client", lambda: object())
+    monkeypatch.setattr(
+        feishu_route, "MergeExecutor", lambda *_a, **_k: _RaisingExecutor()
+    )
+    monkeypatch.setattr(feishu_route, "_merge_notifier", lambda: notifier)
+    monkeypatch.setattr(feishu_route, "_safe_send", _record_send)
+    monkeypatch.setattr(
+        "apps.code_review_pipeline.task_audit.record_human_decision", _record_audit
+    )
+
+    hitl_id = record.task_key if record is not None else "owner/repo#99@missing"
+    response = await feishu_route._handle_merge_approval(
+        hitl_id=hitl_id,
+        action="approve",
+        operator_id="ou_operator",
+        session_id="oc_chat",
+        trace_id=hitl_id,
+    )
+    return response, store, sender, messages, audits
+
+
+@pytest.mark.asyncio
+async def test_t6_stale_callback_on_merged_returns_409_and_resolves_merged(
+    monkeypatch,
+) -> None:
+    """T6：已合并后再点 → 409 stale，聊天说已合并，卡片改 merged，无迁移。"""
+    record = MergeRecord(
+        repo="owner/repo",
+        pr_number=42,
+        head_sha="abc123",
+        state=MergeState.MERGED.value,
+        card_message_id="om_card_1",
+        merged_sha="deadbeefcafe",
+    )
+    error = InvalidMergeTransition(MergeState.MERGED, MergeAction.APPROVE)
+
+    response, store, sender, messages, audits = await _drive_stale_merge_approval(
+        monkeypatch, record=record, error=error
+    )
+
+    assert response.status_code == 409
+    assert json.loads(response.body) == {"status": "stale", "state": "merged"}
+    assert any("已合并" in message for message in messages)
+    assert len(sender.updates) == 1
+    message_id, card = sender.updates[0]
+    assert message_id == "om_card_1"
+    assert card.hitl_kind == "merge_resolved_merged"
+    assert sender.sent == []
+    assert store.get(record.identity).state == MergeState.MERGED.value
+    assert store.get(record.identity).transitions == record.transitions
+    assert audits == []
+
+
+@pytest.mark.asyncio
+async def test_t7_stale_callback_on_ci_failed_returns_409_with_state(
+    monkeypatch,
+) -> None:
+    """T7：CI 红后点旧卡 → 409 stale，state 进响应与聊天，卡片改 failed。"""
+    record = MergeRecord(
+        repo="owner/repo",
+        pr_number=42,
+        head_sha="abc123",
+        state=MergeState.CI_FAILED.value,
+        card_message_id="om_card_1",
+    )
+    error = InvalidMergeTransition(MergeState.CI_FAILED, MergeAction.APPROVE)
+
+    response, store, sender, messages, audits = await _drive_stale_merge_approval(
+        monkeypatch, record=record, error=error
+    )
+
+    assert response.status_code == 409
+    assert json.loads(response.body) == {"status": "stale", "state": "ci_failed"}
+    assert any("失效" in message and "ci_failed" in message for message in messages)
+    assert len(sender.updates) == 1
+    _message_id, card = sender.updates[0]
+    assert card.hitl_kind == "merge_resolved_failed"
+    assert store.get(record.identity).state == MergeState.CI_FAILED.value
+    assert store.get(record.identity).transitions == record.transitions
+    assert audits == []
+
+
+@pytest.mark.asyncio
+async def test_t8_missing_record_returns_409_not_500(monkeypatch) -> None:
+    """T8：记录不存在（MergeNotFound）→ 409，提示失效，不抛 500。"""
+    error = MergeNotFound("no merge record for owner/repo#99@missing")
+
+    response, _store, sender, messages, audits = await _drive_stale_merge_approval(
+        monkeypatch, record=None, error=error
+    )
+
+    assert response.status_code == 409
+    assert json.loads(response.body) == {"status": "stale", "state": "missing"}
+    assert len(messages) == 1
+    assert "失效" in messages[0]
+    assert sender.updates == []
+    assert audits == []
+
+
+@pytest.mark.asyncio
+async def test_t9_other_execution_errors_still_return_500(monkeypatch) -> None:
+    """T9：其它执行异常仍走 500，既有文案不变。"""
+    record = _merge_record()
+    error = RuntimeError("get_pr network down")
+
+    response, store, sender, messages, audits = await _drive_stale_merge_approval(
+        monkeypatch, record=record, error=error
+    )
+
+    assert response.status_code == 500
+    assert json.loads(response.body)["error"] == "merge_execution_failed"
+    assert any("合并执行失败" in message for message in messages)
+    assert sender.updates == []
+    assert store.get(record.identity).state == MergeState.AWAITING_APPROVAL.value
+    assert audits == []
