@@ -224,6 +224,7 @@ async def execute_tool_loop(
     usage = ToolLoopUsage()
     current_messages = list(messages)
     executed_tool_calls = 0
+    repeat_counts: dict[tuple[str, ...], int] = {}
     def request_tokens() -> int | None:
         """本次调用的 completion 上限，**不是**剩余总预算。
 
@@ -380,6 +381,58 @@ async def execute_tool_loop(
                     policy,
                     keep_tail=name == "run_tests",
                 )
+                # 重复读取标记：只对模型可见的副本，steps 里的完整观察不变。
+                if policy.mark_repeated_reads and name in ("read_file", "search"):
+                    try:
+                        if name == "read_file":
+                            key = (
+                                name,
+                                (
+                                    arguments.get("path"),
+                                    arguments.get("offset"),
+                                    arguments.get("limit"),
+                                ),
+                            )
+                        else:
+                            key = (
+                                name,
+                                (arguments.get("path"), arguments.get("pattern")),
+                            )
+                    except (TypeError, ValueError):
+                        key = None
+                    if key is not None:
+                        repeat_counts[key] = repeat_counts.get(key, 0) + 1
+                        count = repeat_counts[key]
+                        if count >= 2:
+                            model_observation = (
+                                "[repeat #"
+                                + str(count)
+                                + " of this exact call - the content is already in your "
+                                "context; do not read it again]\n"
+                                + model_observation
+                            )
+                            slot["loop_repeat_marks"] = (
+                                int(slot.get("loop_repeat_marks", 0) or 0) + 1
+                            )
+                # 预算行：每条模型观察都带上已执行步数与 token 用量。
+                x = executed_tool_calls + 1
+                if max_tokens > 0:
+                    pct = usage.total_tokens * 100 // max_tokens
+                    cycle_line = (
+                        f"[cycle {x}/{max_steps} - tokens "
+                        f"{usage.total_tokens}/{max_tokens} - {pct} percent used]"
+                    )
+                    if pct >= policy.budget_nudge_ratio * 100:
+                        cycle_line += (
+                            "\nBudget running low: stop reading, move to editing "
+                            "and verification now."
+                        )
+                        slot["loop_budget_nudges"] = (
+                            int(slot.get("loop_budget_nudges", 0) or 0) + 1
+                        )
+                else:
+                    cycle_line = f"[cycle {x}/{max_steps}]"
+                model_observation = model_observation + "\n" + cycle_line
                 result.messages.append(
                     {
                         "role": "tool",

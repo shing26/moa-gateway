@@ -31,6 +31,10 @@ class MemoryPolicy:
     max_full_turns: int = 6
     #: 单条观察回给模型时的 token 上限。
     max_observation_tokens: int = 2_000
+    #: 用量比例达到此值时，每条观察的预算行会变成强烈预警。
+    budget_nudge_ratio: float = 0.75
+    #: 是否在每条观察前标记重复读取（read_file / search 完全相同的参数）。
+    mark_repeated_reads: bool = True
 
 
 def _fit_head(text: str, budget: int) -> str:
