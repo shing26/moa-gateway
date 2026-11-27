@@ -79,6 +79,18 @@ def test_env_pins_the_frozen_overrides_and_the_case_verify_command() -> None:
     assert env["CHANGE_AGENT_VERIFY_COMMAND"] == "python -m pytest tests/unit/test_a.py -q"
 
 
+def test_env_disables_feishu_push_approval_even_if_the_parent_enables_it() -> None:
+    """Regression (#95): a parent shell with Feishu push approval on must not leak.
+
+    The runner has no TTY and nobody to click a card; inheriting the flag turned
+    every push-gate case into a real card plus a 1800s block, which both spammed
+    the operator and made the terminal state incomparable with the v2 baseline.
+    """
+    env = build_env(_case(), {"FEISHU_PUSH_APPROVAL_ENABLED": "1"})
+
+    assert env["FEISHU_PUSH_APPROVAL_ENABLED"] == "0"
+
+
 def test_env_clears_verify_command_when_case_has_none() -> None:
     """A case without a verify command must not inherit .env's default.
 

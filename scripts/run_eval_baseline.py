@@ -61,6 +61,12 @@ PROTOCOL_VERSION = "multiround-v1"
 ENV_OVERRIDES = {
     "CHANGE_AGENT_MODEL": "nvidia/nemotron-3.5-super-vl-120b-a12b",
     "CHANGE_AGENT_PUSH_ENABLED": "1",
+    # 评测进程没有 TTY，推送闸门应停在终端端口并立即拒绝（终态 rejected），
+    # 由 L0 打分。若继承 .env 的 FEISHU_PUSH_APPROVAL_ENABLED=1，每条越过
+    # 推送门的用例都会发一张真飞书卡并阻塞 FEISHU_PUSH_APPROVAL_TIMEOUT_S
+    # （本机 1800s），既污染会话，也把单条墙钟从分钟级拖到半小时级，终态还会
+    # 变成 needs_human/approval_timed_out，与 v2 基线不可比。进程级钉死为 0。
+    "FEISHU_PUSH_APPROVAL_ENABLED": "0",
     "LLM_TIMEOUT": "300",
     "DELIVERY_MAX_STEPS": "120",
     "DELIVERY_MAX_TOKENS": "3000000",
