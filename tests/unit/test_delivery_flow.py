@@ -191,6 +191,7 @@ class FakeAudit:
     def __init__(self, events: list[str]) -> None:
         self._events = events
         self.transitions: list[tuple[str, str]] = []
+        self.details: list[dict[str, object]] = []
 
     async def record(
         self,
@@ -207,6 +208,7 @@ class FakeAudit:
                 current.value,
             )
         )
+        self.details.append(detail)
 
 
 def _flow(
@@ -330,6 +332,15 @@ async def test_blocked_preflight_terminates_before_any_implementer_attempt(
     assert ("preparing", "implementing") not in audit.transitions
     assert recorder.runs[-1] == run
 
+    # preflight report lands in the preflight_blocked audit detail
+    blocked_details = [d for d in audit.details if d.get("action") == "preflight_blocked"]
+    assert len(blocked_details) == 1
+    assert "preflight" in blocked_details[0]
+    checks = blocked_details[0]["preflight"]["checks"]
+    assert any(
+        c.get("name") == "push" and c.get("status") == "blocked" for c in checks
+    )
+
 
 @pytest.mark.asyncio
 async def test_passing_preflight_leaves_the_flow_unchanged(tmp_path: Path) -> None:
@@ -356,6 +367,39 @@ async def test_passing_preflight_leaves_the_flow_unchanged(tmp_path: Path) -> No
     assert publisher.calls == 1
     # 开头多不出新迁移：preflight 通过不产生额外状态跳转。
     assert audit.transitions[:2] == [("", "preparing"), ("preparing", "implementing")]
+
+    # 通过路径的准备→实现迁移细节里带有 preflight 报告
+    prep_details = [d for d in audit.details if d.get("action") == "start"]
+    assert len(prep_details) == 1
+    assert "preflight" in prep_details[0]
+
+
+@pytest.mark.asyncio
+async def test_no_github_produces_action_only_detail(tmp_path: Path) -> None:
+    """没有 github 时，迁移细节只有 action 键，不掺入 preflight。"""
+    bundle = _bundle()
+    flow, _, audit, _ = _flow(
+        tmp_path,
+        implementer=FakeImplementer([_attempt()]),
+        preparer=FakePreparer(
+            [
+                ChangePreparation(
+                    status=PreparationStatus.READY,
+                    bundle=bundle,
+                    verification=_verification(),
+                )
+            ]
+        ),
+        github=None,
+    )
+
+    run = await flow.run(_request())
+
+    assert run.state is DeliveryRunState.WAITING_CI
+    assert audit.transitions[:2] == [("", "preparing"), ("preparing", "implementing")]
+    prep_details = [d for d in audit.details if d.get("action") == "start"]
+    assert len(prep_details) == 1
+    assert prep_details[0] == {"action": "start"}
 
 
 @pytest.mark.asyncio

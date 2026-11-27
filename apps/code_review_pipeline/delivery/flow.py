@@ -121,6 +121,7 @@ class DeliveryFlow:
             current=DeliveryRunState.PREPARING,
             detail={"action": "created"},
         )
+        report = None
         if self._github is not None:
             # 开工前自检（issue #59 第一半）：blocked 就终止，一个实现步都不花。
             # issue #43 的两次交付都是实现+验证全跑完才在推送时撞 403——诊断
@@ -158,10 +159,16 @@ class DeliveryFlow:
                         "action": "preflight_blocked",
                         "code": FailureCode.PREFLIGHT_FAILED.value,
                         "message": message,
+                        "preflight": report.to_dict(),
                     },
                 )
                 return updated
-        run = await self._move(run, DeliveryRunState.IMPLEMENTING, "start")
+        run = await self._move(
+            run,
+            DeliveryRunState.IMPLEMENTING,
+            "start",
+            extra={"preflight": report.to_dict()} if report is not None else None,
+        )
 
         feedback = ""
         revisions = 0
@@ -403,16 +410,20 @@ class DeliveryFlow:
         run: DeliveryRun,
         target: DeliveryRunState,
         detail: str,
+        extra: dict[str, object] | None = None,
     ) -> DeliveryRun:
         assert_transition(run.state, target)
         previous = run.state
         updated = replace(run, state=target, updated_at=self._clock())
         await self._recorder.save(updated)
+        audit_detail: dict[str, object] = {"action": detail}
+        if extra:
+            audit_detail.update(extra)
         await self._audit.record(
             run=updated,
             previous=previous,
             current=target,
-            detail={"action": detail},
+            detail=audit_detail,
         )
         return updated
 
