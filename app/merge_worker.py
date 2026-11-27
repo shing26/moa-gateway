@@ -16,9 +16,11 @@ import json
 import logging
 import math
 import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from app import deps
@@ -28,6 +30,9 @@ from apps.code_review_pipeline.delivery import digest
 from apps.code_review_pipeline.delivery.adapters import github_ci
 from apps.code_review_pipeline.delivery.audit import WalDeliveryAudit
 from apps.code_review_pipeline.delivery.ci_triage import build_ci_triage_report
+from apps.code_review_pipeline.delivery.push_approval_registry import (
+    sweep_push_cards,
+)
 from apps.code_review_pipeline.merge_comment_approval import (
     build_comment_approval_poller,
 )
@@ -86,6 +91,9 @@ class MergeWorker:
         comment_approval=None,
         heartbeat: Heartbeat | None = None,
         session_store=None,
+        push_card_sender=None,
+        push_registry_dir: str | Path | None = None,
+        run_state_of: Callable[[str], Any] | None = None,
     ) -> None:
         self._store = store
         self._github = github
@@ -97,6 +105,11 @@ class MergeWorker:
         # Redis），与 notifier 登记 HITL 用的是同一个存储。导入期绑定会让单测
         # 传进来的假 store 永远不生效。
         self._session_store = session_store
+        self._run_store = run_store
+        # 推送审批卡侧车巡检的依赖。飞书未配置时 sender 为 None，巡检直接返回。
+        self._push_card_sender = push_card_sender
+        self._push_registry_dir = push_registry_dir
+        self._run_state_of = run_state_of or self._default_run_state
         self._poller = MergePoller(
             store,
             github,
@@ -168,6 +181,10 @@ class MergeWorker:
         # 点了却只会得到"已失效"。本轮刚发过卡的记录不参与巡检——它们的登记
         # 是刚刚写下的，再查一次只会重复发卡。
         await self._refresh_expired_approvals(sent_this_round)
+        # 推送审批卡自愈：CLI 进程已死时卡片留在飞书里，按钮却没人消费。
+        # 只按侧车时间与 run 状态判定，不读 Redis。任何异常只告警：这张卡
+        # 是展示层，不能中断轮询、心跳或摘要。
+        await self._sweep_push_cards()
         # 心跳写在轮询末尾：它证明的是"这一轮真的跑完了"，而不是"进程还活着"。
         # 写失败只告警——Redis 抖动不该让合并通道停摆（下一轮会重试）。
         try:
@@ -182,6 +199,27 @@ class MergeWorker:
             raise
         except Exception:  # noqa: BLE001 - 摘要卡是附加信号：失败不得中断轮询
             logger.warning("digest send failed", exc_info=True)
+
+    def _default_run_state(self, run_id: str) -> Any:
+        if self._run_store is None:
+            raise RuntimeError("merge worker has no delivery run store")
+        return self._run_store.load(run_id).state
+
+    async def _sweep_push_cards(self) -> None:
+        try:
+            await sweep_push_cards(
+                directory=(
+                    self._push_registry_dir
+                    or settings.delivery_run_record_dir
+                ),
+                sender=self._push_card_sender,
+                run_state_of=self._run_state_of,
+                now=time.time(),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - 卡片巡检是附加信号：失败不得中断轮询
+            logger.warning("push approval card sweep failed", exc_info=True)
 
     async def _collect_ci_triage(self, record):
         """Read-only CI diagnosis; failure degrades to the legacy card."""
@@ -457,6 +495,8 @@ def build_worker() -> MergeWorker:
         run_store=delivery_run_store,
         audit=audit,
         interval_s=float(settings.code_review_merge_poll_interval_s),
+        push_card_sender=card_sender,
+        push_registry_dir=settings.delivery_run_record_dir,
         comment_approval=build_comment_approval_poller(
             store=merge_store,
             github=github,
