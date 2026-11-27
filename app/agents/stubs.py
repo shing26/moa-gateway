@@ -224,6 +224,7 @@ async def execute_tool_loop(
     usage = ToolLoopUsage()
     current_messages = list(messages)
     executed_tool_calls = 0
+    repeat_counts: dict[tuple, int] = {}
     def request_tokens() -> int | None:
         """本次调用的 completion 上限，**不是**剩余总预算。
 
@@ -314,6 +315,7 @@ async def execute_tool_loop(
                 started = time.monotonic()
                 name = str((call.get("function") or {}).get("name", ""))
                 arguments: dict[str, Any] = {}
+                arguments_ok = False
                 slot["tool_calls_total"] = int(slot.get("tool_calls_total", 0) or 0) + 1
                 tool = tools.get(name)
                 outcome_kind: Literal["ok", "rejected", "failed", ""] = "failed"
@@ -334,6 +336,7 @@ async def execute_tool_loop(
                             slot.get("tool_arg_rejections_total", 0) or 0
                         ) + 1
                     else:
+                        arguments_ok = True
                         outcome = await (
                             call_workspace_tool(
                                 tool,
@@ -380,6 +383,55 @@ async def execute_tool_loop(
                     policy,
                     keep_tail=name == "run_tests",
                 )
+                # Repeat marker: only on model-facing copy, read_file/search only.
+                if (
+                    policy.mark_repeated_reads
+                    and arguments_ok
+                    and name in ("read_file", "search")
+                ):
+                    try:
+                        if name == "read_file":
+                            repeat_key = (
+                                "read_file",
+                                arguments.get("path"),
+                                arguments.get("offset"),
+                                arguments.get("limit"),
+                            )
+                        else:
+                            repeat_key = (
+                                "search",
+                                arguments.get("path"),
+                                arguments.get("pattern"),
+                            )
+                    except Exception:
+                        repeat_key = None
+                    if repeat_key is not None and all(
+                        component is not None for component in repeat_key[1:]
+                    ):
+                        count = repeat_counts.get(repeat_key, 0) + 1
+                        repeat_counts[repeat_key] = count
+                        if count >= 2:
+                            model_observation = (
+                                f"[repeat #{count} of this exact call - the content is already in your context; do not read it again]\n"
+                                + model_observation
+                            )
+                            slot["loop_repeat_marks"] = int(
+                                slot.get("loop_repeat_marks", 0) or 0
+                            ) + 1
+                # Budget line: appended to every model-facing observation.
+                cycle_line = f"[cycle {executed_tool_calls + 1}/{max_steps}"
+                if max_tokens and max_tokens > 0:
+                    pct = int(usage.total_tokens * 100 // max_tokens)
+                    cycle_line += f" - tokens {usage.total_tokens}/{max_tokens} - {pct} percent used"
+                    if usage.total_tokens * 100 // max_tokens >= int(
+                        policy.budget_nudge_ratio * 100
+                    ):
+                        cycle_line += "\nBudget running low: stop reading, move to editing and verification now."
+                        slot["loop_budget_nudges"] = int(
+                            slot.get("loop_budget_nudges", 0) or 0
+                        ) + 1
+                cycle_line += "]"
+                model_observation = model_observation + "\n" + cycle_line
                 result.messages.append(
                     {
                         "role": "tool",
