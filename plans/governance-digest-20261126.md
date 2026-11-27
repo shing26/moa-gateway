@@ -165,6 +165,23 @@ CI : failure
 - 等待函数必须可注入，测试不得真睡。
 - D2.4 的只读、脱敏、成本上限全部不变。
 
+#### D2.6 卡片可读性（v1.3）
+
+**触发原因**：2026-11-27 送达的首张真实分诊卡（`om_x100b7fb3f45788a4dd5476bb73f6738`）
+暴露三个展示缺陷：`结论: unknown` 由多数票产生、信息量最低；正文出现孤立反引号；
+卡片没有 PR 标题/作者/链接。
+
+- **结论行**：主类别 = 失败 job 中出现次数最多的**非 `unknown`** 类别；并列时按
+  `test_failure > syntax_or_build > dependency > permission_or_auth > timeout >
+  cancelled > unknown` 取先者；全部为 `unknown` 时才用 `unknown`。
+  渲染 `结论: <主类别> <n> · <次类别> <m> …（<N> 个失败 job）`，最多 3 组。
+- **PR 上下文**：CI 失败卡尽量带 `PR: #<n> <title>`、`作者: <login>`、`链接: <html_url>`。
+  数据取自现有 `_fetch_pr_details`；失败或字段缺失时退回 `PR: <repo>#<n>`，
+  不得漏发卡片、不得阻塞其它卡片。
+- **正文渲染**：`ApprovalCard.to_card_payload` 不得再用单个反引号包裹多行输出，
+  改为三反引号围栏（或等价）；飞书卡片不得出现孤立 `` ` `` 字符行。
+  该修改对所有卡片类型生效，属展示修正，不改变任何按钮/审批语义。
+
 ## 2. 允许路径
 
 ```
@@ -180,6 +197,8 @@ tests/unit/test_merge_notifier.py
 plans/governance-digest-20261126.md
 apps/code_review_pipeline/delivery/adapters/github_ci.py        （v1.2）
 tests/unit/test_ci_triage_github_adapter.py                     （v1.2）
+app/channels/feishu_cards.py                                    （v1.3）
+tests/unit/test_feishu_cards.py                                 （v1.3）
 ```
 
 `apps/code_review_pipeline/delivery/ci_triage.py` 与 `merge_poller.py` **不在允许路径**：
@@ -222,6 +241,12 @@ tests/unit/test_ci_triage_github_adapter.py                     （v1.2）
 - **D2-A10** 混合"真实 GitHub run 123 + 伪 run 789（`ci.example.com` 或别的仓库，
   读取时 404）"：job 只来自 123，`actions_unavailable_reason` 为空，
   卡片不得出现"日志不可用"，且 123 的证据行完整。
+- **D2-A11** 3 个失败 job（2 个 `unknown` + 1 个 `test_failure`）→ 主类别必须是
+  `test_failure`，文本同时含 `unknown 2` 与 `3 个失败 job`；全部 `unknown` 时才显示 `unknown`。
+- **D2-A12** `pr_details` 可用 → 卡片含标题、作者、`/pull/` 链接；`get_pr` 抛异常 →
+  仍发卡、含 `repo#n`、无标题行、不抛异常。
+- **D2-A13** `to_card_payload()` 的 markdown 正文不含以单个反引号开头的行；
+  审批/通知/终态三类既有卡片仍可正常渲染。
 
 ### D3 通用
 
@@ -292,6 +317,9 @@ D1-A9 / D1-A10。触发原因：真实数据下 v1.0 的行预算被陈旧待批
 repo；已取得失败 job 时不得用单个 run 的读取失败覆盖证据。新增 D2-A10。
 该澄清是 D2.5"不影响其他 check"的直接展开，不扩大范围。
 
+**v1.3 修订**：所有者书面批准「批准 v1.3 修订」（2026-11-27）。修订内容：D2.6
+卡片可读性（结论分类拆分、PR 标题/作者/链接、去掉裸反引号）；新增 D2-A11…A13。
+
 **实现**：独立会话在 `feat/governance-digest-20261126` 分支完成，不得与本会话兼任裁决。
 
 **验收**：独立 Verifier 重跑 V1–V3，`ACCEPT` 后由所有者签收。
@@ -326,8 +354,8 @@ V4 真实数据对账：待你决定 29（可处理 1 · 超 7 天 28）、卡�
 `om_x100b7f48ae8fa0b4c0c0eb15c813035`；`data/digest/state.json` 记录
 `last_sent_date=2026-11-26`、`message_id` 同上。
 
-**待验（诚实记录）**：真实 CI 红分诊卡尚未产生，需在下一次真实 CI 失败时补证；
-在补证前，分诊卡只有单测覆盖。
+**已完成（原待验项）**：真实 CI 红分诊卡已于 2026-11-27 02:35 送达
+（`shing26/OpsShield#110`，message id `om_x100b7fb3f45788a4dd5476bb73f6738`）。
 
 **v1.2 合并**：PR #156 → `main`，merge commit
 `e9aa64b73afeab0e8879d49d512f803662206f20`（分支 `fix/ci-triage-running-run-20261126`）。
@@ -343,4 +371,37 @@ V4 真实数据对账：待你决定 29（可处理 1 · 超 7 天 28）、卡�
 对 `shing26/OpsShield#110` 生成了新格式卡片（`结论: unknown（3 个失败 job）` +
 3 条证据 + 先查链接 + 只读说明）。当时本机网络与 Docker 均异常：飞书出站
 `httpx.ConnectError`，Postgres `:5433` 不可达，故这张卡未送达。
-下一次真实 CI 红将按新格式自动发送；送达后再补消息 id。
+
+**v1.2 送达**：2026-11-27 02:35，Postgres/Redis 容器恢复、merge worker 自愈后，
+对同一记录重放该卡，飞书返回 message id `om_x100b7fb3f45788a4dd5476bb73f6738`。
+真实 CI 红分诊卡至此完成端到端送达；后续真实失败将自动走同一路径。
+
+**v1.3 合并**：PR #161 → `main`，merge commit
+`38043bc41f3688d1c07717f8dee29cf199b061c7`（分支 `fix/ci-card-display-20261127`，
+验收 HEAD `3fe899b1ff42bff04a23a1fa8f05580335aba228`）。
+
+**所有者签收**：2026-11-27，用户消息「批准 v1.3 修订」。
+
+**v1.3 验收证据**：独立 Verifier `ACCEPT`（HEAD `3fe899b`），D2-A11…A13 全 PASS，
+P0/P1 无。签收前复跑：V1（契约 5 文件）`92 passed`（含 v1.3 新增文件的 7 文件集合
+`121 passed`）；V2 `2445 passed, 6 skipped`；V3 `All checks passed!`。
+
+**v1.3 运行时**：2026-11-27 03:58（+08），主工作区代码到 `38043bc`，merge worker
+重启后 `/healthz` 为 `healthy`、`merge_worker: running`。用生产渲染路径对
+`shing26/OpsShield#110@4068de2ebb66f281daecc2498104747c3c50939c` 重新渲染，
+三处修复均生效：
+
+- 结论行 `结论: test_failure 1 · unknown 2（3 个失败 job）`，不再由 2 个 `unknown`
+  的多数票决定主类别。
+- 卡片头含 `PR  : #110 docs(readme): sync Python probes badge with CI`、
+  `作者: shing26`、`链接: https://github.com/shing26/OpsShield/pull/110`。
+- 正文为三反引号围栏，无孤立单反引号行；证据含 3 条断言输出。
+
+该次为本地渲染验证，未重复发送；该 PR 的送达记录仍是原卡
+`om_x100b7fb3f45788a4dd5476bb73f6738`。
+
+**v1.3 遗留观察（P2，不阻塞）**：
+
+- 正文自身带三反引号围栏时可能提前闭合卡片围栏；D2-A13 目前只覆盖单反引号行。
+- `triage=None` 且 `pr_details` 非空时实际输出富化头，与 D2.3「与今天完全一致」
+  的字面不符；该组合无测试覆盖。

@@ -88,7 +88,7 @@ class ApprovalCard:
                 "tag": "markdown",
                 "content": (
                     f"**{_HITL_OUTPUT_LABELS.get(self.hitl_kind, 'Agent Output')}**:\n"
-                    f"`\n{self.agent_output[:2000]}\n`"
+                    f"```\n{self.agent_output[:2000]}\n```"
                 ),
             },
         ]
