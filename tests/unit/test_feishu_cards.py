@@ -332,3 +332,63 @@ async def test_send_card_with_id_returns_empty_on_business_error(monkeypatch) ->
 
     assert await sender.send_card_with_id(card) == ""
     assert await sender.send_card(card) is False
+
+
+@pytest.mark.parametrize(
+    ("hitl_kind", "title", "template"),
+    [
+        (
+            "push_resolved_expired",
+            "Agent Gateway - 推送审批已失效",
+            "orange",
+        ),
+        (
+            "push_resolved_approved",
+            "Agent Gateway - 推送已批准",
+            "green",
+        ),
+        (
+            "push_resolved_rejected",
+            "Agent Gateway - 推送被拒绝",
+            "red",
+        ),
+    ],
+)
+def test_push_resolved_cards_are_terminal_without_buttons(
+    hitl_kind: str, title: str, template: str
+) -> None:
+    """T12：三个推送终态卡无按钮，标题与模板符合 R4。"""
+    card = ApprovalCard(
+        session_id="delivery:run-1",
+        trace_id="hitl-1",
+        agent_name="delivery_push_gate",
+        intent="push_approval",
+        agent_output="终态",
+        channel="feishu",
+        target="oc_chat",
+        hitl_kind=hitl_kind,
+    )
+
+    payload = card.to_card_payload()
+    assert payload["header"]["title"]["content"] == title
+    assert payload["header"]["template"] == template
+    assert [e for e in payload["elements"] if e.get("tag") == "action"] == []
+
+
+def test_existing_merge_resolved_rendering_is_unchanged() -> None:
+    """T12：新增 kind 不能改变既有终态卡的标题与模板。"""
+    card = ApprovalCard(
+        session_id="s",
+        trace_id="t",
+        agent_name="merge_gate",
+        intent="merge_approval",
+        agent_output="⏳ 审批已过期，已重发新卡",
+        channel="feishu",
+        target="chat",
+        hitl_kind="merge_resolved_failed",
+    )
+
+    payload = card.to_card_payload()
+    assert payload["header"]["title"]["content"] == "Agent Gateway - 合并失败"
+    assert payload["header"]["template"] == "red"
+    assert [e for e in payload["elements"] if e.get("tag") == "action"] == []

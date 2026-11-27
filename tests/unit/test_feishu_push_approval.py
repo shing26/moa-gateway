@@ -19,6 +19,9 @@ from apps.code_review_pipeline.delivery.feishu_approval import (
     write_decision,
 )
 from apps.code_review_pipeline.delivery.ports import PushApprovalTimedOut
+from apps.code_review_pipeline.delivery.push_approval_registry import (
+    list_pending,
+)
 
 
 class FakeStorage:
@@ -55,6 +58,34 @@ class FakeCardSender:
     async def send_card(self, card: Any) -> bool:
         self.cards.append(card)
         return self.ok
+
+
+class FakeIdCardSender(FakeCardSender):
+    """带 message id 的 sender，并记录终态改卡。"""
+
+    def __init__(
+        self,
+        *,
+        ok: bool = True,
+        message_id: str = "om_card_1",
+        update_result: bool = True,
+        update_error: Exception | None = None,
+    ) -> None:
+        super().__init__(ok=ok)
+        self.message_id = message_id
+        self.update_result = update_result
+        self.update_error = update_error
+        self.updates: list[tuple[str, Any]] = []
+
+    async def send_card_with_id(self, card: Any) -> str:
+        self.cards.append(card)
+        return self.message_id if self.ok else ""
+
+    async def update_card(self, message_id: str, card: Any) -> bool:
+        self.updates.append((message_id, card))
+        if self.update_error is not None:
+            raise self.update_error
+        return self.update_result
 
 
 class FakeGitHub:
@@ -137,6 +168,15 @@ async def _wait_for_card(sender: FakeCardSender) -> None:
             return
         await asyncio.sleep(0)
     raise AssertionError("card was not sent")
+
+
+async def _wait_for_pending(root: Any, hitl_id: str = "hitl-1") -> dict[str, Any]:
+    for _ in range(200):
+        for record in list_pending(root):
+            if record.get("hitl_id") == hitl_id:
+                return record
+        await asyncio.sleep(0)
+    raise AssertionError("sidecar was not written")
 
 
 def test_request_fails_closed_when_storage_is_in_memory() -> None:
@@ -313,6 +353,316 @@ def test_approval_with_different_bundle_hash_is_refused() -> None:
         return await task
 
     assert asyncio.run(scenario()) is None
+
+
+def test_request_writes_sidecar_with_message_id(tmp_path: Any) -> None:
+    """T2：拿到 message id → 侧车字段齐全。"""
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeIdCardSender()
+    port = _port(
+        store=store,
+        sender=sender,
+        settings=_settings(),
+        registry_dir=tmp_path,
+    )
+
+    async def scenario() -> Any:
+        task = asyncio.create_task(port.request(run_id="run-1", bundle=_bundle()))
+        await _wait_for_card(sender)
+        record = await _wait_for_pending(tmp_path)
+        assert record["run_id"] == "run-1"
+        assert record["repo"] == "shing26/OpsShield"
+        assert record["branch"] == "moa/a1-test"
+        assert record["card_message_id"] == "om_card_1"
+        assert record["target"] == "oc_chat"
+        assert record["state"] == "pending"
+        assert isinstance(record["created_at"], float)
+        assert isinstance(record["expires_at"], float)
+        write_decision(
+            store,
+            "hitl-1",
+            {
+                "decision": "approve",
+                "approver": "ou_approver",
+                "bundle_hash": "b" * 64,
+            },
+            ttl_s=60,
+        )
+        return await task
+
+    assert asyncio.run(scenario()) is not None
+
+
+def test_sender_without_message_id_does_not_write_sidecar(tmp_path: Any) -> None:
+    """T3：sender 只有 bool 契约 → 不写侧车，审批照常。"""
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeCardSender()
+    port = _port(
+        store=store,
+        sender=sender,
+        settings=_settings(),
+        registry_dir=tmp_path,
+    )
+
+    async def scenario() -> Any:
+        task = asyncio.create_task(port.request(run_id="run-1", bundle=_bundle()))
+        await _wait_for_card(sender)
+        write_decision(
+            store,
+            "hitl-1",
+            {
+                "decision": "approve",
+                "approver": "ou_approver",
+                "bundle_hash": "b" * 64,
+            },
+            ttl_s=60,
+        )
+        return await task
+
+    assert asyncio.run(scenario()) is not None
+    assert list_pending(tmp_path) == []
+
+
+def test_approve_updates_card_and_clears_sidecar(tmp_path: Any) -> None:
+    """T4：批准 → 改 approved 卡、清侧车、返回契约不变。"""
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeIdCardSender()
+    port = _port(
+        store=store,
+        sender=sender,
+        settings=_settings(),
+        registry_dir=tmp_path,
+    )
+
+    async def scenario() -> Any:
+        task = asyncio.create_task(port.request(run_id="run-1", bundle=_bundle()))
+        await _wait_for_card(sender)
+        await _wait_for_pending(tmp_path)
+        write_decision(
+            store,
+            "hitl-1",
+            {
+                "decision": "approve",
+                "approver": "ou_approver",
+                "channel": "feishu",
+                "identity_verified": True,
+                "gate": "allowlist",
+                "bundle_hash": "b" * 64,
+            },
+            ttl_s=60,
+        )
+        return await task
+
+    approval = asyncio.run(scenario())
+    assert approval.approver == "ou_approver"
+    assert approval.bundle_hash == "b" * 64
+    assert approval.run_id == "run-1"
+    assert len(sender.updates) == 1
+    message_id, card = sender.updates[0]
+    assert message_id == "om_card_1"
+    assert card.hitl_kind == "push_resolved_approved"
+    assert "✅ 已批准推送" in card.agent_output
+    assert "ou_approver" in card.agent_output
+    assert list_pending(tmp_path) == []
+
+
+def test_reject_updates_card_and_clears_sidecar(tmp_path: Any) -> None:
+    """T5：拒绝 → 改 rejected 卡，返回 None。"""
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeIdCardSender()
+    port = _port(
+        store=store,
+        sender=sender,
+        settings=_settings(),
+        registry_dir=tmp_path,
+    )
+
+    async def scenario() -> Any:
+        task = asyncio.create_task(port.request(run_id="run-1", bundle=_bundle()))
+        await _wait_for_card(sender)
+        await _wait_for_pending(tmp_path)
+        write_decision(
+            store,
+            "hitl-1",
+            {"decision": "reject", "approver": "ou_approver", "reason": "no"},
+            ttl_s=60,
+        )
+        return await task
+
+    assert asyncio.run(scenario()) is None
+    assert len(sender.updates) == 1
+    assert sender.updates[0][1].hitl_kind == "push_resolved_rejected"
+    assert "🚫 已拒绝推送" in sender.updates[0][1].agent_output
+    assert list_pending(tmp_path) == []
+
+
+def test_timeout_updates_card_to_expired_and_still_raises(tmp_path: Any) -> None:
+    """T6：超时 → 改 expired 卡、清侧车，仍抛 PushApprovalTimedOut。"""
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeIdCardSender()
+    clock = SimpleNamespace(now=1000.0)
+
+    async def advance(seconds: float) -> None:
+        clock.now += seconds
+
+    port = _port(
+        store=store,
+        sender=sender,
+        settings=_settings(feishu_push_approval_timeout_s=1),
+        registry_dir=tmp_path,
+        clock=lambda: clock.now,
+        sleep=advance,
+    )
+    port._poll_interval_s = 0.5
+
+    async def scenario() -> Any:
+        task = asyncio.create_task(port.request(run_id="run-1", bundle=_bundle()))
+        await _wait_for_card(sender)
+        return await task
+
+    with pytest.raises(PushApprovalTimedOut, match="timed out"):
+        asyncio.run(scenario())
+    assert len(sender.updates) == 1
+    assert sender.updates[0][1].hitl_kind == "push_resolved_expired"
+    assert "⏰ 审批已失效" in sender.updates[0][1].agent_output
+    assert list_pending(tmp_path) == []
+
+
+def test_bundle_mismatch_updates_card_to_rejected(tmp_path: Any) -> None:
+    """R2：bundle 不匹配也是拒绝终态，不能把卡片留成“可点”。"""
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeIdCardSender()
+    port = _port(
+        store=store,
+        sender=sender,
+        settings=_settings(),
+        registry_dir=tmp_path,
+    )
+
+    async def scenario() -> Any:
+        task = asyncio.create_task(port.request(run_id="run-1", bundle=_bundle()))
+        await _wait_for_card(sender)
+        await _wait_for_pending(tmp_path)
+        write_decision(
+            store,
+            "hitl-1",
+            {
+                "decision": "approve",
+                "approver": "ou_approver",
+                "bundle_hash": "x" * 64,
+            },
+            ttl_s=60,
+        )
+        return await task
+
+    assert asyncio.run(scenario()) is None
+    assert sender.updates[0][1].hitl_kind == "push_resolved_rejected"
+    assert list_pending(tmp_path) == []
+
+
+@pytest.mark.parametrize("update_error", [None, RuntimeError("feishu down")])
+@pytest.mark.parametrize("update_result", [False, True])
+def test_card_update_failure_does_not_change_decision(
+    tmp_path: Any, update_result: bool, update_error: Exception | None
+) -> None:
+    """T7：改卡失败/异常不外泄，批准语义不变。"""
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeIdCardSender(
+        update_result=update_result, update_error=update_error
+    )
+    port = _port(
+        store=store,
+        sender=sender,
+        settings=_settings(),
+        registry_dir=tmp_path,
+    )
+
+    async def scenario() -> Any:
+        task = asyncio.create_task(port.request(run_id="run-1", bundle=_bundle()))
+        await _wait_for_card(sender)
+        await _wait_for_pending(tmp_path)
+        write_decision(
+            store,
+            "hitl-1",
+            {
+                "decision": "approve",
+                "approver": "ou_approver",
+                "bundle_hash": "b" * 64,
+            },
+            ttl_s=60,
+        )
+        return await task
+
+    approval = asyncio.run(scenario())
+    assert approval is not None
+    assert approval.approver == "ou_approver"
+    assert len(sender.updates) == 1
+    assert list_pending(tmp_path) == []
+
+
+@pytest.mark.parametrize("update_error", [None, RuntimeError("feishu down")])
+@pytest.mark.parametrize("update_result", [False, True])
+def test_card_update_failure_does_not_turn_reject_into_approve(
+    tmp_path: Any, update_result: bool, update_error: Exception | None
+) -> None:
+    """T7：拒绝路径改卡失败仍是 None。"""
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeIdCardSender(
+        update_result=update_result, update_error=update_error
+    )
+    port = _port(
+        store=store,
+        sender=sender,
+        settings=_settings(),
+        registry_dir=tmp_path,
+    )
+
+    async def scenario() -> Any:
+        task = asyncio.create_task(port.request(run_id="run-1", bundle=_bundle()))
+        await _wait_for_card(sender)
+        await _wait_for_pending(tmp_path)
+        write_decision(store, "hitl-1", {"decision": "reject"}, ttl_s=60)
+        return await task
+
+    assert asyncio.run(scenario()) is None
+    assert len(sender.updates) == 1
+    assert list_pending(tmp_path) == []
+
+
+@pytest.mark.parametrize("update_error", [None, RuntimeError("feishu down")])
+@pytest.mark.parametrize("update_result", [False, True])
+def test_card_update_failure_does_not_turn_timeout_into_success(
+    tmp_path: Any, update_result: bool, update_error: Exception | None
+) -> None:
+    """T7：超时路径改卡失败仍抛 PushApprovalTimedOut。"""
+    store = SessionStore(storage=FakeStorage())
+    sender = FakeIdCardSender(
+        update_result=update_result, update_error=update_error
+    )
+    clock = SimpleNamespace(now=1000.0)
+
+    async def advance(seconds: float) -> None:
+        clock.now += seconds
+
+    port = _port(
+        store=store,
+        sender=sender,
+        settings=_settings(feishu_push_approval_timeout_s=1),
+        registry_dir=tmp_path,
+        clock=lambda: clock.now,
+        sleep=advance,
+    )
+    port._poll_interval_s = 0.5
+
+    async def scenario() -> Any:
+        task = asyncio.create_task(port.request(run_id="run-1", bundle=_bundle()))
+        await _wait_for_card(sender)
+        return await task
+
+    with pytest.raises(PushApprovalTimedOut, match="timed out"):
+        asyncio.run(scenario())
+    assert len(sender.updates) == 1
+    assert list_pending(tmp_path) == []
 
 
 def test_github_identity_failure_propagates() -> None:
