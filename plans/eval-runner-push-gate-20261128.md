@@ -48,10 +48,18 @@ plans/eval-runner-push-gate-20261128.md
 ```
 V1  $env:PYTHONPATH='.'; .venv/Scripts/python.exe -m pytest tests/unit/test_run_eval_baseline.py -q
 V2  $env:PYTHONPATH='.'; .venv/Scripts/python.exe -m pytest tests/unit/test_delivery_cli.py tests/unit/test_feishu_route.py -q
-V3  $env:PYTHONPATH='.'; .venv/Scripts/python.exe -m ruff check scripts/run_eval_baseline.py tests/unit/test_run_eval_baseline.py
+V3  $env:PYTHONPATH='.'; .venv/Scripts/python.exe -m ruff check .
 ```
 
 Verifier 需亲自重跑，不采信实现方贴的日志。
+
+**V3 复审记录（2026-11-28 03:46，验证阶段发现，非实现变更）**：初版 V3 写的是
+显式路径 `ruff check scripts/run_eval_baseline.py tests/unit/test_run_eval_baseline.py`。
+该命令与仓库既有 `pyproject.toml` 的 `extend-exclude = ["scripts"]` 冲突——在
+`ssh443/main` 上同样报 `BLE001`（`except Exception` 盲捕获，2026-11-16 引入），
+即命令本身永远无法通过，与被测改动无关。改为仓库真实的 CI 门 `ruff check .`；
+`scripts` 不在扫描范围内，故本单不承担该既有告警。若要对 `scripts` 收紧 lint，
+另立一单，不在本契约内。
 
 ## 6. 禁止（Forbidden）
 
