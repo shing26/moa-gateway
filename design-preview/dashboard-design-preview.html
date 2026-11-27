@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard 重设计预览 · C 打底 + A 择优叠加</title>
+<style>
+:root{
+  --paper:oklch(98.2% 0.004 220);--surface:oklch(100% 0 0);--s2:oklch(96.4% 0.005 220);--s3:oklch(93.2% 0.008 220);
+  --ink:oklch(24% 0.022 260);--ink2:oklch(42% 0.018 258);--ink3:oklch(61% 0.014 250);--line:oklch(90.5% 0.009 230);
+  --accent:oklch(52% 0.13 190);--accentS:oklch(94.5% 0.04 190);--accentD:oklch(44% 0.13 190);
+  --ok:oklch(52% 0.14 155);--okS:oklch(94.5% 0.035 155);--warn:oklch(55% 0.14 70);--warnS:oklch(95.5% 0.04 85);
+  --dang:oklch(53% 0.19 25);--dangS:oklch(94.5% 0.05 25);
+  --font:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,"Cascadia Code","SF Mono",Consolas,"Courier New",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font);color:var(--ink);background:var(--paper);font-size:13px;line-height:1.55;-webkit-font-smoothing:antialiased}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.muted{color:var(--ink3)}
+.wrap{max-width:1360px;margin:0 auto;padding:0 22px 60px}
+
+/* 顶部设计稿声明 */
+.decl{background:oklch(24% 0.022 260);color:oklch(96% 0 0);padding:9px 22px;font-size:12px}
+.decl .inner{max-width:1360px;margin:0 auto;display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+.decl b{font-weight:600;color:oklch(88% 0.06 195)}
+.decl .tag{background:oklch(38% 0.06 195);border-radius:5px;padding:2px 9px;font-size:11px}
+.decl .note{color:oklch(78% 0.01 250)}
+
+/* 视图切换 */
+.tabbar{display:flex;gap:4px;padding:18px 0 14px;border-bottom:1px solid var(--line);margin-bottom:18px}
+.tabbar button{font-family:var(--font);font-size:13px;padding:8px 16px;border:1px solid transparent;background:transparent;border-radius:8px;cursor:pointer;color:var(--ink2)}
+.tabbar button:hover{background:var(--s2)}
+.tabbar button.on{background:var(--accentS);color:var(--accentD);border-color:oklch(85% 0.08 190);font-weight:600}
+.tabbar .hint{margin-left:auto;align-self:center;color:var(--ink3);font-size:12px}
+.view{display:none}.view.on{display:block}
+
+/* 应用骨架 */
+.app{display:grid;grid-template-columns:212px 1fr;gap:0;background:var(--surface);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:0 1px 3px oklch(22% 0.02 260/.05)}
+.side{background:var(--s2);border-right:1px solid var(--line);padding:18px 14px;display:flex;flex-direction:column;min-height:700px}
+.brand{display:flex;align-items:center;gap:10px;padding:0 6px 18px}
+.brand .mk{width:30px;height:30px;border-radius:8px;background:var(--accentD);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:15px}
+.brand strong{font-size:13px;display:block}.brand span{font-size:11px;color:var(--ink3)}
+.ngroup{margin-bottom:16px}.ngroup .lbl{font-size:10px;letter-spacing:.09em;color:var(--ink3);text-transform:uppercase;padding:0 8px 6px;font-weight:600}
+.nav a{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:7px;color:var(--ink2);text-decoration:none;font-size:12.5px;margin-bottom:2px}
+.nav a:hover{background:var(--s3)}.nav a.on{background:var(--accentS);color:var(--accentD);font-weight:600}
+.nav a .ic{width:15px;height:15px;flex:none;opacity:.75}
+.nav a .cnt{margin-left:auto;background:var(--dang);color:#fff;border-radius:9px;font-size:10px;padding:0 6px;line-height:17px;font-weight:600}
+.nav a .cnt.warn{background:var(--warn)}
+.sidefoot{margin-top:auto;border-top:1px solid var(--line);padding:12px 6px 0;font-size:11px;color:var(--ink3)}
+.sidefoot .fp{font-family:var(--mono);color:var(--ink2)}
+
+.main{min-width:0}
+.top{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:16px 22px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.top h1{font-size:17px;font-weight:600}.top .sub{font-size:12px;color:var(--ink3);margin-top:2px}
+.top .act{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.chip{font-size:11.5px;padding:3px 10px;border-radius:999px;display:inline-flex;gap:6px;align-items:center}
+.chip.ok{background:var(--okS);color:var(--ok)}.chip.warn{background:var(--warnS);color:var(--warn)}
+.btn{font-family:var(--font);font-size:12px;padding:6px 12px;border-radius:7px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer}
+.btn:hover{background:var(--s2)}.btn.pri{background:var(--accentD);color:#fff;border-color:var(--accentD)}
+.btn.sm{padding:4px 10px;font-size:11.5px}
+.content{padding:20px 22px 26px}
+
+/* 快照条 */
+.snap{display:flex;gap:18px;align-items:center;flex-wrap:wrap;background:var(--s2);border:1px solid var(--line);border-radius:9px;padding:9px 13px;font-size:11.5px;margin-bottom:18px}
+.snap .k{color:var(--ink3)}.snap .v{font-family:var(--mono);color:var(--ink2)}
+.snap .sp{flex:1}
+
+/* 指标卡 */
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:18px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:14px 15px;position:relative}
+.card .lbl{font-size:12px;color:var(--ink2);display:flex;align-items:center;gap:6px}
+.card .val{font-size:28px;font-weight:600;letter-spacing:-.02em;margin:8px 0 4px;font-family:var(--mono)}
+.card .prov{font-size:10.5px;color:var(--ink3);line-height:1.5}
+.card .flag{position:absolute;top:12px;right:12px;font-size:10px;padding:2px 7px;border-radius:5px}
+.flag.ok{background:var(--okS);color:var(--ok)}.flag.warn{background:var(--warnS);color:var(--warn)}
+.flag.off{background:var(--s3);color:var(--ink3)}
+.card.dim{background:var(--s2)}.card.dim .val{color:var(--ink3);font-size:22px}
+
+/* 面板 */
+.panel{border:1px solid var(--line);border-radius:11px;background:var(--surface);margin-bottom:16px;overflow:hidden}
+.ph{display:flex;justify-content:space-between;align-items:center;padding:12px 15px;border-bottom:1px solid var(--line);gap:12px;flex-wrap:wrap}
+.ph h2{font-size:13.5px;font-weight:600}.ph .r{font-size:11.5px;color:var(--ink3)}
+.pb{padding:14px 15px}
+.grid2{display:grid;grid-template-columns:1.15fr 1fr;gap:16px}
+
+/* 下钻定义行 */
+.def{display:grid;grid-template-columns:96px 1fr;gap:10px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:12px}
+.def:last-child{border-bottom:0}.def .k{color:var(--ink3)}.def .v{color:var(--ink)}
+.code{font-family:var(--mono);font-size:11.5px;background:var(--s2);border-radius:5px;padding:1px 6px}
+
+/* 局限清单 */
+.lim{list-style:none}.lim li{display:flex;gap:10px;padding:9px 0;border-bottom:1px solid var(--s3);font-size:12px;align-items:flex-start}
+.lim li:last-child{border-bottom:0}.lim .d{width:6px;height:6px;border-radius:50%;background:var(--warn);margin-top:7px;flex:none}
+.lim .t{color:var(--ink2)}.lim .src{font-size:10.5px;color:var(--ink3);font-family:var(--mono)}
+
+/* 事件台 */
+.fresh{display:flex;align-items:center;gap:9px;background:var(--accentS);border:1px solid oklch(85% 0.08 190);border-radius:9px;padding:8px 13px;font-size:11.5px;margin-bottom:16px;color:var(--accentD)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--ok);display:inline-block}
+.tl{list-style:none}.tl li{display:grid;grid-template-columns:64px 78px 1fr;gap:10px;padding:11px 0;border-bottom:1px solid var(--s3);cursor:pointer;align-items:center}
+.tl li:hover{background:var(--s2)}.tl li.sel{background:var(--accentS);border-radius:7px;padding-left:9px;padding-right:9px}
+.tl .tm{font-family:var(--mono);font-size:11px;color:var(--ink3)}
+.sev{font-size:10px;padding:2px 8px;border-radius:5px;text-align:center;font-weight:600}
+.sev.hi{background:var(--dangS);color:var(--dang)}.sev.md{background:var(--warnS);color:var(--warn)}
+.tl .ttl{font-weight:600;font-size:12.5px}.tl .ds{font-size:11px;color:var(--ink3)}
+.drawer .kv{display:grid;grid-template-columns:80px 1fr;gap:8px;font-size:12px;padding:5px 0}
+.drawer .kv .k{color:var(--ink3)}
+.dact{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.audit-note{margin-top:12px;font-size:11px;color:var(--ink3);background:var(--s2);padding:8px 10px;border-radius:7px}
+.vchain{display:flex;align-items:center;gap:8px;font-size:11.5px}
+.vchain .bar{flex:1;height:6px;background:var(--s3);border-radius:3px;position:relative;overflow:hidden}
+.vchain .bar i{position:absolute;left:0;top:0;height:100%;background:var(--ok)}
+
+/* 状态库 */
+.stgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.stcard{border:1px solid var(--line);border-radius:11px;overflow:hidden}
+.stcard .cap{padding:9px 13px;background:var(--s2);border-bottom:1px solid var(--line);font-size:12px;font-weight:600;display:flex;justify-content:space-between}
+.stcard .cap .pill{font-size:10px;font-weight:500;color:var(--ink3)}
+.stcard .demo{padding:22px 16px;min-height:120px;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;gap:8px}
+.es{color:var(--ink3);font-size:12px}.es .big{font-size:22px;display:block;margin-bottom:4px;opacity:.5}
+.skel{width:100%}.skel .ln{height:9px;background:linear-gradient(90deg,var(--s2),var(--s3),var(--s2));border-radius:4px;margin:7px 0;background-size:200% 100%;animation:sh 1.4s infinite}
+@keyframes sh{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.errbox{border:1px solid oklch(88% 0.05 25);background:var(--dangS);border-radius:8px;padding:12px 14px;font-size:12px;color:oklch(40% 0.15 25);max-width:330px}
+.errbox b{display:block;margin-bottom:4px}
+.permbox{display:flex;gap:10px;align-items:center;background:var(--s2);border-radius:8px;padding:11px 14px;font-size:12px;max-width:360px;text-align:left}
+.lock{width:26px;height:26px;border-radius:6px;background:var(--s3);display:flex;align-items:center;justify-content:center;flex:none;font-size:13px}
+.compare-note{font-size:11.5px;color:var(--ink3);margin-bottom:14px;background:var(--s2);border-radius:8px;padding:9px 12px}
+
+@media(max-width:1040px){.cards{grid-template-columns:repeat(2,1fr)}.grid2{grid-template-columns:1fr}.app{grid-template-columns:1fr}.side{min-height:auto}.stgrid{grid-template-columns:1fr}}
+@media print{.decl,.tabbar{position:static}.view{display:block!important;page-break-before:always}.app{box-shadow:none}}
+</style>
+</head>
+<body>
+
+<div class="decl">
+  <div class="inner">
+    <div><b>Dashboard 重设计 · 高保真预览稿</b> &nbsp;路线：<span class="tag">C 可信度中心打底</span> + <span class="tag">A 值班台择优叠加</span></div>
+    <div class="note">设计交付物 · 非产品代码 · 所有数值为布局占位，实体名与口径取自真实代码</div>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <div class="tabbar">
+    <button class="on" data-v="v1">视图一 · 可信度总览（C 打底）</button>
+    <button data-v="v2">视图二 · 事件台（A 叠加）</button>
+    <button data-v="v3">视图三 · 状态库（四态）</button>
+    <span class="hint">点击切换 · 可直接打印为 PDF</span>
+  </div>
+
+  <!-- ============ 视图一：可信度总览 ============ -->
+  <div class="view on" id="v1">
+  <div class="app">
+    <aside class="side">
+      <div class="brand"><div class="mk">M</div><div><strong>Gateway Console</strong><span>治理 · 证据工作台</span></div></div>
+      <div class="ngroup"><div class="lbl">工作台</div><div class="nav">
+        <a href="#" class="on">◈ 可信度总览</a>
+        <a href="#">◇ 事件台 <span class="cnt">3</span></a>
+      </div></div>
+      <div class="ngroup"><div class="lbl">证据</div><div class="nav">
+        <a href="#">◇ 指标下钻</a><a href="#">◇ 实验对比</a>
+        <a href="#">◇ 局限清单 <span class="cnt warn">5</span></a>
+      </div></div>
+      <div class="ngroup"><div class="lbl">运营</div><div class="nav">
+        <a href="#">◇ 知识库</a><a href="#">◇ 会话</a><a href="#">◇ 请求日志</a>
+      </div></div>
+      <div class="ngroup"><div class="lbl">系统</div><div class="nav">
+        <a href="#">◇ Ops 配置</a><a href="#">◇ Feature Flags</a>
+      </div></div>
+      <div class="sidefoot">快照 <span class="fp">2026-11-20</span><br>数据指纹 <span class="fp">8f3a2c…</span><br>来源：本地落盘报告</div>
+    </aside>
+    <div class="main">
+      <div class="top">
+        <div><h1>可信度总览</h1><div class="sub">每个数字标注来源 · 窗口 · 样本量，未提供来源的值不展示</div></div>
+        <div class="act"><span class="chip ok"><span class="dot"></span>数据快照已就绪</span><button class="btn">查看生成命令</button><button class="btn pri">导出可复核报告</button></div>
+      </div>
+      <div class="content">
+        <div class="snap">
+          <span><span class="k">快照时间</span> <span class="v">2026-11-20 14:03 GMT+8</span></span>
+          <span><span class="k">git</span> <span class="v">376cce0</span></span>
+          <span><span class="k">数据指纹</span> <span class="v">8f3a2c91</span></span>
+          <span><span class="k">生成端点</span> <span class="v">GET /dashboard/api/evidence</span></span>
+          <span class="sp"></span><span class="k">离线覆盖值不作为活体结论</span>
+        </div>
+
+        <div class="cards">
+          <div class="card"><span class="flag ok">口径已标注</span>
+            <div class="lbl">检索 Hit@1</div><div class="val">0.826</div>
+            <div class="prov">来源 retrieval_gold.jsonl<br>n=23 · 人工抽检 · 2026-10-14</div></div>
+          <div class="card"><span class="flag warn">样本偏小</span>
+            <div class="lbl">端到端成功率</div><div class="val">1.00</div>
+            <div class="prov">来源 latest.json · e2e<br>n=30 · 本地活体跑</div></div>
+          <div class="card"><span class="flag ok">口径已标注</span>
+            <div class="lbl">意图准确率</div><div class="val">0.940</div>
+            <div class="prov">来源 latest.json · intent<br>n=占位 · 快照口径</div></div>
+          <div class="card dim"><span class="flag off">不展示</span>
+            <div class="lbl">平均成本</div><div class="val">—</div>
+            <div class="prov">本地 Ollama 不计费，恒 0 无业务意义<br>故不进入指标卡</div></div>
+        </div>
+
+        <div class="grid2">
+          <div class="panel">
+            <div class="ph"><h2>指标下钻 · 检索 Hit@1</h2><span class="r">点击任意指标卡切换</span></div>
+            <div class="pb">
+              <div class="def"><span class="k">口径定义</span><span class="v">Top-1 命中人工标注 gold 的比例</span></div>
+              <div class="def"><span class="k">数据窗口</span><span class="v">retrieval_gold.jsonl，23 条人工抽检</span></div>
+              <div class="def"><span class="k">是否含测试数据</span><span class="v">否 · 已排除合成种子</span></div>
+              <div class="def"><span class="k">生成命令</span><span class="v"><span class="code">python scripts/rag_case.py</span></span></div>
+              <div class="def"><span class="k">原始记录</span><span class="v"><a href="#" style="color:var(--accentD)">查看 23 条明细 →</a></span></div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="ph"><h2>已知局限 · 诚实披露</h2><span class="r">共 5 条 · 来源 README 口径</span></div>
+            <div class="pb"><ul class="lim">
+              <li><span class="d"></span><div><div class="t">OTel 是预留接口，不是链路</div><div class="src">README:478</div></div></li>
+              <li><span class="d"></span><div><div class="t">avg_cost_usd 恒 0，本地不可验</div><div class="src">README:480</div></div></li>
+              <li><span class="d"></span><div><div class="t">hitl_feedback 4 条为本地模拟种子</div><div class="src">README:480</div></div></li>
+              <li><span class="d"></span><div><div class="t">评测无「本次 vs 上次」基线对比</div><div class="src">README:481</div></div></li>
+              <li><span class="d"></span><div><div class="t">安全页近 7 天窗口无拦截样本</div><div class="src">实测 audit JSONL</div></div></li>
+            </ul></div>
+          </div>
+        </div>
+        <div class="panel" style="border-style:dashed">
+          <div class="pb" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+            <div style="font-size:12px;color:var(--ink2)">A 叠加入口：当前有 <b>3 条待处置事件</b>来自审计派生。切到「事件台」查看发现 → 定位 → 处置 → 留痕闭环。</div>
+            <button class="btn" onclick="go('v2')">进入事件台 →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <!-- ============ 视图二：事件台 ============ -->
+  <div class="view" id="v2">
+  <div class="app">
+    <aside class="side">
+      <div class="brand"><div class="mk">M</div><div><strong>Gateway Console</strong><span>治理 · 证据工作台</span></div></div>
+      <div class="ngroup"><div class="lbl">工作台</div><div class="nav">
+        <a href="#" onclick="go('v1')">◈ 可信度总览</a>
+        <a href="#" class="on">◇ 事件台 <span class="cnt">3</span></a>
+      </div></div>
+      <div class="ngroup"><div class="lbl">证据</div><div class="nav">
+        <a href="#">◇ 指标下钻</a><a href="#">◇ 实验对比</a><a href="#">◇ 局限清单 <span class="cnt warn">5</span></a>
+      </div></div>
+      <div class="ngroup"><div class="lbl">运营</div><div class="nav">
+        <a href="#">◇ 知识库</a><a href="#">◇ 会话</a><a href="#">◇ 请求日志</a>
+      </div></div>
+      <div class="ngroup"><div class="lbl">系统</div><div class="nav">
+        <a href="#">◇ Ops 配置</a><a href="#">◇ Feature Flags</a>
+      </div></div>
+      <div class="sidefoot">值班人 <span class="fp">ops-1</span><br>审批人白名单内<br>操作写入审计链</div>
+    </aside>
+    <div class="main">
+      <div class="top">
+        <div><h1>事件台</h1><div class="sub">从审计日志派生 · 发现 → 定位 → 处置 → 留痕</div></div>
+        <div class="act"><span class="chip ok"><span class="dot"></span>系统健康</span><button class="btn sm">审计链全量校验</button><button class="btn sm">刷新</button></div>
+      </div>
+      <div class="content">
+        <div class="fresh"><span class="dot"></span>数据截止 <b>8 秒前</b> · 5s 轮询（失败退避至 30s）· <span class="mono">/healthz</span> + <span class="mono">/dashboard/api/events</span></div>
+        <div class="cards" style="grid-template-columns:repeat(3,1fr)">
+          <div class="card"><div class="lbl">待处置事件</div><div class="val" style="color:var(--dang)">3</div><div class="prov">1 严重 · 2 待处理</div></div>
+          <div class="card"><div class="lbl">审计链校验</div>
+            <div class="vchain" style="margin:12px 0 8px"><span style="font-size:22px;font-weight:600;color:var(--ok)" class="mono">有效</span><div class="bar"><i style="width:100%"></i></div></div>
+            <div class="prov">最新文件浅校验 · <a href="#" style="color:var(--accentD)">运行全量校验</a></div></div>
+          <div class="card"><div class="lbl">P95 决策耗时</div><div class="val">124s</div><div class="prov">来源 hitl_decision · 近 7 天</div></div>
+        </div>
+        <div class="grid2">
+          <div class="panel">
+            <div class="ph"><h2>事件时间线</h2><span class="r">按严重度 · 今日</span></div>
+            <div class="pb"><ul class="tl">
+              <li onclick="pick(this,'208')"><span class="tm">14:02</span><span class="sev hi">严重</span><div><div class="ttl">Redis 内存回退</div><div class="ds">会话记忆降级 · 影响 2 个会话</div></div></li>
+              <li class="sel" onclick="pick(this,'207')"><span class="tm">13:41</span><span class="sev md">待处理</span><div><div class="ttl">审批耗时超 120s</div><div class="ds">hitl_decision P95 越界 · 1 条待复核</div></div></li>
+              <li onclick="pick(this,'206')"><span class="tm">13:20</span><span class="sev md">待处理</span><div><div class="ttl">检索召回降级</div><div class="ds">vectordb 超时 · 回退内存索引</div></div></li>
+            </ul></div>
+          </div>
+          <div class="panel drawer">
+            <div class="ph"><h2>事件详情 · #<span id="evnum">207</span></h2><span class="r" id="evstat">待处置</span></div>
+            <div class="pb">
+              <div class="kv"><span class="k">关联 trace</span><span class="mono">tr-8f3a2c91</span></div>
+              <div class="kv"><span class="k">会话</span><span class="mono">sess-42b7</span></div>
+              <div class="kv"><span class="k">依赖状态</span><span>redis: fallback · vectordb: ok</span></div>
+              <div class="kv"><span class="k">来源</span><span class="mono">logs/audit-2026-11-20.jsonl</span></div>
+              <div class="dact"><button class="btn pri" onclick="done()">切 Flag 降级</button><button class="btn" onclick="done()">临时改配置</button><button class="btn">转人工</button></div>
+              <div class="audit-note">处置为受控写操作：危险动作二次确认；ops 凭证热改受 ADR-038 闸门（<span class="mono">DASHBOARD_OPS_WRITE</span>）默认拒绝，返回可读 403。全部处置写入审计链。</div>
+            </div>
+          </div>
+        </div>
+        <div class="panel"><div class="pb" style="font-size:11.5px;color:var(--ink3)">排除项（无真实后端支撑，不做）：SLO 面板、依赖拓扑图、事件认领/工单状态机（无持久化，会重蹈 HITL 重启必败）。</div></div>
+      </div>
+    </div>
+  </div>
+  </div>
+
+  <!-- ============ 视图三：状态库 ============ -->
+  <div class="view" id="v3">
+    <div class="compare-note">真实业务状态是产品感的来源。以下四态均有明确文案、下一步动作与来源说明 — 而非「暂无数据 / 请求失败:500」这类 demo 式占位。</div>
+    <div class="stgrid">
+      <div class="stcard"><div class="cap"><span>空状态 · 可信度中心</span><span class="pill">C 打底</span></div>
+        <div class="demo"><div class="es"><span class="big">◎</span>该指标近 7 天无样本<br><span style="font-size:11px">审批耗时统计：窗口内无 hitl_decision，不展示图表</span></div></div></div>
+      <div class="stcard"><div class="cap"><span>空状态 · 事件台</span><span class="pill">A 叠加</span></div>
+        <div class="demo"><div class="es"><span class="big">✓</span>今日无待处置事件<br><span style="font-size:11px">最近一次异常：3 小时前 · 已归档</span></div></div></div>
+      <div class="stcard"><div class="cap"><span>加载状态 · 全局</span><span class="pill">C + A</span></div>
+        <div class="demo"><div class="skel"><div class="ln" style="width:70%"></div><div class="ln" style="width:92%"></div><div class="ln" style="width:48%"></div></div><div class="es" style="font-size:11px;margin-top:6px">正在查询 <span class="mono">logs/audit-*.jsonl</span> · 显示上次快照时间</div></div></div>
+      <div class="stcard"><div class="cap"><span>错误状态 · 关键区分</span><span class="pill">C 打底</span></div>
+        <div class="demo"><div class="errbox"><b>数据不可信，不展示此值</b>证据端点返回异常，未取得可复核数据。<button class="btn sm" style="margin-top:8px">重试</button></div><div class="es" style="font-size:11px;margin-top:8px">错误 ≠ 空：不再把「请求失败:500」塞进空状态</div></div></div>
+      <div class="stcard"><div class="cap"><span>权限状态 · 可信度中心</span><span class="pill">C 打底</span></div>
+        <div class="demo"><div class="permbox"><div class="lock">▣</div><div>审计原文已脱敏。<br><span class="muted" style="font-size:11px">查看原文需 Operator 授权 · 当前为 Viewer</span></div></div></div></div>
+      <div class="stcard"><div class="cap"><span>权限状态 · 事件台</span><span class="pill">A 叠加</span></div>
+        <div class="demo"><div class="permbox"><div class="lock">▣</div><div>处置按钮已禁用。<br><span class="muted" style="font-size:11px">ops 写入闸门未开（ADR-038）· 403 提示可读</span></div></div></div></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+function go(id){
+  document.querySelectorAll('.view').forEach(function(v){v.classList.toggle('on',v.id===id)});
+  document.querySelectorAll('.tabbar button').forEach(function(b){b.classList.toggle('on',b.dataset.v===id)});
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+document.querySelectorAll('.tabbar button').forEach(function(b){b.addEventListener('click',function(){go(b.dataset.v)})});
+function pick(el,n){
+  document.querySelectorAll('.tl li').forEach(function(li){li.classList.remove('sel')});
+  el.classList.add('sel');document.getElementById('evnum').textContent=n;
+}
+function done(){var s=document.getElementById('evstat');s.textContent='已处置 · 审计已写';s.style.color='var(--ok)'}
+</script>
+</body>
+</html>
