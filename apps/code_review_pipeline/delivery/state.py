@@ -4,13 +4,18 @@ from apps.code_review_pipeline.delivery.models import DeliveryRunState
 
 ALLOWED_TRANSITIONS: dict[DeliveryRunState, frozenset[DeliveryRunState]] = {
     DeliveryRunState.PREPARING: frozenset(
-        {DeliveryRunState.IMPLEMENTING, DeliveryRunState.NEEDS_HUMAN}
+        {
+            DeliveryRunState.IMPLEMENTING,
+            DeliveryRunState.NEEDS_HUMAN,
+            DeliveryRunState.ABANDONED,
+        }
     ),
     DeliveryRunState.IMPLEMENTING: frozenset(
         {
             DeliveryRunState.CHECKING,
             DeliveryRunState.BUDGET_EXHAUSTED,
             DeliveryRunState.FAILED,
+            DeliveryRunState.ABANDONED,
         }
     ),
     DeliveryRunState.CHECKING: frozenset(
@@ -20,6 +25,7 @@ ALLOWED_TRANSITIONS: dict[DeliveryRunState, frozenset[DeliveryRunState]] = {
             DeliveryRunState.REVISING,
             DeliveryRunState.NEEDS_HUMAN,
             DeliveryRunState.BUDGET_EXHAUSTED,
+            DeliveryRunState.ABANDONED,
         }
     ),
     DeliveryRunState.VERIFIER_REVIEW: frozenset(
@@ -28,6 +34,7 @@ ALLOWED_TRANSITIONS: dict[DeliveryRunState, frozenset[DeliveryRunState]] = {
             DeliveryRunState.REVISING,
             DeliveryRunState.NEEDS_HUMAN,
             DeliveryRunState.BUDGET_EXHAUSTED,
+            DeliveryRunState.ABANDONED,
         }
     ),
     DeliveryRunState.REVISING: frozenset(
@@ -35,6 +42,7 @@ ALLOWED_TRANSITIONS: dict[DeliveryRunState, frozenset[DeliveryRunState]] = {
             DeliveryRunState.CHECKING,
             DeliveryRunState.NEEDS_HUMAN,
             DeliveryRunState.BUDGET_EXHAUSTED,
+            DeliveryRunState.ABANDONED,
         }
     ),
     DeliveryRunState.READY_FOR_PUSH_APPROVAL: frozenset(
@@ -42,6 +50,7 @@ ALLOWED_TRANSITIONS: dict[DeliveryRunState, frozenset[DeliveryRunState]] = {
             DeliveryRunState.PUSHING,
             DeliveryRunState.REJECTED,
             DeliveryRunState.NEEDS_HUMAN,
+            DeliveryRunState.ABANDONED,
         }
     ),
     DeliveryRunState.PUSHING: frozenset(
@@ -49,12 +58,14 @@ ALLOWED_TRANSITIONS: dict[DeliveryRunState, frozenset[DeliveryRunState]] = {
             DeliveryRunState.WAITING_CI,
             DeliveryRunState.NEEDS_HUMAN,
             DeliveryRunState.FAILED,
+            DeliveryRunState.ABANDONED,
         }
     ),
     DeliveryRunState.WAITING_CI: frozenset(
         {
             DeliveryRunState.AWAITING_MERGE_APPROVAL,
             DeliveryRunState.NEEDS_HUMAN,
+            DeliveryRunState.ABANDONED,
         }
     ),
     DeliveryRunState.AWAITING_MERGE_APPROVAL: frozenset(
@@ -62,6 +73,7 @@ ALLOWED_TRANSITIONS: dict[DeliveryRunState, frozenset[DeliveryRunState]] = {
             DeliveryRunState.MERGING,
             DeliveryRunState.REJECTED,
             DeliveryRunState.NEEDS_HUMAN,
+            DeliveryRunState.ABANDONED,
         }
     ),
     DeliveryRunState.MERGING: frozenset(
@@ -69,9 +81,10 @@ ALLOWED_TRANSITIONS: dict[DeliveryRunState, frozenset[DeliveryRunState]] = {
     ),
     DeliveryRunState.MERGED: frozenset(),
     DeliveryRunState.REJECTED: frozenset(),
-    DeliveryRunState.NEEDS_HUMAN: frozenset(),
-    DeliveryRunState.BUDGET_EXHAUSTED: frozenset(),
-    DeliveryRunState.FAILED: frozenset(),
+    DeliveryRunState.NEEDS_HUMAN: frozenset({DeliveryRunState.ABANDONED}),
+    DeliveryRunState.BUDGET_EXHAUSTED: frozenset({DeliveryRunState.ABANDONED}),
+    DeliveryRunState.FAILED: frozenset({DeliveryRunState.ABANDONED}),
+    DeliveryRunState.ABANDONED: frozenset(),
 }
 
 

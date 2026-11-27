@@ -420,6 +420,33 @@ class _RetryFlow:
         return self.new_run
 
 
+def test_resume_refuses_abandoned_run(tmp_path: Path) -> None:
+    """T10：abandoned 是终态，resume 必须明确拒绝且记录保持不变。"""
+    store = DeliveryRunStore(tmp_path / "runs")
+    run = _run(DeliveryRunState.ABANDONED)
+    asyncio.run(_save(store, run))
+    before = (tmp_path / "runs" / "run-1.json").read_text(encoding="utf-8")
+
+    outcome = asyncio.run(
+        resume_run(
+            "run-1",
+            store=store,
+            github=_FakeGithub(),
+            merge_store=_FakeMergeStore(),
+            settings=_settings(tmp_path),
+            approval_port=_FakeApprovalPort(None),
+        )
+    )
+
+    assert outcome.exit_code == 2
+    assert outcome.refused is True
+    assert "abandoned" in outcome.reason
+    assert "terminal" in outcome.reason
+    assert (
+        tmp_path / "runs" / "run-1.json"
+    ).read_text(encoding="utf-8") == before
+
+
 def test_resume_dispatches_failed_run_to_retry(tmp_path: Path) -> None:
     parent = _failed_run(FailureCode.VERIFY_FAILED)
     store = DeliveryRunStore(tmp_path / "runs")

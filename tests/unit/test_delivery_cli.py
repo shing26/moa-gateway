@@ -14,6 +14,7 @@ from app.cli import (
     _apply_delivery_defaults,
     _build_push_approval_port,
     build_parser,
+    cmd_delivery_abandon,
     cmd_delivery_ci_triage,
     cmd_delivery_run,
     cmd_delivery_view,
@@ -1390,3 +1391,131 @@ def test_delivery_resume_keeps_stdout_json_when_feishu_approval_enabled(
     assert json.loads(captured.out) == {"state": "waiting_ci", "run_id": "run-1"}
     assert "push approval: feishu (timeout=600s)" in captured.err
     assert "push approval" not in captured.out
+
+
+def test_delivery_abandon_parser_wires_command() -> None:
+    args = build_parser().parse_args(
+        [
+            "delivery",
+            "abandon",
+            "--run-id",
+            "run-1",
+            "--reason",
+            "PR closed",
+        ]
+    )
+
+    assert args.group == "delivery"
+    assert args.command == "abandon"
+    assert args.run_id == "run-1"
+    assert args.reason == "PR closed"
+    assert args.func is cmd_delivery_abandon
+
+
+def test_t12_cmd_delivery_abandon_succeeds_without_github_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.config import settings
+    from apps.code_review_pipeline.delivery import abandon as abandon_module
+    from apps.code_review_pipeline.delivery.models import DeliveryRunState
+    from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
+    from tests.unit.test_delivery_store import _run
+
+    class NoopAudit:
+        async def record(self, **kwargs: object) -> None:
+            return None
+
+    store = DeliveryRunStore(tmp_path / "runs")
+    asyncio.run(store.save(_run(DeliveryRunState.WAITING_CI)))
+    monkeypatch.setattr(settings, "delivery_run_record_dir", str(tmp_path / "runs"))
+    monkeypatch.setattr(settings, "github_token", "")
+    monkeypatch.setattr(abandon_module, "WalDeliveryAudit", lambda: NoopAudit())
+
+    args = build_parser().parse_args(
+        [
+            "delivery",
+            "abandon",
+            "--run-id",
+            "run-1",
+            "--reason",
+            "PR closed",
+        ]
+    )
+
+    assert cmd_delivery_abandon(args) == 0
+    output = capsys.readouterr().out
+    assert "state     : abandoned" in output
+    assert "merge_record: none" in output
+
+
+def test_t12_cmd_delivery_abandon_refusal_exits_2_with_stderr_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.models import DeliveryRunState
+    from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
+    from tests.unit.test_delivery_store import _run
+
+    store = DeliveryRunStore(tmp_path / "runs")
+    asyncio.run(store.save(_run(DeliveryRunState.MERGED)))
+    before = (tmp_path / "runs" / "run-1.json").read_bytes()
+    monkeypatch.setattr(settings, "delivery_run_record_dir", str(tmp_path / "runs"))
+
+    args = build_parser().parse_args(
+        [
+            "delivery",
+            "abandon",
+            "--run-id",
+            "run-1",
+            "--reason",
+            "PR closed",
+        ]
+    )
+
+    assert cmd_delivery_abandon(args) == 2
+    assert "merged" in capsys.readouterr().err
+    assert (tmp_path / "runs" / "run-1.json").read_bytes() == before
+
+
+def test_t12_cmd_delivery_abandon_json_is_parseable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from app.config import settings
+    from apps.code_review_pipeline.delivery import abandon as abandon_module
+    from apps.code_review_pipeline.delivery.models import DeliveryRunState
+    from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
+    from tests.unit.test_delivery_store import _run
+
+    class NoopAudit:
+        async def record(self, **kwargs: object) -> None:
+            return None
+
+    store = DeliveryRunStore(tmp_path / "runs")
+    asyncio.run(store.save(_run(DeliveryRunState.WAITING_CI)))
+    monkeypatch.setattr(settings, "delivery_run_record_dir", str(tmp_path / "runs"))
+    monkeypatch.setattr(abandon_module, "WalDeliveryAudit", lambda: NoopAudit())
+
+    args = build_parser().parse_args(
+        [
+            "delivery",
+            "abandon",
+            "--run-id",
+            "run-1",
+            "--reason",
+            "PR closed",
+            "--json",
+        ]
+    )
+
+    assert cmd_delivery_abandon(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run_id"] == "run-1"
+    assert payload["state"] == "abandoned"
+    assert payload["failure"]["code"] == "abandoned"
+    assert payload["merge_record"] == "none"

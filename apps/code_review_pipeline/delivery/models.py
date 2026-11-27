@@ -243,6 +243,7 @@ class DeliveryRunState(str, Enum):
     NEEDS_HUMAN = "needs_human"
     BUDGET_EXHAUSTED = "budget_exhausted"
     FAILED = "failed"
+    ABANDONED = "abandoned"
 
 
 class FailureCode(str, Enum):
@@ -260,6 +261,7 @@ class FailureCode(str, Enum):
     MERGE_FAILED = "merge_failed"
     INFRA_ERROR = "infra_error"
     PREFLIGHT_FAILED = "preflight_failed"
+    ABANDONED = "abandoned"
 
 
 @dataclass(frozen=True)
