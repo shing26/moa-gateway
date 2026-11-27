@@ -37,6 +37,11 @@ from apps.code_review_pipeline.delivery.feishu_approval import (
     write_decision,
 )
 from apps.code_review_pipeline.merge_executor import MergeExecutor
+from apps.code_review_pipeline.merge_state import (
+    InvalidMergeTransition,
+    MergeState,
+)
+from apps.code_review_pipeline.merge_store import MergeNotFound
 from apps.code_review_pipeline.notifications.merge_notifier import MergeNotifier
 from apps.code_review_pipeline.routing.github_provider import build_github_client
 
@@ -811,6 +816,13 @@ async def _handle_merge_approval(
     )
     try:
         outcome = await executor.execute(hitl_id, action, operator_id)
+    except (InvalidMergeTransition, MergeNotFound) as exc:
+        # 卡片已失效：CI 转红 / 别人先点了 / PR 已合并。门禁没有被绕过（状态机
+        # 拒绝了动作），但用户看到的不该是"合并执行失败"的 500。这里只读状态、
+        # 改卡和回话，绝不写决策审计，也不做任何状态迁移。
+        return await _handle_stale_merge_approval(
+            exc, hitl_id=hitl_id, session_id=session_id, trace_id=trace_id
+        )
     except Exception as exc:  # noqa: BLE001 - 合并执行：任意失败记录并回告用户，审批结果不能静默
         logger.exception("merge approval execution failed: %s", exc)
         await _safe_send(session_id, f"⚠️ 合并执行失败：{exc}", trace_id)
@@ -864,6 +876,64 @@ async def _handle_merge_approval(
         "status": outcome.status,
         "message": outcome.message,
     })
+
+
+async def _handle_stale_merge_approval(
+    exc: InvalidMergeTransition | MergeNotFound,
+    *,
+    hitl_id: str,
+    session_id: str,
+    trace_id: str,
+) -> JSONResponse:
+    """失效审批卡回调：回 409，并把卡片改成终态（展示层失败不影响结论）。
+
+    ``InvalidMergeTransition.state`` 是状态机拒绝动作时看到的**真实状态**，文案
+    优先用它；``MergeNotFound`` 没有状态，记录也读不到时用 ``missing``。
+    """
+    identity = _parse_merge_identity(hitl_id)
+    record = None
+    if identity is not None:
+        try:
+            record = merge_store.get(identity)
+        except Exception:  # noqa: BLE001 - 读记录失败只告警，409 结论不变
+            logger.warning(
+                "failed to read merge record for stale callback %s",
+                hitl_id,
+                exc_info=True,
+            )
+
+    if isinstance(exc, InvalidMergeTransition):
+        state = getattr(exc.state, "value", str(exc.state))
+    elif record is not None:
+        state = record.state
+    else:
+        state = "missing"
+
+    already_merged = record is not None and record.state == MergeState.MERGED.value
+    if already_merged:
+        message = "✅ 该 PR 已合并"
+        resolved, detail = "merged", record.merged_sha or record.head_sha
+    else:
+        message = f"⚠️ 该审批卡已失效（当前状态：{state}）"
+        resolved, detail = "failed", f"审批卡已失效（当前状态：{state}）"
+
+    if record is not None:
+        try:
+            await _merge_notifier().send_resolved_card(record, resolved, detail)
+        except Exception:  # noqa: BLE001 - 改卡是展示层：失败只告警，不改变 409
+            logger.warning(
+                "failed to resolve stale merge card for %s", hitl_id, exc_info=True
+            )
+
+    try:
+        await _safe_send(session_id, message, trace_id)
+    except Exception:  # noqa: BLE001 - 回话失败只告警，不改变 409
+        logger.warning(
+            "failed to notify stale merge callback for %s", hitl_id, exc_info=True
+        )
+
+    logger.info("merge approval stale: %s state=%s", hitl_id, state)
+    return JSONResponse({"status": "stale", "state": state}, status_code=409)
 
 
 def _merge_notifier() -> MergeNotifier:

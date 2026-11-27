@@ -177,7 +177,12 @@ class MergeNotifier:
         triage: CiTriageReport | None = None,
         pr_details: dict[str, Any] | None = None,
     ) -> bool:
-        """CI 红时发失败信息卡片（列出失败的 job 名与链接）。"""
+        """CI 红时发失败信息卡片（列出失败的 job 名与链接）。
+
+        如果已经发过带按钮的审批卡（``record.card_message_id`` 非空），先把那张
+        卡**就地**改成无按钮终态：CI 转红之后，旧卡上的"批准"是一个点了必然被
+        状态机拒绝的承诺。改卡失败才退回"再发一张诊断卡"，保证人至少知道 CI 红了。
+        """
         if not self._default_target:
             logger.info(
                 "no merge channel configured (CODE_REVIEW_MERGE_CHANNEL); "
@@ -191,12 +196,55 @@ class MergeNotifier:
             logger.warning("feishu card sender not initialized; skip CI failure card")
             return False
 
+        message_id = record.card_message_id
+        if message_id:
+            names = self._ci_failure_job_names(record, triage)
+            detail = (
+                f"CI 未通过（{', '.join(names)}）" if names else "CI 未通过"
+            )
+            card = self._build_resolved_card(record, "failed", detail)
+            card.target = self._default_target
+            try:
+                updated = bool(await card_sender.update_card(message_id, card))
+            except Exception:  # noqa: BLE001 - 改卡是展示层：失败降级发新卡，不阻塞轮询
+                logger.warning(
+                    "CI failure card update failed for %s; sending a new card",
+                    record.task_key,
+                    exc_info=True,
+                )
+                updated = False
+            if updated:
+                logger.info(
+                    "CI failure card updated in place for %s", record.task_key
+                )
+                return True
+            logger.warning(
+                "CI failure card not updated for %s; falling back to a new card",
+                record.task_key,
+            )
+
         card = self._build_ci_failure_card(record, triage, pr_details)
         card.target = self._default_target
         ok = await card_sender.send_card(card)
         if ok:
             logger.info("CI failure card sent for %s", record.task_key)
         return ok
+
+    @staticmethod
+    def _ci_failure_job_names(
+        record: MergeRecord, triage: CiTriageReport | None
+    ) -> list[str]:
+        """CI 失败 job 名：优先 triage，退回记录里的 checks，最多 3 个。"""
+        names: list[str] = []
+        if triage is not None:
+            names = [job.name.strip() for job in triage.jobs if job.name.strip()]
+        if not names:
+            names = [
+                str(check.get("name", "")).strip()
+                for check in record.ci_failing
+                if str(check.get("name", "")).strip()
+            ]
+        return names[:3]
 
     async def send_digest_card(
         self,
