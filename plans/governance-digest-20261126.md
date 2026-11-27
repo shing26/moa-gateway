@@ -436,3 +436,30 @@ D2.7 卡片围栏安全；澄清 D2.3 降级路径允许 PR 上下文；新增 D
 触发原因：v1.3 遗留两项 P2——正文自带三反引号会提前闭合围栏；`triage=None` +
 `pr_details` 非空时头部与 D2.3 字面不符。实现与裁决分离，由独立 Implementer
 在独立分支完成，独立 Verifier 重跑后签收。
+
+**v1.4 合并**：PR #166 → `main`，merge commit
+`0b94743bad4cf7a41909dd872623ebf0209d1cbd`（分支
+`fix/ci-card-fence-v14-20261127`，验收 HEAD
+`f67520f94d1a53d12a3bd2dd17f3217176e1f643`）。合并前同步 `main` 的
+design-preview 文档，代码相对验收 HEAD 零 diff。
+
+**v1.4 验收证据**：独立 Verifier `ACCEPT`（基线 `d2998d9`，被审 `f67520f`）。
+V1 `119 passed`；V2 `2454 passed, 6 skipped`；V3 `All checks passed!`。
+D2-A14…A16 全 PASS，P0/P1 无。GitHub CI：`test` / `integration` 绿，
+`docker` skipped。实现方首跑 V2 的失败（`test_triage_runner.py::
+test_run_triage_task_uses_finish_observation`，`git add` 返回 128）经 Verifier
+单测复跑 2 次通过，调用链不含本次改动，判定为环境抖动。
+
+**v1.4 运行时**：2026-11-27 18:59（+08），主工作区到 `0b94743`，网关与 merge
+worker 重启后 `/healthz` 为 `healthy`、`merge_worker: running`。生产渲染路径
+验证：正文含三/四反引号时，markdown 中以 ≥3 反引号开头的行恰为 2（首尾围栏）；
+去 U+200B 后与 `agent_output[:2000]` 逐字节一致；2000 字符边界切断裂
+（1997 字符 + 4 反引号 → 截断后 3 反引号）同样被中和。
+
+**v1.3 两项 P2 关闭**：围栏提前闭合由 D2.7 关闭；`triage=None` + `pr_details`
+的契约歧义由 D2.3 澄清与 D2-A16 关闭。
+
+**v1.4 遗留观察（P2，不阻塞）**：
+
+- 若原文本身含 U+200B，去零宽字符无法还原原文；CI 日志出现零宽空格概率极低，
+  属契约指定机制的固有边界。
