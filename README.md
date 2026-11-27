@@ -463,7 +463,7 @@ python scripts/redteam/run_redteam.py         # 200 条对抗用例，零网络�
 python scripts/compare_rerank.py              # 精排 off/on 前后对比（gold set 23 条）
 ```
 
-GitHub Actions CI（Python 3.12）依次执行：pytest → ruff → 防源码补丁脚本 → bandit → eval offline → 红队基线 → 导入自检，全链路零网络；Docker 镜像（`python:3.12-slim` + uv）仅在打 tag 时构建。
+GitHub Actions CI（Python 3.12）依次执行：pytest → ruff → 防源码补丁脚本 → bandit → eval offline → 红队基线 → 导入自检，全链路零网络；Docker 镜像（`python:3.12-slim` + uv）在切版本 tag 时构建并推送；未打 tag 时可在 Actions 页面手动触发 CI 工作流并勾选 run_docker，仅构建不推送，用以验证 Dockerfile 与依赖锁依然可构建。
 
 ---
 
