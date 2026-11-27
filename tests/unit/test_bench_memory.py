@@ -90,3 +90,9 @@ def test_truncate_observation_keep_tail_preserves_the_failure_summary() -> None:
     assert "FAILED tests/x.py::test_y" in out
     assert "中间省略" in out
     assert len(out) < len(long_text)
+
+
+def test_memory_policy_new_defaults() -> None:
+    policy = MemoryPolicy()
+    assert policy.budget_nudge_ratio == 0.75
+    assert policy.mark_repeated_reads is True

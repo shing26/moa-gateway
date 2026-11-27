@@ -406,3 +406,199 @@ async def test_parallel_tool_calls_stop_at_the_hard_step_budget(
     assert (tmp_path / "one.txt").is_file()
     assert (tmp_path / "two.txt").is_file()
     assert not (tmp_path / "three.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_normal_budget_shows_cycle_line_in_model_message_only(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.txt").write_text("alpha content\n")
+    llm = FakeLLM(
+        [
+            [_call("1", "read_file", {"path": str(tmp_path / "a.txt")})],
+            [],
+        ]
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+    slot: dict[str, object] = {}
+    result = await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read a.txt"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=10,
+        max_tokens=1000,
+        memory_policy=MemoryPolicy(),
+        slot=slot,
+    )
+
+    # Model-facing tool message carries the cycle line with right numbers.
+    last_messages = llm.requests[-1]["messages"]
+    tool_messages = [
+        m for m in last_messages if m.get("role") == "tool"
+    ]
+    assert tool_messages, "expected at least one tool message"
+    cycle_lines = [c for c in tool_messages[0]["content"].splitlines() if c.startswith("[cycle")]
+    assert len(cycle_lines) == 1
+    assert cycle_lines[0] == "[cycle 1/10 - tokens 15/1000 - 1 percent used]"
+
+    # Step observation has NO cycle line (byte-identical evidence).
+    assert result.steps
+    step_content = result.steps[0].observation
+    assert not any(line.startswith("[cycle") for line in step_content.splitlines())
+    assert not any(line.startswith("[repeat") for line in step_content.splitlines())
+
+
+@pytest.mark.asyncio
+async def test_budget_over_nudge_shows_strong_warning_and_slot(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "b.txt").write_text("beta content\n")
+    llm = FakeLLM(
+        [
+            [_call("1", "read_file", {"path": str(tmp_path / "b.txt")})],
+            [],
+        ]
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+    slot: dict[str, object] = {}
+    # Tiny max_tokens so usage (15 tokens) is at/above 75% of max_tokens.
+    await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read b.txt"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=10,
+        max_tokens=20,
+        memory_policy=MemoryPolicy(budget_nudge_ratio=0.75),
+        slot=slot,
+    )
+
+    last_messages = llm.requests[-1]["messages"]
+    tool_messages = [m for m in last_messages if m.get("role") == "tool"]
+    assert tool_messages
+    content = tool_messages[0]["content"]
+    assert "Budget running low: stop reading, move to editing and verification now." in content
+    assert slot.get("loop_budget_nudges") == 1
+
+
+@pytest.mark.asyncio
+async def test_identical_read_gets_repeat_marker_different_offset_does_not(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "c.txt").write_text("line1\nline2\nline3\n")
+    c_path = str(tmp_path / "c.txt")
+    llm = FakeLLM(
+        [
+            [_call("1", "read_file", {"path": c_path, "offset": 0, "limit": 5})],
+            [_call("2", "read_file", {"path": c_path, "offset": 0, "limit": 5})],
+            [_call("3", "read_file", {"path": c_path, "offset": 5, "limit": 5})],
+            [],
+        ]
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+    slot: dict[str, object] = {}
+    await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read c.txt twice then page"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=10,
+        max_tokens=100000,
+        memory_policy=MemoryPolicy(),
+        slot=slot,
+    )
+
+    last_messages = llm.requests[-1]["messages"]
+    tool_messages = [m for m in last_messages if m.get("role") == "tool"]
+    assert len(tool_messages) == 3
+    # First read: no marker.
+    assert "[repeat" not in tool_messages[0]["content"]
+    # Second identical read: repeat marker #2.
+    assert "[repeat #2 of this exact call - the content is already in your" in tool_messages[1]["content"]
+    # Third read (paging, different offset): no marker.
+    assert "[repeat" not in tool_messages[2]["content"]
+    assert slot.get("loop_repeat_marks") == 1
+
+
+@pytest.mark.asyncio
+async def test_mark_repeated_reads_false_no_marker(tmp_path: Path) -> None:
+    (tmp_path / "d.txt").write_text("delta\n")
+    d_path = str(tmp_path / "d.txt")
+    llm = FakeLLM(
+        [
+            [_call("1", "read_file", {"path": d_path})],
+            [_call("2", "read_file", {"path": d_path})],
+            [],
+        ]
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+    slot: dict[str, object] = {}
+    await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read d.txt twice"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=10,
+        max_tokens=100000,
+        memory_policy=MemoryPolicy(mark_repeated_reads=False),
+        slot=slot,
+    )
+
+    last_messages = llm.requests[-1]["messages"]
+    tool_messages = [m for m in last_messages if m.get("role") == "tool"]
+    assert len(tool_messages) == 2
+    assert "[repeat" not in tool_messages[1]["content"]
+    assert slot.get("loop_repeat_marks") in (None, 0)
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_zero_cycle_line_has_no_token_part(tmp_path: Path) -> None:
+    (tmp_path / "e.txt").write_text("epsilon\n")
+    llm = FakeLLM(
+        [
+            [_call("1", "read_file", {"path": str(tmp_path / "e.txt")})],
+            [],
+        ]
+    )
+    tools = build_toolset(
+        workspace=tmp_path,
+        verify_command=(),
+        names=("read_file",),
+    )
+    await execute_tool_loop(
+        llm=llm,
+        messages=[{"role": "user", "content": "read e.txt"}],
+        tools=tools,
+        workspace=tmp_path,
+        agent_name="test-implementer",
+        max_steps=5,
+        max_tokens=0,
+        memory_policy=MemoryPolicy(),
+    )
+
+    last_messages = llm.requests[-1]["messages"]
+    tool_messages = [m for m in last_messages if m.get("role") == "tool"]
+    assert tool_messages
+    cycle_lines = [c for c in tool_messages[0]["content"].splitlines() if c.startswith("[cycle")]
+    assert cycle_lines == ["[cycle 1/5]"]

@@ -224,6 +224,7 @@ async def execute_tool_loop(
     usage = ToolLoopUsage()
     current_messages = list(messages)
     executed_tool_calls = 0
+    repeat_counts: dict[tuple, int] = {}
     def request_tokens() -> int | None:
         """本次调用的 completion 上限，**不是**剩余总预算。
 
@@ -314,6 +315,7 @@ async def execute_tool_loop(
                 started = time.monotonic()
                 name = str((call.get("function") or {}).get("name", ""))
                 arguments: dict[str, Any] = {}
+                arguments_ok = False
                 slot["tool_calls_total"] = int(slot.get("tool_calls_total", 0) or 0) + 1
                 tool = tools.get(name)
                 outcome_kind: Literal["ok", "rejected", "failed", ""] = "failed"
@@ -334,6 +336,7 @@ async def execute_tool_loop(
                             slot.get("tool_arg_rejections_total", 0) or 0
                         ) + 1
                     else:
+                        arguments_ok = True
                         outcome = await (
                             call_workspace_tool(
                                 tool,
@@ -380,6 +383,68 @@ async def execute_tool_loop(
                     policy,
                     keep_tail=name == "run_tests",
                 )
+                # 重复读标记：对 read_file / search，精确相同参数的重复调用
+                # 会在回给模型的观察里加一行提示，不干扰 steps 的完整记录。
+                if (
+                    policy.mark_repeated_reads
+                    and arguments_ok
+                    and name in ("read_file", "search")
+                ):
+                    if name == "read_file":
+                        repeat_key = (
+                            "read_file",
+                            arguments.get("path"),
+                            arguments.get("offset"),
+                            arguments.get("limit"),
+                        )
+                    else:
+                        repeat_key = (
+                            "search",
+                            arguments.get("path"),
+                            arguments.get("pattern"),
+                        )
+                    count = repeat_counts.get(repeat_key, 0) + 1
+                    repeat_counts[repeat_key] = count
+                    if count >= 2:
+                        model_observation = (
+                            "[repeat #"
+                            + str(count)
+                            + " of this exact call - the content is already in your"
+                            " context; do not read it again]\n"
+                            + model_observation
+                        )
+                        slot["loop_repeat_marks"] = int(
+                            slot.get("loop_repeat_marks", 0) or 0
+                        ) + 1
+                # 预算行：每条模型观察都带上本轮进度与剩余预算。
+                budget_line = "cycle " + str(executed_tool_calls + 1)
+                if max_tokens > 0:
+                    budget_line += (
+                        "/"
+                        + str(max_steps)
+                        + " - tokens "
+                        + str(usage.total_tokens)
+                        + "/"
+                        + str(max_tokens)
+                        + " - "
+                        + str(usage.total_tokens * 100 // max_tokens)
+                        + " percent used"
+                    )
+                else:
+                    budget_line += "/" + str(max_steps)
+                model_observation += "\n[" + budget_line + "]"
+                if (
+                    max_tokens > 0
+                    and usage.total_tokens * 100 // max_tokens
+                    >= int(policy.budget_nudge_ratio * 100)
+                ):
+                    model_observation += (
+                        "\nBudget running low: stop reading, move to editing and"
+                        " verification now."
+                    )
+                    slot["loop_budget_nudges"] = int(
+                        slot.get("loop_budget_nudges", 0) or 0
+                    ) + 1
                 result.messages.append(
                     {
                         "role": "tool",
