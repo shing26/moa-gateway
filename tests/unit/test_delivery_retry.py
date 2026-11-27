@@ -363,6 +363,27 @@ def test_retry_uses_the_delivery_run_lock(tmp_path: Path) -> None:
     assert lock_path.exists()
 
 
+def test_retry_refuses_abandoned_run(tmp_path: Path) -> None:
+    """T10：abandoned 不在 RETRY_STATES 里，retry 必须 exit 2 且不新开单。"""
+    settings = _settings(tmp_path)
+    store = _FakeStore(_run(DeliveryRunState.ABANDONED))
+
+    outcome = asyncio.run(
+        retry_failed_run(
+            "run-1",
+            store=store,
+            settings=settings,
+            flow_factory=_forbidden_factory,
+        )
+    )
+
+    assert outcome.exit_code == 2
+    assert outcome.refused is True
+    assert outcome.run is None
+    assert "abandoned" in outcome.reason
+    assert store.saved == []
+
+
 def test_retry_maps_failed_new_run_to_exit_1(tmp_path: Path) -> None:
     parent = _run()
     store = _FakeStore(parent)

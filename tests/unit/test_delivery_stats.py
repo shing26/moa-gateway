@@ -258,8 +258,10 @@ def test_t5_json_shape_is_stable_and_null_safe(
         "by_state",
         "delivered",
         "failed",
+        "abandoned",
         "in_flight",
         "completion_rate",
+        "success_rate",
         "tokens",
         "duration",
         "failure_codes",
@@ -334,3 +336,30 @@ def test_t7_collect_and_format_do_not_write_files(tmp_path: Path) -> None:
         for path in tmp_path.iterdir()
     }
     assert after == before
+
+
+def test_t11_abandoned_is_its_own_bucket_and_does_not_change_success_rate(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, "merged.json", _record("merged"))
+    _write(
+        tmp_path,
+        "failed.json",
+        _record(
+            "failed",
+            failure={"code": "verify_failed", "message": "x"},
+        ),
+    )
+    _write(tmp_path, "abandoned-1.json", _record("abandoned"))
+    _write(tmp_path, "abandoned-2.json", _record("abandoned"))
+
+    stats = collect_stats(tmp_path)
+
+    assert stats["abandoned"] == 2
+    assert stats["failed"] == 1
+    assert stats["in_flight"] == 0
+    assert stats["by_state"]["abandoned"] == 2
+    # 分母仍是 delivered + failed；abandon 既不加分也不拉低。
+    assert stats["completion_rate"] == 0.5
+    assert stats["success_rate"] == 0.5
+    assert "abandoned   : 2" in format_stats(stats)

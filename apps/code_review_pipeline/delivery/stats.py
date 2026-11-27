@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 DELIVERED_STATE = "merged"
+ABANDONED_STATE = "abandoned"
 FAILED_STATES = frozenset(
     {"failed", "budget_exhausted", "rejected", "needs_human"}
 )
@@ -86,6 +87,11 @@ def collect_stats(
 
     Unreadable records (invalid JSON, missing state, or a missing/unparseable
     ``started_at``) are counted in ``unreadable`` and never silently dropped.
+
+    ``abandoned`` is its own terminal bucket: it is neither delivered nor
+    failed and never counts as in flight.  The success rate (``success_rate`` /
+    the backward-compatible ``completion_rate``) keeps ``delivered + failed``
+    as its denominator, so abandoning a run neither inflates nor depresses it.
     """
     root = Path(directory)
     paths = sorted(root.glob("*.json")) if root.is_dir() else []
@@ -94,6 +100,7 @@ def collect_stats(
     unreadable = 0
     delivered = 0
     failed = 0
+    abandoned = 0
     in_flight = 0
     by_state: Counter[str] = Counter()
     failure_codes: Counter[str | None] = Counter()
@@ -130,10 +137,13 @@ def collect_stats(
         by_state[state] += 1
         is_delivered = state == DELIVERED_STATE
         is_failed = state in FAILED_STATES
+        is_abandoned = state == ABANDONED_STATE
         if is_delivered:
             delivered += 1
         elif is_failed:
             failed += 1
+        elif is_abandoned:
+            abandoned += 1
         else:
             in_flight += 1
 
@@ -183,8 +193,10 @@ def collect_stats(
         "by_state": {state: by_state[state] for state in sorted(by_state)},
         "delivered": delivered,
         "failed": failed,
+        "abandoned": abandoned,
         "in_flight": in_flight,
         "completion_rate": average(delivered),
+        "success_rate": average(delivered),
         "tokens": {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -243,6 +255,7 @@ def format_stats(
             f"unreadable  : {stats['unreadable']}",
             f"delivered   : {stats['delivered']}",
             f"failed      : {stats['failed']}",
+            f"abandoned   : {stats['abandoned']}",
             f"in_flight   : {stats['in_flight']}",
             f"completion  : {_rate(stats['completion_rate'])}",
             "",

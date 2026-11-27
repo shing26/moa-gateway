@@ -135,6 +135,16 @@ async def resume_run(
 ) -> ResumeOutcome:
     """按记录状态分派：失败续跑 / 门禁重入 / 合并对齐 / 拒绝。"""
     run = store.load(run_id)
+    if run.state is DeliveryRunState.ABANDONED:
+        return ResumeOutcome(
+            run=run,
+            exit_code=2,
+            refused=True,
+            reason=(
+                "run state is abandoned; abandoned is terminal and resume "
+                "will not re-enter it"
+            ),
+        )
     if run.state in RETRY_STATES:
         return await retry_failed_run(
             run_id,

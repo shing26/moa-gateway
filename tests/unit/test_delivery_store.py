@@ -474,6 +474,50 @@ async def test_sync_from_merge_keeps_terminal_run_unchanged_when_merged(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "merge_state",
+    [MergeState.MERGED, MergeState.SUPERSEDED],
+)
+async def test_abandoned_run_is_not_reopened_by_sync_or_reconcile(
+    monkeypatch,
+    tmp_path: Path,
+    merge_state: MergeState,
+) -> None:
+    """T9：abandoned 是存储层终态，合并轮询不得把它拉回 merged/needs_human。"""
+    store = DeliveryRunStore(tmp_path)
+    record = _merge_record(
+        state=merge_state.value,
+        merged_sha="c" * 40 if merge_state is MergeState.MERGED else "",
+    )
+    run = replace(
+        _pushed_run(state=DeliveryRunState.ABANDONED),
+        merge=record,
+    )
+    await store.save(run)
+
+    entries = []
+
+    async def capture(entry):
+        entries.append(entry)
+
+    monkeypatch.setattr(
+        "apps.code_review_pipeline.delivery.audit.record_audit", capture
+    )
+    audit = WalDeliveryAudit()
+
+    synced = await store.sync(run, record, audit=audit)
+    assert synced is run
+    assert synced.state is DeliveryRunState.ABANDONED
+
+    merges = MergeStore()
+    merges.save(record)
+    reconciled = await store.reconcile(store.load("run-1"), merges, audit=audit)
+    assert reconciled.state is DeliveryRunState.ABANDONED
+    assert store.load("run-1").state is DeliveryRunState.ABANDONED
+    assert entries == []
+
+
+@pytest.mark.asyncio
 async def test_reconcile_persists_latest_merge_record(tmp_path: Path) -> None:
     store = DeliveryRunStore(tmp_path)
     run = _pushed_run()

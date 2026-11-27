@@ -64,6 +64,7 @@ _TERMINAL_RUN_STATES = frozenset(
         DeliveryRunState.NEEDS_HUMAN,
         DeliveryRunState.BUDGET_EXHAUSTED,
         DeliveryRunState.FAILED,
+        DeliveryRunState.ABANDONED,
     }
 )
 

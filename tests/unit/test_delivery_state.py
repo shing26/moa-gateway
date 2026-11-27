@@ -25,6 +25,8 @@ from apps.code_review_pipeline.delivery.state import (
         (DeliveryRunState.WAITING_CI, DeliveryRunState.AWAITING_MERGE_APPROVAL),
         (DeliveryRunState.AWAITING_MERGE_APPROVAL, DeliveryRunState.MERGING),
         (DeliveryRunState.MERGING, DeliveryRunState.MERGED),
+        (DeliveryRunState.WAITING_CI, DeliveryRunState.ABANDONED),
+        (DeliveryRunState.NEEDS_HUMAN, DeliveryRunState.ABANDONED),
     ],
 )
 def test_legal_transitions(
@@ -34,7 +36,7 @@ def test_legal_transitions(
     assert target in ALLOWED_TRANSITIONS[current]
 
 
-def test_terminal_states_do_not_transition() -> None:
+def test_terminal_states_allow_only_abandon() -> None:
     for state in (
         DeliveryRunState.MERGED,
         DeliveryRunState.REJECTED,
@@ -42,7 +44,52 @@ def test_terminal_states_do_not_transition() -> None:
         DeliveryRunState.BUDGET_EXHAUSTED,
         DeliveryRunState.FAILED,
     ):
-        assert ALLOWED_TRANSITIONS[state] == frozenset()
+        expected = (
+            frozenset()
+            if state in {DeliveryRunState.MERGED, DeliveryRunState.REJECTED}
+            else frozenset({DeliveryRunState.ABANDONED})
+        )
+        assert ALLOWED_TRANSITIONS[state] == expected
+    assert ALLOWED_TRANSITIONS[DeliveryRunState.ABANDONED] == frozenset()
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        DeliveryRunState.PREPARING,
+        DeliveryRunState.IMPLEMENTING,
+        DeliveryRunState.CHECKING,
+        DeliveryRunState.VERIFIER_REVIEW,
+        DeliveryRunState.REVISING,
+        DeliveryRunState.READY_FOR_PUSH_APPROVAL,
+        DeliveryRunState.PUSHING,
+        DeliveryRunState.WAITING_CI,
+        DeliveryRunState.AWAITING_MERGE_APPROVAL,
+        DeliveryRunState.NEEDS_HUMAN,
+        DeliveryRunState.FAILED,
+        DeliveryRunState.BUDGET_EXHAUSTED,
+    ],
+)
+def test_abandon_is_legal_from_contract_states(
+    state: DeliveryRunState,
+) -> None:
+    assert_transition(state, DeliveryRunState.ABANDONED)
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        DeliveryRunState.MERGING,
+        DeliveryRunState.MERGED,
+        DeliveryRunState.REJECTED,
+        DeliveryRunState.ABANDONED,
+    ],
+)
+def test_abandon_is_refused_from_closed_states(
+    state: DeliveryRunState,
+) -> None:
+    with pytest.raises(InvalidDeliveryTransition):
+        assert_transition(state, DeliveryRunState.ABANDONED)
 
 
 def test_illegal_transition_names_both_states() -> None:

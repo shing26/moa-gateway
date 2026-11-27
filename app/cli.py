@@ -987,6 +987,74 @@ def cmd_delivery_resume(args: argparse.Namespace) -> int:
     return outcome.exit_code
 
 
+def cmd_delivery_abandon(args: argparse.Namespace) -> int:
+    """人工终结一条交付记录；只写本地记录与合并通道，不碰任何 GitHub 远端。"""
+    from app.config import settings
+    from apps.code_review_pipeline.delivery.abandon import abandon_run
+    from apps.code_review_pipeline.delivery.run_store import DeliveryRunStore
+    from apps.code_review_pipeline.merge_store import (
+        PostgresMergeStore,
+        build_merge_store,
+    )
+
+    store = DeliveryRunStore(settings.delivery_run_record_dir)
+    try:
+        run = store.load(args.run_id)
+    except FileNotFoundError:
+        print(f"delivery run not found: {args.run_id}", file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    # 不碰远端，因此不要求 GITHUB_TOKEN。只有已有 PR（可能有一张审批卡）时
+    # 才需要共享 MergeStore；非 Postgres 实现不能用（契约 R4）。
+    merge_store = None
+    if run.push is not None and args.reason.strip():
+        try:
+            candidate = build_merge_store()
+        except Exception:  # noqa: BLE001 - 拿不到共享存储时由 abandon_run 统一拒绝
+            candidate = None
+        if isinstance(candidate, PostgresMergeStore):
+            merge_store = candidate
+
+    async def execute():
+        try:
+            return await abandon_run(
+                args.run_id,
+                store=store,
+                merge_store=merge_store,
+                settings=settings,
+                reason=args.reason,
+                operator=getattr(args, "operator", ""),
+            )
+        finally:
+            if merge_store is not None:
+                close = getattr(merge_store, "close", None)
+                if close is not None:
+                    await close()
+
+    outcome = asyncio.run(execute())
+    if getattr(args, "json", False):
+        print(json.dumps(outcome.to_dict(), ensure_ascii=False, indent=2))
+    elif outcome.run is not None and outcome.exit_code in {0, 1}:
+        run = outcome.run
+        print(f"run_id    : {run.run_id}")
+        print(f"state     : {run.state.value}")
+        print(
+            "failure   : "
+            f"{run.failure.to_dict() if run.failure is not None else '-'}"
+        )
+        if run.push is not None:
+            print(f"pr        : {run.push.pull_request.url}")
+        print(f"merge_record: {outcome.merge_record}")
+        if outcome.already:
+            print("already abandoned")
+    if outcome.reason:
+        print(outcome.reason, file=sys.stderr)
+    return outcome.exit_code
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m app.cli", description="moa-gateway 操作入口"
@@ -1078,6 +1146,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     delivery_resume.add_argument("--run-id", required=True)
     delivery_resume.set_defaults(func=cmd_delivery_resume)
+
+    delivery_abandon = delivery_sub.add_parser(
+        "abandon",
+        help="人工终结交付记录（终态；不删证据、不碰远端）",
+    )
+    delivery_abandon.add_argument("--run-id", required=True)
+    delivery_abandon.add_argument("--reason", required=True)
+    delivery_abandon.add_argument("--operator", default="")
+    delivery_abandon.add_argument("--json", action="store_true")
+    delivery_abandon.set_defaults(func=cmd_delivery_abandon)
 
     delivery_preflight = delivery_sub.add_parser(
         "preflight",
