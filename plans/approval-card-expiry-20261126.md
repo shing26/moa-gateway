@@ -113,4 +113,12 @@ V3  $env:PYTHONPATH='.'; python -m ruff check .
 
 ## 6. 签收记录
 
-（待所有者书面签收）
+**所有者签收**：2026-11-28，用户消息「先补两份签收，再处理 3 条待批与 17 条卡住，
+最后清 eval PR」。原合并前未回填书面签收，本条为事后补录；签收对象是已合并实现。
+
+**合并**：PR #165 → `main`，merge commit
+`41c6746fe4f71dac9e0ce865e6cd12711f5b1875`（分支
+`fix/push-approval-card-expiry-20261127`，2026-11-27 21:27 +08）。
+
+**验收证据**：GitHub CI `test` / `integration` 绿（2m12s / 54s），`docker` skipped。
+2026-11-28 在 main `f255563` 上补签复跑：V1 `63 passed`；V3 `All checks passed!`。
