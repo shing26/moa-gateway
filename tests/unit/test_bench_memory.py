@@ -102,3 +102,10 @@ def test_memory_policy_defaults() -> None:
     assert policy.mark_repeated_reads is True, (
         f"expected mark_repeated_reads == True, got {policy.mark_repeated_reads}"
     )
+
+
+def test_memory_policy_has_max_observation_tokens() -> None:
+    """Regression: MemoryPolicy must expose max_observation_tokens."""
+    policy = MemoryPolicy()
+    assert policy.max_observation_tokens is not None
+    assert policy.max_observation_tokens > 0
