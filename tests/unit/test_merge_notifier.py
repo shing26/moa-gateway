@@ -527,6 +527,86 @@ async def test_d2_a3_none_triage_keeps_legacy_card_exact() -> None:
 
 
 @pytest.mark.asyncio
+async def test_d2_a16_none_triage_with_pr_details_keeps_legacy_body() -> None:
+    record = _make_record(
+        state=MergeState.CI_FAILED.value,
+        ci_state="failure",
+        ci_failing=(
+            {"name": "test", "url": "https://github.com/owner/repo/runs/123"},
+            {"name": "lint", "url": ""},
+        ),
+    )
+    sender = _FakeCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    await notifier.send_ci_failure_card(record, None, _PR_DETAILS)
+
+    text = sender.sent_cards[0].agent_output
+    assert text == (
+        "PR  : #42 feat: enrich approval card\n"
+        "作者: shing26\n"
+        "链接: https://github.com/owner/repo/pull/42\n"
+        "SHA: abc123\n"
+        "CI: failure\n"
+        "\n"
+        "失败的 check:\n"
+        "  - test: https://github.com/owner/repo/runs/123\n"
+        "  - lint"
+    )
+    for marker in ("结论:", "证据:", "先查:"):
+        assert marker not in text
+
+
+@pytest.mark.asyncio
+async def test_d2_a16_none_pr_details_keeps_legacy_card_exact() -> None:
+    record = _make_record(
+        state=MergeState.CI_FAILED.value,
+        ci_state="failure",
+        ci_failing=(
+            {"name": "test", "url": "https://github.com/owner/repo/runs/123"},
+            {"name": "lint", "url": ""},
+        ),
+    )
+    sender = _FakeCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    await notifier.send_ci_failure_card(record, None, None)
+
+    assert sender.sent_cards[0].agent_output == (
+        "PR: owner/repo#42\n"
+        "SHA: abc123\n"
+        "CI: failure\n"
+        "\n"
+        "失败的 check:\n"
+        "  - test: https://github.com/owner/repo/runs/123\n"
+        "  - lint"
+    )
+
+
+@pytest.mark.asyncio
+async def test_d2_a16_unavailable_reason_with_pr_details_allows_pr_header() -> None:
+    record = _make_record(
+        state=MergeState.CI_FAILED.value,
+        ci_state="failure",
+        ci_failing=(
+            {"name": "test", "url": "https://github.com/owner/repo/runs/123"},
+        ),
+    )
+    report = _triage((), unavailable="GitHub Actions: HTTP 403")
+    sender = _FakeCardSender()
+    notifier = MergeNotifier(card_sender=sender, default_target="chat_123")
+
+    await notifier.send_ci_failure_card(record, report, _PR_DETAILS)
+
+    text = sender.sent_cards[0].agent_output
+    assert "PR  : #42 feat: enrich approval card" in text
+    assert "作者: shing26" in text
+    assert "链接: https://github.com/owner/repo/pull/42" in text
+    assert "结论: 日志不可用（GitHub Actions: HTTP 403）" in text
+    assert "  - test: https://github.com/owner/repo/runs/123" in text
+
+
+@pytest.mark.asyncio
 async def test_d2_a4_actions_unavailable_lists_checks() -> None:
     record = _make_record(
         state=MergeState.CI_FAILED.value,
