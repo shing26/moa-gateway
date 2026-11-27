@@ -913,3 +913,86 @@ async def test_d3_a1_card_exceptions_do_not_block_other_cards(
     assert store.get(("owner/repo", 11, "sha-red")).state == (
         MergeState.CI_FAILED.value
     )
+
+
+@pytest.mark.asyncio
+async def test_run_once_sweeps_push_cards_once_after_expiry_refresh(
+    monkeypatch, tmp_path
+) -> None:
+    """T11：一轮只巡检一次，且排在合并卡自愈之后。"""
+    events: list[str] = []
+    calls: list[dict[str, Any]] = []
+
+    async def fake_sweep(**kwargs: Any) -> int:
+        calls.append(kwargs)
+        events.append("sweep")
+        return 0
+
+    monkeypatch.setattr("app.merge_worker.sweep_push_cards", fake_sweep)
+    worker = MergeWorker(
+        store=MergeStore(),
+        github=_OrderedGitHub(events),
+        notifier=_OrderedNotifier(events),  # type: ignore[arg-type]
+        comment_approval=_OrderedCommentApproval(events),
+        heartbeat=_CountingHeartbeat(events),
+        push_registry_dir=tmp_path,
+        push_card_sender=object(),
+        run_state_of=lambda _run_id: "ready_for_push_approval",
+    )
+
+    async def fake_refresh(_sent: set[tuple[str, int, str]]) -> None:
+        events.append("refresh")
+
+    monkeypatch.setattr(worker, "_refresh_expired_approvals", fake_refresh)
+
+    await worker._run_once()  # noqa: SLF001 - 单测直接驱动一轮
+
+    assert len(calls) == 1
+    assert calls[0]["directory"] == tmp_path
+    assert calls[0]["sender"] is worker._push_card_sender  # noqa: SLF001
+    assert events == ["comment", "refresh", "sweep", "heartbeat"]
+
+
+@pytest.mark.asyncio
+async def test_push_card_sweep_failure_does_not_break_poll_heartbeat_or_digest(
+    monkeypatch, caplog
+) -> None:
+    """T11：巡检异常只告警，轮询/心跳/摘要照常执行。"""
+    events: list[str] = []
+    store = MergeStore()
+    store.save(
+        MergeRecord(
+            repo="owner/repo",
+            pr_number=7,
+            head_sha="sha7",
+            state=MergeState.WATCHING.value,
+            bundle_hash="abc123",
+        )
+    )
+
+    async def boom(**_kwargs: Any) -> int:
+        events.append("sweep")
+        raise RuntimeError("sweep boom")
+
+    monkeypatch.setattr("app.merge_worker.sweep_push_cards", boom)
+    heartbeat = _CountingHeartbeat(events)
+    worker = MergeWorker(
+        store=store,
+        github=_OrderedGitHub(events),
+        notifier=_OrderedNotifier(events),  # type: ignore[arg-type]
+        comment_approval=_OrderedCommentApproval(events),
+        heartbeat=heartbeat,
+    )
+
+    async def fake_digest(_now: Any) -> None:
+        events.append("digest")
+
+    monkeypatch.setattr(worker, "_maybe_send_digest", fake_digest)
+
+    with caplog.at_level("WARNING", logger="moa.merge_worker"):
+        await worker._run_once()  # noqa: SLF001 - 单测直接驱动一轮
+
+    assert events == ["ci", "card", "comment", "sweep", "heartbeat", "digest"]
+    assert heartbeat.calls == 1
+    assert "push approval card sweep failed" in caplog.text
+    assert store.list_open()[0].state == MergeState.AWAITING_APPROVAL.value

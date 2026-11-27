@@ -24,11 +24,17 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from app.engine import HitlRequest
+from app.channels.feishu_cards import ApprovalCard
 from app.middleware.auth import insecure_mode_enabled
 from apps.code_review_pipeline.delivery.ports import PushApprovalTimedOut
+from apps.code_review_pipeline.delivery.push_approval_registry import (
+    clear_pending,
+    write_pending,
+)
 
 logger = logging.getLogger("moa.delivery.feishu_approval")
 
@@ -199,6 +205,7 @@ class FeishuPushApprovalPort:
         sleep: Callable[[float], Awaitable[None]] | None = None,
         clock: Callable[[], float] | None = None,
         id_factory: Callable[[], str] | None = None,
+        registry_dir: str | Path | None = None,
     ) -> None:
         self._card_sender = card_sender
         self._session_store = session_store
@@ -209,6 +216,13 @@ class FeishuPushApprovalPort:
         self._sleep = sleep or asyncio.sleep
         self._clock = clock or time.time
         self._id_factory = id_factory or (lambda: uuid.uuid4().hex)
+        # 侧车与运行记录同目录（``<run_dir>/.push-approvals/``）。允许显式注入，
+        # 单测不必碰生产目录。
+        self._registry_dir = (
+            Path(registry_dir)
+            if registry_dir is not None
+            else getattr(run_store, "_directory", None)
+        )
 
     async def request(self, *, run_id: str, bundle: Any) -> Any:
         cfg = self._settings
@@ -304,10 +318,28 @@ class FeishuPushApprovalPort:
         )
         # 先登记再发卡：卡片一到用户就可能点，登记晚一步那次点击会落空。
         self._session_store.store_hitl(hitl_id, hitl)
-        sent = await self._card_sender.send_card(card)
+        send_with_id = getattr(self._card_sender, "send_card_with_id", None)
+        if callable(send_with_id):
+            message_id = str(await send_with_id(card) or "")
+            sent = bool(message_id)
+        else:
+            # 旧 sender 只有 bool 契约：没有 message id 就改不了卡，也就没有
+            # 侧车可写；流程与改造前一致。
+            message_id = ""
+            sent = bool(await self._card_sender.send_card(card))
         if not sent:
             self._session_store.remove_hitl(hitl_id)
             raise PushApprovalUnavailable("飞书推送审批卡发送失败")
+        self._register_pending(
+            hitl_id=hitl_id,
+            run_id=run_id,
+            repo=repo,
+            branch=payload["branch"],
+            message_id=message_id,
+            target=target,
+            created_at=created_at,
+            expires_at=created_at + timeout_s,
+        )
 
         deadline = created_at + timeout_s
         decision: dict[str, Any] | None = None
@@ -317,6 +349,14 @@ class FeishuPushApprovalPort:
                 break
             await self._sleep(self._poll_interval_s)
         if decision is None:
+            await self._resolve_card(
+                message_id,
+                kind="push_resolved_expired",
+                hitl_id=hitl_id,
+                run_id=run_id,
+                target=target,
+            )
+            self._clear_pending(hitl_id)
             self._session_store.remove_hitl(hitl_id)
             logger.warning(
                 "feishu push approval timed out run_id=%s hitl_id=%s", run_id, hitl_id
@@ -329,6 +369,15 @@ class FeishuPushApprovalPort:
         # 回调已原子认领 pending；这里再清一次是幂等的（超时路径也走同一句）。
         self._session_store.remove_hitl(hitl_id)
         if str(decision.get("decision", "")) != "approve":
+            await self._resolve_card(
+                message_id,
+                kind="push_resolved_rejected",
+                hitl_id=hitl_id,
+                run_id=run_id,
+                target=target,
+                approver=str(decision.get("approver", "")),
+            )
+            self._clear_pending(hitl_id)
             logger.info(
                 "feishu push approval rejected run_id=%s reason=%s",
                 run_id,
@@ -338,6 +387,15 @@ class FeishuPushApprovalPort:
         if str(decision.get("bundle_hash", "")) != str(
             getattr(bundle, "bundle_hash", "")
         ):
+            await self._resolve_card(
+                message_id,
+                kind="push_resolved_rejected",
+                hitl_id=hitl_id,
+                run_id=run_id,
+                target=target,
+                approver=str(decision.get("approver", "")),
+            )
+            self._clear_pending(hitl_id)
             logger.warning(
                 "feishu push approval bundle mismatch run_id=%s pending=%s current=%s",
                 run_id,
@@ -345,6 +403,16 @@ class FeishuPushApprovalPort:
                 getattr(bundle, "bundle_hash", ""),
             )
             return None
+
+        await self._resolve_card(
+            message_id,
+            kind="push_resolved_approved",
+            hitl_id=hitl_id,
+            run_id=run_id,
+            target=target,
+            approver=str(decision.get("approver", "")),
+        )
+        self._clear_pending(hitl_id)
 
         from apps.code_review_pipeline.change.pipeline import ChangeApproval
 
@@ -361,3 +429,95 @@ class FeishuPushApprovalPort:
             operator_login=operator_login,
             gate=str(decision.get("gate", "")),
         )
+
+    def _register_pending(
+        self,
+        *,
+        hitl_id: str,
+        run_id: str,
+        repo: str,
+        branch: str,
+        message_id: str,
+        target: str,
+        created_at: float,
+        expires_at: float,
+    ) -> None:
+        """侧车是展示层：写失败只告警，审批照常进行。"""
+        if not message_id or self._registry_dir is None:
+            return
+        try:
+            write_pending(
+                self._registry_dir,
+                hitl_id=hitl_id,
+                run_id=run_id,
+                repo=repo,
+                branch=branch,
+                card_message_id=message_id,
+                target=target,
+                created_at=created_at,
+                expires_at=expires_at,
+            )
+        except Exception:  # noqa: BLE001 - 侧车写失败不能把审批变成不可用
+            logger.warning(
+                "failed to write push approval sidecar run_id=%s hitl_id=%s",
+                run_id,
+                hitl_id,
+                exc_info=True,
+            )
+
+    def _clear_pending(self, hitl_id: str) -> None:
+        if self._registry_dir is None:
+            return
+        try:
+            clear_pending(self._registry_dir, hitl_id)
+        except Exception:  # noqa: BLE001 - 清侧车失败只告警，下一轮巡检会再清
+            logger.warning(
+                "failed to clear push approval sidecar hitl_id=%s",
+                hitl_id,
+                exc_info=True,
+            )
+
+    async def _resolve_card(
+        self,
+        message_id: str,
+        *,
+        kind: str,
+        hitl_id: str,
+        run_id: str,
+        target: str,
+        approver: str = "",
+    ) -> None:
+        """把审批卡改成终态；任何展示层异常都吞掉并记录。"""
+        if not message_id:
+            return
+        update_card = getattr(self._card_sender, "update_card", None)
+        if not callable(update_card):
+            return
+        if kind == "push_resolved_approved":
+            text = f"✅ 已批准推送（审批人 {approver}）"
+        elif kind == "push_resolved_rejected":
+            text = f"🚫 已拒绝推送（审批人 {approver}）"
+        else:
+            text = (
+                "⏰ 审批已失效，未推送；"
+                f"需要继续请重新 delivery resume --run-id {run_id}"
+            )
+        card = ApprovalCard(
+            session_id=f"delivery:{run_id}",
+            trace_id=hitl_id,
+            agent_name="delivery_push_gate",
+            intent=PUSH_APPROVAL_KIND,
+            agent_output=text,
+            channel="feishu",
+            target=target,
+            hitl_kind=kind,
+        )
+        try:
+            await update_card(message_id, card)
+        except Exception:  # noqa: BLE001 - 改卡失败不能改变审批结论
+            logger.warning(
+                "failed to resolve push approval card hitl_id=%s kind=%s",
+                hitl_id,
+                kind,
+                exc_info=True,
+            )

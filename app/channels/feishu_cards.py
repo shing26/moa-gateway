@@ -22,6 +22,9 @@ _HITL_TITLES = {
     "merge_resolved_merged": "Agent Gateway - PR 已合并",
     "merge_resolved_superseded": "Agent Gateway - 审批卡已作废",
     "merge_resolved_failed": "Agent Gateway - 合并失败",
+    "push_resolved_expired": "Agent Gateway - 推送审批已失效",
+    "push_resolved_approved": "Agent Gateway - 推送已批准",
+    "push_resolved_rejected": "Agent Gateway - 推送被拒绝",
 }
 _HITL_TEMPLATES = {
     "failure_escalation": "red",
@@ -30,6 +33,9 @@ _HITL_TEMPLATES = {
     "merge_resolved_merged": "green",
     "merge_resolved_superseded": "orange",
     "merge_resolved_failed": "red",
+    "push_resolved_expired": "orange",
+    "push_resolved_approved": "green",
+    "push_resolved_rejected": "red",
 }
 _HITL_OUTPUT_LABELS = {
     "failure_escalation": "失败详情",
@@ -38,6 +44,9 @@ _HITL_OUTPUT_LABELS = {
     "merge_resolved_merged": "结果",
     "merge_resolved_superseded": "状态",
     "merge_resolved_failed": "状态",
+    "push_resolved_expired": "状态",
+    "push_resolved_approved": "结果",
+    "push_resolved_rejected": "结果",
 }
 # 只有真的接了审批闭环的卡片才该有按钮。"notification" 用于**没有审批落地**的链路
 # （如 PR 审查报告）：那条路径从不 store_hitl，渲染审批按钮等于承诺一个点了必然
@@ -50,6 +59,9 @@ _NO_ACTION_KINDS = frozenset(
         "merge_resolved_merged",
         "merge_resolved_superseded",
         "merge_resolved_failed",
+        "push_resolved_expired",
+        "push_resolved_approved",
+        "push_resolved_rejected",
     }
 )
 
