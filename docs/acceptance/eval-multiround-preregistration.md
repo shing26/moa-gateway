@@ -25,6 +25,9 @@
 用例语料、模型快照、环境覆盖在开跑前冻结；运行期间不得修改。`eval/l0.py` 的判据
 同样冻结。
 
+> **修订 A1（2026-11-28）**：「模型」这一行还隐含一个未被冻结的前提——不得有降级链。
+> 该前提已显式钉进 `ENV_OVERRIDES`（`LLM_FALLBACK_MODELS=""`），见 §10。
+
 ## 3. 执行顺序
 
 固定为：
@@ -119,3 +122,29 @@
 - **不含真实运行**：本文件与仪器是一次性交付物，开跑是另行批准的独立动作；
 - 不修改 `eval/l0.py` 判据、用例语料、模型/环境快照；
 - 不宣称任何当前通过率。
+
+## 10. 修订记录（amendments）
+
+### A1：模型臂必须无降级链（2026-11-28）
+
+**发现的缺陷**：`ENV_OVERRIDES` 冻结了 `CHANGE_AGENT_MODEL`，但 `app/cli.py` 是用
+`LLMConfig.from_env("LLM")` 组配置、只覆盖 `model`，所以实际生效的降级链是
+`LLM_FALLBACK_MODELS`（`CHANGE_AGENT_FALLBACK_MODELS` 在代码里没有任何读取方）。
+主模型 429 时，`app/agents/provider.py:263` 会静默换到 minimax/lightning 继续跑，
+而报告里仍写冻结模型名——臂的标签与实际执行不一致。
+
+**证据**（2026-11-28 03:45 起的 K=3 第二批，第一例 `biz-050`）：
+
+- 641.4s、115 次 LLM 调用、1,048,253 prompt tokens，终态 `budget_exhausted`；
+- 该例日志 92 次 429；`nvidia/nemotron-3.5-super` 失败 63 次，
+  `minimaxai/minimax-m3.1-flash` 被拉起 29 次。
+
+**修订**：`ENV_OVERRIDES` 增加 `LLM_FALLBACK_MODELS=""`，并加回归测试
+（父环境给非空值时必须被钉空，且 `LLMConfig.from_env("LLM").fallback_models == []`）。
+
+**适用范围**：下一次 K=3（v1.5）起。此前的两次起跑均已整批 `abandoned`，不产生任何
+进入统计的行；本修订不追溯修改任何已有读数。
+
+**副作用（必须如实写进报告）**：没有降级链后，配额压力会直接表现为
+`infra_error` 而不是被另一个模型悄悄吸收。§4 的排除规则与「infra 重跑一次」条款
+不变，但 `excluded` 计数预计会上升。

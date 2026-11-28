@@ -67,6 +67,12 @@ ENV_OVERRIDES = {
     # （本机 1800s），既污染会话，也把单条墙钟从分钟级拖到半小时级，终态还会
     # 变成 needs_human/approval_timed_out，与 v2 基线不可比。进程级钉死为 0。
     "FEISHU_PUSH_APPROVAL_ENABLED": "0",
+    # 臂必须是「同一个模型」。`app/cli.py` 用 `LLMConfig.from_env("LLM")` 组配置、
+    # 只覆盖 `model`，所以真正生效的降级链是 `LLM_FALLBACK_MODELS`
+    # （`CHANGE_AGENT_FALLBACK_MODELS` 没有任何读取方）。不钉空的话，主模型 429
+    # 会静默换到 minimax / lightning 继续干活，报告里的 `model` 就不是实际执行的
+    # 模型。实测一轮 biz-050：92 次 429，minimax 被拉起 29 次。
+    "LLM_FALLBACK_MODELS": "",
     "LLM_TIMEOUT": "300",
     "DELIVERY_MAX_STEPS": "120",
     "DELIVERY_MAX_TOKENS": "3000000",

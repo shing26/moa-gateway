@@ -91,6 +91,29 @@ def test_env_disables_feishu_push_approval_even_if_the_parent_enables_it() -> No
     assert env["FEISHU_PUSH_APPROVAL_ENABLED"] == "0"
 
 
+def test_env_pins_the_fallback_chain_empty_so_the_arm_is_one_model(monkeypatch) -> None:
+    """Regression: the arm claims one model, so no silent substitution may happen.
+
+    ``app/cli.py`` builds the client from ``LLMConfig.from_env("LLM")`` and only
+    overrides ``model``; the effective degradation chain is therefore
+    ``LLM_FALLBACK_MODELS``. Leaving it inherited let a 429 retry on minimax and
+    still report the frozen model name.
+    """
+    env = build_env(
+        _case(),
+        {"LLM_FALLBACK_MODELS": "minimaxai/minimax-m3.1-flash"},
+    )
+
+    assert env["LLM_FALLBACK_MODELS"] == ""
+
+    from app.agents.provider import LLMConfig
+
+    monkeypatch.setenv("LLM_FALLBACK_MODELS", env["LLM_FALLBACK_MODELS"])
+    monkeypatch.setenv("LLM_MODEL", env["CHANGE_AGENT_MODEL"])
+
+    assert LLMConfig.from_env("LLM").fallback_models == []
+
+
 def test_env_clears_verify_command_when_case_has_none() -> None:
     """A case without a verify command must not inherit .env's default.
 
