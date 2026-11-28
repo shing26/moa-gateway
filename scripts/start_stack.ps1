@@ -29,6 +29,13 @@
   powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1 -Action status
 
 .NOTES
+  容器项目名：``docker compose`` 默认按**当前目录名**推导项目名。本仓库的容器属于
+  ``moa-gateway`` 项目（``moa-gateway-postgres-1`` / ``moa-gateway-redis-1``）。
+  在 ``.worktrees\<名字>`` 里直接跑 ``docker compose up -d postgres``，会新建
+  ``<目录名>-postgres-1`` **外加一个空数据卷**——看起来「起来了」，连的却是另一套库
+  （2026-11-29 实测：run-main 生成 run-main-postgres-1 + run-main_gateway_pgdata）。
+  真要在别的目录起，显式加 ``-p moa-gateway``；否则一律用本脚本，它固定从仓库根调用。
+
   开机自启（可选，管理员执行一次即可）：
     schtasks /Create /TN "moa-gateway stack" /SC ONLOGON /RL LIMITED ^
       /TR "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File <仓库路径>\scripts\start_stack.ps1"
