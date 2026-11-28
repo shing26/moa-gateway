@@ -313,6 +313,7 @@ uv run python scripts/doctor.py # 环境诊断：Python / .env / 端口 / Redis 
 > **Windows 用户**：请用 `python -m app` 启动（而不是直接 `uvicorn`）——它会在 Uvicorn 建 loop 前切换到 Selector 事件循环，psycopg 的异步 pgvector 连接池需要它。
 
 - 持久化依赖用仓库 Compose 起：`docker compose -f docker-compose.dev.yml up -d redis postgres`（Redis `6380` / pgvector `5433` / 应用 `8081`，避开常用端口）。
+- ⚠️ **别在 `.worktrees\*` 里直接 `docker compose up`**：项目名按当前目录推导，会新建 `<目录名>-postgres-1` 和一个空数据卷，连到的不是同一套数据。要手动起就显式带 `-p moa-gateway`，否则用下面的一键脚本（它固定从仓库根调用）。
 - 演示前一键起停：`powershell -ExecutionPolicy Bypass -File scripts\start_stack.ps1`（按序拉起容器 → Ollama → 应用，等 `/healthz` 通过）。
 - 访问入口：`/dashboard`（管理后台）、`/dashboard/chat`（自主任务对话）、`/health` 与 `/healthz`（健康检查）。
 
